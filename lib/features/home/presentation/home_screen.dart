@@ -1,13 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:transmiti2/app/app_routes.dart';
-import 'package:transmiti2/app/theme/app_colors.dart';
-import 'package:transmiti2/core/app_info.dart';
+import 'package:transmiti2/features/home/presentation/widgets/access_button.dart';
 import 'package:transmiti2/features/home/presentation/widgets/brand_header.dart';
-import 'package:transmiti2/features/home/presentation/widgets/menu_card.dart';
+import 'package:transmiti2/features/home/presentation/widgets/device_status_strip.dart';
+import 'package:transmiti2/features/home/presentation/widgets/next_match_card.dart';
+import 'package:transmiti2/shared/widgets/section_label.dart';
 
-/// Pantalla inicial: identidad de TRANSMITI2 y accesos principales.
+/// Pantalla de inicio: próximo partido, accesos y estado del equipo.
 class HomeScreen extends StatelessWidget {
-  const HomeScreen({super.key});
+  const HomeScreen({super.key, required this.onOpenReplays});
+
+  /// Cambia a la pestaña de repeticiones (la decide la estructura principal).
+  final VoidCallback onOpenReplays;
 
   void _open(BuildContext context, String route) {
     Navigator.of(context).pushNamed(route);
@@ -15,7 +19,6 @@ class HomeScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final TextTheme text = Theme.of(context).textTheme;
     return Scaffold(
       body: SafeArea(
         child: Center(
@@ -25,24 +28,16 @@ class HomeScreen extends StatelessWidget {
               builder: (BuildContext context, BoxConstraints constraints) {
                 final int columns = constraints.maxWidth >= 600 ? 4 : 2;
                 return ListView(
-                  padding: const EdgeInsets.fromLTRB(20, 24, 20, 24),
+                  padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
                   children: <Widget>[
                     const BrandHeader(),
-                    const SizedBox(height: 28),
-                    FilledButton.icon(
-                      onPressed: () => _open(context, AppRoutes.broadcast),
-                      icon: const Icon(Icons.sensors, size: 28),
-                      label: const Text('INICIAR TRANSMISIÓN'),
+                    const SizedBox(height: 20),
+                    NextMatchCard(
+                      onPrepare: () => _open(context, AppRoutes.matchSetup),
+                      onOpenStudio: () => _open(context, AppRoutes.broadcast),
                     ),
                     const SizedBox(height: 28),
-                    Text(
-                      'HERRAMIENTAS DEL PARTIDO',
-                      style: text.labelMedium?.copyWith(
-                        color: AppColors.textMuted,
-                        letterSpacing: 1.4,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
+                    const SectionLabel('ACCESOS'),
                     const SizedBox(height: 12),
                     GridView(
                       shrinkWrap: true,
@@ -51,44 +46,29 @@ class HomeScreen extends StatelessWidget {
                         crossAxisCount: columns,
                         mainAxisSpacing: 12,
                         crossAxisSpacing: 12,
-                        mainAxisExtent: 160,
+                        mainAxisExtent: 56,
                       ),
                       children: <Widget>[
-                        MenuCard(
-                          icon: Icons.sports_score,
-                          title: 'Marcador',
-                          subtitle: 'Goles de ambos equipos',
+                        AccessButton(
+                          label: 'MARCADOR',
                           onTap: () => _open(context, AppRoutes.scoreboard),
                         ),
-                        MenuCard(
-                          icon: Icons.timer,
-                          title: 'Cronómetro',
-                          subtitle: 'Tiempo del partido',
+                        AccessButton(
+                          label: 'CRONÓMETRO',
                           onTap: () => _open(context, AppRoutes.matchClock),
                         ),
-                        MenuCard(
-                          icon: Icons.bar_chart,
-                          title: 'Estadísticas',
-                          subtitle: 'Datos del encuentro',
+                        AccessButton(
+                          label: 'ESTADÍSTICAS',
                           onTap: () => _open(context, AppRoutes.stats),
                         ),
-                        MenuCard(
-                          icon: Icons.replay,
-                          title: 'Repeticiones',
-                          subtitle: 'Clips de jugadas',
-                          onTap: () => _open(context, AppRoutes.replays),
+                        AccessButton(
+                          label: 'REPETICIONES',
+                          onTap: onOpenReplays,
                         ),
                       ],
                     ),
-                    const SizedBox(height: 24),
-                    Center(
-                      child: Text(
-                        'Versión ${AppInfo.version} · Etapa 1',
-                        style: text.bodySmall?.copyWith(
-                          color: AppColors.textMuted,
-                        ),
-                      ),
-                    ),
+                    const SizedBox(height: 16),
+                    const DeviceStatusStrip(),
                   ],
                 );
               },

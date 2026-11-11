@@ -7,7 +7,7 @@ class BroadcastScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return const FeaturePlaceholder(
-      title: 'Transmisión',
+      title: 'Estudio de transmisión',
       icon: Icons.sensors,
       description: 'Aquí configurarás y controlarás la transmisión en vivo.',
     );

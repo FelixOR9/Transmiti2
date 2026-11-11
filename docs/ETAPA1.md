@@ -1,13 +1,14 @@
-# Etapa 1 - Base del proyecto y pantalla principal
+# Etapa 1 - Base del proyecto y pantalla de inicio
 
 ## Qué incluye
 - Proyecto Flutter para Android (la carpeta `android/` la genera el flujo de compilación la primera vez).
-- Pantalla principal con identidad TRANSMITI2 y accesos a: Iniciar transmisión, Marcador, Cronómetro, Estadísticas y Repeticiones.
+- Pantalla de inicio con identidad TRANSMITI2, tarjeta de próximo partido (PREPARAR PARTIDO y ABRIR ESTUDIO DE TRANSMISIÓN), accesos a Marcador, Cronómetro, Estadísticas y Repeticiones, y franja de estado de cámara, micrófono y red.
+- Barra inferior con cuatro pestañas: Inicio, Partido, Repeticiones y Más.
 - Navegación inicial: cada acceso abre una pantalla provisional con botón para volver.
-- Pruebas automáticas: la pantalla principal y la navegación a las cinco pantallas.
+- Pruebas automáticas: la pantalla de inicio, la barra inferior y la navegación a cada pantalla.
 
 ## Qué NO incluye (etapas posteriores)
-Marcador, cronómetro, estadísticas, video, transmisión, grabación, repeticiones y SQLite.
+Configuración real del partido, marcador, cronómetro, estadísticas, video, transmisión, grabación, repeticiones y SQLite. Tampoco la comprobación real de cámara, micrófono y red.
 
 ## Cómo obtener el APK (desde el teléfono)
 1. En el repositorio, pestaña **Actions** -> flujo **TRANSMITI2 - Compilar APK de depuración** -> **Run workflow**.

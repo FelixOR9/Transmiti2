@@ -9,11 +9,13 @@ class FeaturePlaceholder extends StatelessWidget {
     required this.title,
     required this.icon,
     required this.description,
+    this.footnote,
   });
 
   final String title;
   final IconData icon;
   final String description;
+  final String? footnote;
 
   @override
   Widget build(BuildContext context) {
@@ -63,6 +65,16 @@ class FeaturePlaceholder extends StatelessWidget {
                     ),
                   ),
                 ),
+                if (footnote != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 24),
+                    child: Text(
+                      footnote!,
+                      style: text.bodySmall?.copyWith(
+                        color: AppColors.textMuted,
+                      ),
+                    ),
+                  ),
               ],
             ),
           ),
