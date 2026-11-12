@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:transmiti2/app/app.dart';
+import 'package:transmiti2/app/app_services.dart';
 import 'package:transmiti2/features/broadcast/presentation/broadcast_screen.dart';
 import 'package:transmiti2/features/home/presentation/home_screen.dart';
 import 'package:transmiti2/features/home/presentation/widgets/access_button.dart';
@@ -13,11 +14,15 @@ import 'package:transmiti2/features/scoreboard/presentation/scoreboard_screen.da
 import 'package:transmiti2/features/stats/presentation/stats_screen.dart';
 import 'package:transmiti2/shared/widgets/app_bottom_nav.dart';
 
-Future<void> openApp(WidgetTester tester) async {
+import 'support/test_services.dart';
+
+Future<void> openApp(WidgetTester tester, {AppServices? services}) async {
   tester.view.physicalSize = const Size(1080, 2400);
   tester.view.devicePixelRatio = 3.0;
   addTearDown(tester.view.reset);
-  await tester.pumpWidget(const Transmiti2App());
+  await tester.pumpWidget(
+    Transmiti2App(services: services ?? createTestServices()),
+  );
 }
 
 Finder inAccess(String label) {
@@ -80,6 +85,21 @@ void main() {
     expect(find.text('MICRÓFONO'), findsOneWidget);
     expect(find.text('RED'), findsOneWidget);
     expect(find.text('Sin comprobar'), findsNWidgets(3));
+  });
+
+  testWidgets('La tarjeta de inicio muestra el partido guardado', (
+    WidgetTester tester,
+  ) async {
+    final AppServices services = createTestServices();
+    await tester.runAsync(
+      () => services.session.saveSetup(sampleSetup(tournament: 'Liga local')),
+    );
+    await openApp(tester, services: services);
+
+    expect(find.text('Rojo'), findsOneWidget);
+    expect(find.text('Azul'), findsOneWidget);
+    expect(find.text('15/11/2026 · Liga local'), findsOneWidget);
+    expect(find.text('Sin partido configurado'), findsNothing);
   });
 
   testWidgets('La barra inferior muestra las cuatro pestañas', (

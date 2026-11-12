@@ -1,9 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:transmiti2/app/app_routes.dart';
+import 'package:transmiti2/app/app_scope.dart';
+import 'package:transmiti2/core/formatting.dart';
 import 'package:transmiti2/features/home/presentation/widgets/access_button.dart';
 import 'package:transmiti2/features/home/presentation/widgets/brand_header.dart';
 import 'package:transmiti2/features/home/presentation/widgets/device_status_strip.dart';
 import 'package:transmiti2/features/home/presentation/widgets/next_match_card.dart';
+import 'package:transmiti2/features/match/application/match_session.dart';
+import 'package:transmiti2/features/match/domain/match_detail.dart';
 import 'package:transmiti2/shared/widgets/section_label.dart';
 
 /// Pantalla de inicio: próximo partido, accesos y estado del equipo.
@@ -17,8 +21,18 @@ class HomeScreen extends StatelessWidget {
     Navigator.of(context).pushNamed(route);
   }
 
+  /// Línea de detalles del partido: fecha y torneo (si lo hay).
+  String _details(MatchDetail d) {
+    final String? tournament = d.match.tournament;
+    return <String>[
+      formatDate(d.match.scheduledAtMs),
+      if (tournament != null) tournament,
+    ].join(' · ');
+  }
+
   @override
   Widget build(BuildContext context) {
+    final MatchSession session = AppScope.of(context).session;
     return Scaffold(
       body: SafeArea(
         child: Center(
@@ -32,9 +46,19 @@ class HomeScreen extends StatelessWidget {
                   children: <Widget>[
                     const BrandHeader(),
                     const SizedBox(height: 20),
-                    NextMatchCard(
-                      onPrepare: () => _open(context, AppRoutes.matchSetup),
-                      onOpenStudio: () => _open(context, AppRoutes.broadcast),
+                    ListenableBuilder(
+                      listenable: session,
+                      builder: (BuildContext context, Widget? child) {
+                        final MatchDetail? d = session.detail;
+                        return NextMatchCard(
+                          homeName: d?.home.name,
+                          awayName: d?.away.name,
+                          details: d == null ? null : _details(d),
+                          onPrepare: () => _open(context, AppRoutes.matchSetup),
+                          onOpenStudio: () =>
+                              _open(context, AppRoutes.broadcast),
+                        );
+                      },
                     ),
                     const SizedBox(height: 28),
                     const SectionLabel('ACCESOS'),
