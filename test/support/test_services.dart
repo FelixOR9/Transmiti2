@@ -1,15 +1,19 @@
-import 'dart:io';
-
 import 'package:transmiti2/app/app_services.dart';
+import 'package:transmiti2/core/storage/gallery_picker.dart';
 import 'package:transmiti2/core/storage/image_store.dart';
 import 'package:transmiti2/core/time.dart';
 import 'package:transmiti2/features/match/application/match_session.dart';
 import 'package:transmiti2/features/match/domain/soccer_match.dart';
 
+import 'fakes.dart';
 import 'in_memory_repositories.dart';
 
-/// Servicios de prueba: todo en memoria y las imágenes en una carpeta temporal.
-AppServices createTestServices({NowMs? nowMs}) {
+/// Servicios de prueba: todo en memoria, sin disco ni galería real.
+AppServices createTestServices({
+  NowMs? nowMs,
+  GalleryPicker? gallery,
+  ImageStore? images,
+}) {
   final InMemoryTeamRepository teams = InMemoryTeamRepository();
   final InMemoryPlayerRepository players = InMemoryPlayerRepository();
   final InMemorySponsorRepository sponsors = InMemorySponsorRepository();
@@ -19,7 +23,8 @@ AppServices createTestServices({NowMs? nowMs}) {
     players: players,
     sponsors: sponsors,
     matches: matches,
-    images: ImageStore(Directory.systemTemp.createTempSync('transmiti2_test_')),
+    images: images ?? FakeImageStore(),
+    gallery: gallery ?? FakeGalleryPicker(),
     session: MatchSession(
       matches: matches,
       teams: teams,

@@ -5,7 +5,7 @@ La Etapa 2 se construye en tres entregas, cada una verificada por GitHub Actions
 | Entrega | Contenido | Estado |
 |---|---|---|
 | **2A - Base** | Base de datos SQLite con migraciones, modelos, almacén de imágenes, motor del cronómetro, marcador e historial, sesión del partido, pruebas | Entregada |
-| **2B - Preparación** | Formulario de preparación del partido, escudos y colores, jugadores, patrocinadores y logotipos | Pendiente |
+| **2B - Preparación** | Formulario de preparación del partido, escudos y colores, jugadores, patrocinadores y logotipos | Entregada |
 | **2C - Juego** | Pantallas de marcador, cronómetro e historial, y composición gráfica 16:9 | Pendiente |
 
 ## Qué incluye la entrega 2A
@@ -24,8 +24,7 @@ La Etapa 2 se construye en tres entregas, cada una verificada por GitHub Actions
 | `path_provider` | Carpeta privada de la app para las imágenes |
 | `path` | Unir rutas y evitar salirse de la carpeta de imágenes |
 | `sqflite_common_ffi` (solo pruebas) | Probar la base de datos real en el equipo de pruebas |
-
-En la 2B se agregará `image_picker` (galería sin pedir permisos en Android).
+| `image_picker` (entrega 2B) | Elegir escudos y logotipos de la galería con el selector del sistema (no pide permisos) |
 
 ## Estructura de la base de datos (versión 1)
 | Tabla | Contenido |
@@ -53,3 +52,24 @@ En la 2B se agregará `image_picker` (galería sin pedir permisos en Android).
 - Guarda la hora de la última reanudación y el tiempo acumulado antes de ella. El tiempo mostrado siempre es `acumulado + (ahora - última reanudación)`.
 - Por eso no se pierde tiempo si la pantalla se apaga, si Flutter reconstruye la interfaz o si la app se cierra: al abrirla se lee el estado guardado y el tiempo sigue correcto.
 - Límite conocido: depende de la hora del teléfono; si el usuario la cambia manualmente durante un partido, el tiempo se verá afectado.
+
+## Qué incluye la entrega 2B
+Todo se guarda de verdad: los formularios escriben en SQLite a través de `MatchSession` y los repositorios, y las imágenes se copian al almacén privado de la app.
+
+| Función | Dónde | Qué guarda |
+|---|---|---|
+| Preparar partido | Inicio, botón PREPARAR PARTIDO (o pestaña Partido) | Equipos, colores, escudos, torneo (opcional), fecha, duración de cada tiempo y del descanso, patrocinadores elegidos |
+| Escudos | Formulario del partido | Imagen copiada a `images/crests`; en SQLite solo la ruta |
+| Jugadores | Formulario del partido o pestaña Partido | Nombre y número (1 a 99, sin repetir dentro del equipo); opcional |
+| Patrocinadores | Pestaña Más, o ADMINISTRAR PATROCINADORES en el formulario | Nombre y logotipo (`images/logos`); sin límite de cantidad |
+| Elegir patrocinadores del partido | Formulario del partido | Selección y orden (el orden de elección se conserva) |
+| Resumen del partido | Pestaña Partido | Muestra escudos, nombres, resultado y patrocinadores |
+
+Reglas de las imágenes en los formularios:
+- Al cargar o reemplazar una imagen, la anterior **no** se borra hasta que se guarda el formulario. Si se cancela, se borra la recién cargada y queda la anterior.
+- Antes de borrar cualquier archivo se comprueba que ningún equipo ni patrocinador lo use todavía.
+- Si el nombre escrito coincide con un equipo ya registrado, se toman su escudo y su color para no perderlos al repetir el equipo en otro partido.
+- Si el archivo no es PNG/JPG/JPEG o está dañado, se muestra un mensaje y no se guarda nada.
+
+## Pendiente (entrega 2C)
+Pantalla de marcador (botones de gol, corrección con confirmación), pantalla del cronómetro, pantalla del historial de eventos y composición gráfica 16:9 con zonas de patrocinadores. La lógica de marcador, cronómetro e historial ya existe y está probada desde la 2A; falta su interfaz.

@@ -1,0 +1,7 @@
+# Dependencias que el flujo de GitHub agrega al proyecto si faltan.
+# dep = de la app, dev = solo para pruebas.
+dep sqflite
+dep path_provider
+dep path
+dep image_picker
+dev sqflite_common_ffi

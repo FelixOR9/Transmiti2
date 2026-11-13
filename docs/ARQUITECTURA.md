@@ -31,22 +31,31 @@ lib/
     time.dart                    Hora actual (inyectable en pruebas)
     db/                          Esquema SQLite, migraciones y apertura de la base
     storage/image_store.dart     Almacén persistente de escudos y logotipos
+    storage/image_draft.dart     Imagen en edición: reemplazar/quitar sin perder archivos en uso
+    storage/gallery_picker.dart  Galería del teléfono (image_picker) detrás de una interfaz
   shared/widgets/
     app_button.dart              Botón principal (verde) y secundario (azul)
     app_bottom_nav.dart          Barra de navegación inferior
     section_label.dart           Rótulo de sección en mayúsculas
+    app_input.dart               Estilo de los campos de texto
+    stored_image.dart            Escudo o logotipo guardado (sin deformarse)
+    image_field.dart             Vista previa + cargar / reemplazar / quitar imagen
+    color_palette.dart           Selector de color del equipo
+    number_stepper.dart          Número con botones -5, -1, +1, +5
+    confirm_dialog.dart          Confirmación antes de eliminar
     feature_placeholder.dart     Pantalla "Próximamente" provisional
   features/
     shell/                       Pestañas + barra inferior
     home/                        Inicio: próximo partido, accesos, estado del equipo
     match/                       Partido: dominio, repositorios, sesión (ver abajo)
-                                 y pantallas Partido / Preparar partido (provisionales)
+                                 y pantallas: Partido, Preparar partido y Jugadores
     broadcast/                   Estudio de transmisión (provisional)
     scoreboard/                  Marcador (provisional)
     match_clock/                 Motor del cronómetro (domain) y pantalla (provisional)
     stats/                       Estadísticas (provisional)
     replays/                     Repeticiones (provisional)
-    more/                        Más: ajustes e información (provisional)
+    sponsors/                    Patrocinadores: lista y alta/edición con logotipo
+    more/                        Más: acceso a patrocinadores y versión
 ```
 
 ## Decisiones de la Etapa 1
@@ -75,3 +84,10 @@ features/match_clock/domain/match_clock.dart
 - Para la futura transmisión, el estado del partido (equipos, marcador, reloj, patrocinadores) se obtiene siempre desde `MatchSession`, de modo que los gráficos de video y la interfaz muestren los mismos datos.
 
 Detalles de la base de datos, las imágenes y el cronómetro: `docs/ETAPA2.md`.
+
+## Etapa 2B: formularios conectados al almacenamiento
+- Las pantallas leen y escriben **solo** a través de `AppServices` (repositorios SQLite, `ImageStore`, `MatchSession`); no hay datos de ejemplo ni formularios que simulen guardar.
+- `AppServices.gallery` abre la galería real en el teléfono; en las pruebas se sustituye por una galería falsa sin tocar el disco.
+- `ImageDraft` encapsula el ciclo de vida de una imagen dentro de un formulario: cargar → (guardar | cancelar). `AppServices.isImageInUse` impide borrar archivos que todavía usa algún equipo o patrocinador.
+- El formulario del partido reconoce equipos ya registrados por su nombre y reutiliza su escudo y color.
+- Cambios de plantilla o de patrocinadores llaman a `MatchSession.load()` para que el partido actual siempre muestre datos al día.
