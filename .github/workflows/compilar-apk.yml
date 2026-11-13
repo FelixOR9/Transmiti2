@@ -58,6 +58,7 @@ jobs:
           add sqflite
           add path_provider
           add path
+          add image_picker
           grep -q "^  sqflite_common_ffi:" pubspec.yaml || flutter pub add --dev sqflite_common_ffi
 
       - name: flutter pub get
