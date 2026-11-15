@@ -245,11 +245,14 @@ class InMemoryMatchRepository implements MatchRepository {
     MatchStatus? status,
     MatchEvent? event,
   }) async {
+    // Atómico, como la transacción de SQLite: primero el evento (puede fallar)
+    // y solo después se cambian el cronómetro y el estado.
+    final MatchEvent? saved = event == null ? null : await addEvent(event);
     _clocks[matchId] = clock;
     if (status != null) {
       _matches[matchId] = _matches[matchId]!.copyWith(status: status);
     }
-    return event == null ? null : addEvent(event);
+    return saved;
   }
 
   @override

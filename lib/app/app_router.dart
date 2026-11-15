@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:transmiti2/app/app_routes.dart';
 import 'package:transmiti2/features/broadcast/presentation/broadcast_screen.dart';
+import 'package:transmiti2/features/graphics/presentation/graphics_preview_screen.dart';
+import 'package:transmiti2/features/history/presentation/events_history_screen.dart';
+import 'package:transmiti2/features/live/presentation/live_match_screen.dart';
 import 'package:transmiti2/features/match/presentation/match_setup_screen.dart';
 import 'package:transmiti2/features/match/presentation/players_screen.dart';
 import 'package:transmiti2/features/match_clock/presentation/match_clock_screen.dart';
@@ -27,6 +30,9 @@ abstract final class AppRouter {
         _ => const MainShell(),
       },
       AppRoutes.sponsors => const SponsorsScreen(),
+      AppRoutes.live => const LiveMatchScreen(),
+      AppRoutes.history => const EventsHistoryScreen(),
+      AppRoutes.graphics => const GraphicsPreviewScreen(),
       AppRoutes.scoreboard => const ScoreboardScreen(),
       AppRoutes.matchClock => const MatchClockScreen(),
       AppRoutes.stats => const StatsScreen(),

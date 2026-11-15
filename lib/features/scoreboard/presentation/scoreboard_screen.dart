@@ -1,15 +1,12 @@
 import 'package:flutter/material.dart';
-import 'package:transmiti2/shared/widgets/feature_placeholder.dart';
+import 'package:transmiti2/features/live/presentation/live_match_screen.dart';
 
+/// Marcador: la pantalla de control del partido, con los goles primero.
 class ScoreboardScreen extends StatelessWidget {
   const ScoreboardScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return const FeaturePlaceholder(
-      title: 'Marcador',
-      icon: Icons.sports_score,
-      description: 'Aquí registrarás los goles de ambos equipos.',
-    );
+    return const LiveMatchScreen(title: 'Marcador');
   }
 }

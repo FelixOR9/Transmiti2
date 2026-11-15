@@ -8,6 +8,9 @@ abstract final class AppRoutes {
   static const String matchSetup = '/partido/preparar';
   static const String players = '/partido/jugadores';
   static const String sponsors = '/patrocinadores';
+  static const String live = '/en-vivo';
+  static const String history = '/historial';
+  static const String graphics = '/graficos';
   static const String scoreboard = '/marcador';
   static const String matchClock = '/cronometro';
   static const String stats = '/estadisticas';

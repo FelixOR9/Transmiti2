@@ -3,6 +3,7 @@ import 'package:transmiti2/app/app_routes.dart';
 import 'package:transmiti2/app/app_scope.dart';
 import 'package:transmiti2/app/theme/app_colors.dart';
 import 'package:transmiti2/core/formatting.dart';
+import 'package:transmiti2/features/home/presentation/widgets/access_button.dart';
 import 'package:transmiti2/features/match/application/match_session.dart';
 import 'package:transmiti2/features/match/domain/match_detail.dart';
 import 'package:transmiti2/features/match/domain/sponsor.dart';
@@ -193,10 +194,45 @@ class _MatchSummary extends StatelessWidget {
             ],
             const SizedBox(height: 24),
             AppButton.primary(
-              key: const Key('edit-match'),
-              label: 'EDITAR PARTIDO',
-              onPressed: () =>
-                  Navigator.of(context).pushNamed(AppRoutes.matchSetup),
+              key: const Key('open-live'),
+              label: 'PARTIDO EN VIVO',
+              onPressed: () => Navigator.of(context).pushNamed(AppRoutes.live),
+            ),
+            const SizedBox(height: 12),
+            GridView(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 2,
+                mainAxisSpacing: 12,
+                crossAxisSpacing: 12,
+                mainAxisExtent: 56,
+              ),
+              children: <Widget>[
+                AccessButton(
+                  key: const Key('tab-history'),
+                  label: 'HISTORIAL',
+                  onTap: () =>
+                      Navigator.of(context).pushNamed(AppRoutes.history),
+                ),
+                AccessButton(
+                  key: const Key('tab-stats'),
+                  label: 'ESTADÍSTICAS',
+                  onTap: () => Navigator.of(context).pushNamed(AppRoutes.stats),
+                ),
+                AccessButton(
+                  key: const Key('tab-graphics'),
+                  label: 'GRÁFICOS',
+                  onTap: () =>
+                      Navigator.of(context).pushNamed(AppRoutes.graphics),
+                ),
+                AccessButton(
+                  key: const Key('edit-match'),
+                  label: 'EDITAR PARTIDO',
+                  onTap: () =>
+                      Navigator.of(context).pushNamed(AppRoutes.matchSetup),
+                ),
+              ],
             ),
             const SizedBox(height: 12),
             AppButton.secondary(

@@ -6,7 +6,7 @@ La Etapa 2 se construye en tres entregas, cada una verificada por GitHub Actions
 |---|---|---|
 | **2A - Base** | Base de datos SQLite con migraciones, modelos, almacén de imágenes, motor del cronómetro, marcador e historial, sesión del partido, pruebas | Entregada |
 | **2B - Preparación** | Formulario de preparación del partido, escudos y colores, jugadores, patrocinadores y logotipos | Entregada |
-| **2C - Juego** | Pantallas de marcador, cronómetro e historial, y composición gráfica 16:9 | Pendiente |
+| **2C - Juego** | Partido en vivo (marcador, cronómetro, goles y correcciones), historial, estadísticas y composición gráfica 16:9 | Entregada (ver `docs/ETAPA2C.md`) |
 
 ## Qué incluye la entrega 2A
 - **Base de datos SQLite local** (sin internet) con migraciones por versión.
@@ -71,5 +71,5 @@ Reglas de las imágenes en los formularios:
 - Si el nombre escrito coincide con un equipo ya registrado, se toman su escudo y su color para no perderlos al repetir el equipo en otro partido.
 - Si el archivo no es PNG/JPG/JPEG o está dañado, se muestra un mensaje y no se guarda nada.
 
-## Pendiente (entrega 2C)
-Pantalla de marcador (botones de gol, corrección con confirmación), pantalla del cronómetro, pantalla del historial de eventos y composición gráfica 16:9 con zonas de patrocinadores. La lógica de marcador, cronómetro e historial ya existe y está probada desde la 2A; falta su interfaz.
+## Entrega 2C
+El control del partido en vivo está descrito en `docs/ETAPA2C.md`: pantalla de partido en vivo, goles y correcciones, cronómetro, historial, estadísticas y composición gráfica 16:9 con patrocinadores. Lo que sigue pendiente de toda la Etapa 2 es únicamente la integración con video y transmisión, que corresponde a la siguiente etapa.

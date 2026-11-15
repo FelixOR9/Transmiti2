@@ -29,6 +29,7 @@ lib/
     app_info.dart                Nombre y versión
     formatting.dart              Formato de fechas y del reloj (MM:SS)
     time.dart                    Hora actual (inyectable en pruebas)
+    action_guard.dart            Protección contra doble toque
     db/                          Esquema SQLite, migraciones y apertura de la base
     storage/image_store.dart     Almacén persistente de escudos y logotipos
     storage/image_draft.dart     Imagen en edición: reemplazar/quitar sin perder archivos en uso
@@ -55,6 +56,11 @@ lib/
     stats/                       Estadísticas (provisional)
     replays/                     Repeticiones (provisional)
     sponsors/                    Patrocinadores: lista y alta/edición con logotipo
+    live/                        Partido en vivo: pantalla, cabecera, barra de controles,
+                                 tarjeta del cronómetro, diálogo y lista de goles, reloj en vivo
+    history/                     Historial de eventos
+    graphics/                    Composición gráfica 16:9 (datos, zonas de patrocinadores,
+                                 dibujo y vista previa)
     more/                        Más: acceso a patrocinadores y versión
 ```
 
@@ -91,3 +97,12 @@ Detalles de la base de datos, las imágenes y el cronómetro: `docs/ETAPA2.md`.
 - `ImageDraft` encapsula el ciclo de vida de una imagen dentro de un formulario: cargar → (guardar | cancelar). `AppServices.isImageInUse` impide borrar archivos que todavía usa algún equipo o patrocinador.
 - El formulario del partido reconoce equipos ya registrados por su nombre y reutiliza su escudo y color.
 - Cambios de plantilla o de patrocinadores llaman a `MatchSession.load()` para que el partido actual siempre muestre datos al día.
+
+## Etapa 2C: interfaz del partido en vivo
+- Toda la interfaz del partido pasa por `MatchSession`; ninguna pantalla habla con SQLite directamente.
+- `LiveClock` repinta el reloj, pero el tiempo siempre se calcula con la hora real a partir del estado guardado; por eso sobrevive a bloqueos, minimizaciones y reinicios.
+- `ControlBar` (goles y acción principal) está fija abajo, al alcance del pulgar; las acciones destructivas piden confirmación (`confirmAction`) y todas las acciones pasan por `ActionGuard`.
+- `MatchStats` (estadísticas) y `buildOverlayData` (composición gráfica) son funciones puras sobre los eventos y la sesión: se prueban sin teléfono y no inventan datos.
+- `BroadcastOverlay` se dibuja sobre un lienzo de 1280 x 720 escalado al ancho disponible y con fondo transparente, para poder reutilizarlo como superposición de video en la etapa de transmisión.
+
+Detalles, decisiones y tabla de pruebas: `docs/ETAPA2C.md`.

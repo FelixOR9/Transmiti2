@@ -13,6 +13,8 @@ AppServices createTestServices({
   NowMs? nowMs,
   GalleryPicker? gallery,
   ImageStore? images,
+  Duration? clockTick,
+  Duration tapCooldown = Duration.zero,
 }) {
   final InMemoryTeamRepository teams = InMemoryTeamRepository();
   final InMemoryPlayerRepository players = InMemoryPlayerRepository();
@@ -25,6 +27,8 @@ AppServices createTestServices({
     matches: matches,
     images: images ?? FakeImageStore(),
     gallery: gallery ?? FakeGalleryPicker(),
+    clockTick: clockTick,
+    tapCooldown: tapCooldown,
     session: MatchSession(
       matches: matches,
       teams: teams,

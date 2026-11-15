@@ -22,6 +22,8 @@ class AppServices {
     required this.images,
     required this.gallery,
     required this.session,
+    this.clockTick = const Duration(milliseconds: 250),
+    this.tapCooldown = const Duration(milliseconds: 700),
   });
 
   final TeamRepository teams;
@@ -31,6 +33,15 @@ class AppServices {
   final ImageStore images;
   final GalleryPicker gallery;
   final MatchSession session;
+
+  /// Cada cuánto se repinta el reloj en pantalla. El tiempo siempre se calcula
+  /// con la hora real, así que esto solo afecta a la fluidez visual. Nulo
+  /// desactiva el repintado periódico (se usa en las pruebas).
+  final Duration? clockTick;
+
+  /// Tiempo durante el cual se ignoran toques repetidos tras una acción
+  /// (evita que un doble toque registre dos goles).
+  final Duration tapCooldown;
 
   /// Indica si algún equipo o patrocinador usa todavía esa imagen. Se usa
   /// antes de borrar un archivo para no perder imágenes que siguen en uso.
