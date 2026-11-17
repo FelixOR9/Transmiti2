@@ -33,7 +33,7 @@ class StreamEngineImplTest {
     ) : SurfaceProducerHandle {
         var size: Pair<Int, Int>? = null
         var released = false
-        var callback: SurfaceProducerCallback? = null
+        var lastCallback: SurfaceProducerCallback? = null
 
         override fun setSize(width: Int, height: Int) {
             size = width to height
@@ -42,7 +42,7 @@ class StreamEngineImplTest {
         override fun surface(): Any? = Object()
 
         override fun setCallback(callback: SurfaceProducerCallback?) {
-            this.callback = callback
+            this.lastCallback = callback
         }
 
         override fun release() {
@@ -295,7 +295,7 @@ class StreamEngineImplTest {
             val engine = fixture.engine()
 
             engine.startPreview()
-            fixture.handle.callback?.onSurfaceCleanup()
+            fixture.handle.lastCallback?.onSurfaceCleanup()
 
             assertEquals(1, fixture.session.closeCalls)
             assertFalse(fixture.handle.released)
@@ -314,8 +314,8 @@ class StreamEngineImplTest {
             val engine = fixture.engine()
 
             engine.startPreview()
-            fixture.handle.callback?.onSurfaceCleanup()
-            fixture.handle.callback?.onSurfaceAvailable()
+            fixture.handle.lastCallback?.onSurfaceCleanup()
+            fixture.handle.lastCallback?.onSurfaceAvailable()
 
             assertEquals(2, fixture.factoryCalls)
             assertEquals(2, fixture.session.openCalls)
@@ -340,7 +340,7 @@ class StreamEngineImplTest {
         val engine = fixture.engine()
 
         engine.startPreview()
-        fixture.handle.callback?.onSurfaceAvailable()
+        fixture.handle.lastCallback?.onSurfaceAvailable()
 
         assertEquals(1, fixture.factoryCalls)
         assertEquals(1, fixture.session.openCalls)
