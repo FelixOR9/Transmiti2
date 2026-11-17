@@ -6,13 +6,21 @@ name: TRANSMITI2 - Compilar APK de depuración
 # El CI ya no escribe en el repositorio: permissions contents: read.
 # Dispara en push y pull_request a Etapa-3, y manualmente.
 #
+# CAMBIO v2 (pruebas Kotlin): se agrega el paso "Pruebas unitarias Kotlin"
+# (./gradlew :app:testDebugUnitTest), que ejecuta StreamAadTest.kt: AAD
+# canónico por destino, validación de URL RTMPS y guarda de Keystore que
+# falla cerrado. Hasta ahora esas 3 pruebas no se habían ejecutado en
+# ningún lado: el APK compilaba, pero los tests Kotlin no corrían.
+# Si fallan, el CI falla antes de subir el artefacto.
+#
 # NOTA (Fase 3.0): android/gradlew, android/gradlew.bat y
 # android/gradle/wrapper/gradle-wrapper.jar NO están en el repositorio:
 # android/.gitignore los excluye (es el .gitignore estándar de Flutter).
-# Por eso la verificación de versiones SDK con ./gradlew VA DESPUÉS de
-# "flutter build apk --debug": ese paso regenera el wrapper (gradlew +
-# gradle-wrapper.jar) antes de invocarlo. No mover el paso SDK antes del
-# build, porque en un checkout limpio no existe ./gradlew.
+# Por eso la verificación de versiones SDK y las pruebas Kotlin con
+# ./gradlew VAN DESPUÉS de "flutter build apk --debug": ese paso regenera
+# el wrapper (gradlew + gradle-wrapper.jar) antes de invocarlo. No mover
+# los pasos de ./gradlew antes del build, porque en un checkout limpio
+# no existe ./gradlew.
 
 on:
   push:
@@ -63,6 +71,10 @@ jobs:
 
       - name: Compilar el APK de depuración
         run: flutter build apk --debug
+
+      - name: Pruebas unitarias Kotlin
+        working-directory: android
+        run: ./gradlew :app:testDebugUnitTest
 
       - name: Verificar versiones SDK efectivas
         working-directory: android
