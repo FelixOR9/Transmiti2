@@ -1,5 +1,6 @@
 package com.transmiti2.transmiti2.streaming
 
+import android.hardware.camera2.CameraCharacteristics
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -25,7 +26,10 @@ class StreamEngineImplTest {
         size = VideoSize(1280, 720),
         fpsRange = FpsRange(30, 30),
         sensorOrientation = 90,
-        lensFacing = 0,
+        // Cámara trasera: en CameraCharacteristics, LENS_FACING_BACK = 1
+        // (0 es LENS_FACING_FRONT). La cámara "0" es la trasera; con 0
+        // el motor devuelve "front" y la aserción de lensFacing falla.
+        lensFacing = CameraCharacteristics.LENS_FACING_BACK,
     )
 
     private class FakeHandle(
