@@ -2,6 +2,9 @@ package com.transmiti2.transmiti2.streaming
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -23,13 +26,23 @@ import org.junit.Test
 class StreamChannelHandlerErrorMappingTest {
 
     @Test
-    fun `timeout es camera_timeout, no cancelacion generica`() {
-        // El constructor TimeoutCancellationException(message) es interno
-        // en kotlinx-coroutines; el público es el sin argumentos. El
-        // mapeo solo depende del tipo (el mensaje lo fija la producción,
-        // "Tiempo de espera agotado al iniciar la cámara (5 s)."), así
-        // que el constructor sin argumentos mantiene el sentido del test.
-        val mapped = mapStartPreviewError(TimeoutCancellationException())
+    fun `timeout es camera_timeout, no cancelacion generica`() = runBlocking {
+        // TimeoutCancellationException no tiene ningún constructor
+        // público usable directamente en esta versión de
+        // kotlinx-coroutines (el sin argumentos no existe y el de
+        // (message) es interno, como ya se vio en los runs #28 y #29):
+        // la única forma de obtener una instancia real es producirla
+        // con withTimeout. El mapeo solo depende del tipo (el mensaje
+        // lo fija la producción, "Tiempo de espera agotado al iniciar
+        // la cámara (5 s)."), así que la instancia real mantiene el
+        // sentido del test sin debilitarlo.
+        val timeout: TimeoutCancellationException = try {
+            withTimeout(1) { delay(10) }
+            error("Se esperaba TimeoutCancellationException")
+        } catch (e: TimeoutCancellationException) {
+            e
+        }
+        val mapped = mapStartPreviewError(timeout)
         assertEquals(StreamContract.CAMERA_TIMEOUT, mapped.code)
         assertTrue(mapped.message.contains("5 s"))
         // Los details base usan la etapa del manejador.
