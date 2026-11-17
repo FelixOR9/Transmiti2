@@ -24,9 +24,12 @@ class StreamChannelHandlerErrorMappingTest {
 
     @Test
     fun `timeout es camera_timeout, no cancelacion generica`() {
-        val mapped = mapStartPreviewError(
-            TimeoutCancellationException("Timed out waiting for 5000 ms"),
-        )
+        // El constructor TimeoutCancellationException(message) es interno
+        // en kotlinx-coroutines; el público es el sin argumentos. El
+        // mapeo solo depende del tipo (el mensaje lo fija la producción,
+        // "Tiempo de espera agotado al iniciar la cámara (5 s)."), así
+        // que el constructor sin argumentos mantiene el sentido del test.
+        val mapped = mapStartPreviewError(TimeoutCancellationException())
         assertEquals(StreamContract.CAMERA_TIMEOUT, mapped.code)
         assertTrue(mapped.message.contains("5 s"))
         // Los details base usan la etapa del manejador.
