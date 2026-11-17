@@ -1,6 +1,8 @@
 import 'package:transmiti2/core/time.dart';
+import 'package:transmiti2/features/streaming/application/permission_controller.dart';
 import 'package:transmiti2/features/streaming/application/streaming_service.dart';
 import 'package:transmiti2/features/streaming/data/stream_destination_repository.dart';
+import 'package:transmiti2/features/streaming/domain/permission_state.dart';
 import 'package:transmiti2/features/streaming/domain/stream_contract.dart';
 import 'package:transmiti2/features/streaming/domain/stream_destination.dart';
 
@@ -28,6 +30,12 @@ class StreamingController {
   final StreamingService _service;
   final NowMs _nowMs;
 
+  /// Flujo de permisos en la UI (subetapa 3.1.0): estados, solicitud y
+  /// re-consulta al regresar a la app. Se crea perezosamente sobre el
+  /// mismo servicio para que las pantallas compartan los estados.
+  late final PermissionController permissions =
+      PermissionController(service: _service);
+
   Future<List<StreamDestination>> listDestinations() =>
       _destinations.all();
 
@@ -35,8 +43,18 @@ class StreamingController {
 
   Future<StreamStatus> getStatus() => _service.getStatus();
 
-  Future<({bool camera, bool microphone})> checkPermissions() =>
+  /// Solo lectura: estados de cámara, micrófono y notificaciones, sin
+  /// mostrar diálogos.
+  Future<PermissionStates> checkPermissions() =>
       _service.checkPermissions();
+
+  /// Pide los permisos indicados y devuelve los estados resultantes.
+  Future<PermissionStates> requestPermissions({
+    required List<PermissionKind> permissions,
+  }) => _service.requestPermissions(permissions: permissions);
+
+  /// Abre los ajustes de la aplicación (denegación permanente).
+  Future<void> openAppSettings() => _service.openAppSettings();
 
   Future<StreamDestination> saveManualDestination({
     required String label,

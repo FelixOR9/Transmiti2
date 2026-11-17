@@ -1,12 +1,28 @@
 import 'package:transmiti2/features/streaming/application/streaming_service.dart';
 import 'package:transmiti2/features/streaming/data/stream_destination_repository.dart';
+import 'package:transmiti2/features/streaming/domain/permission_state.dart';
 import 'package:transmiti2/features/streaming/domain/stream_contract.dart';
 import 'package:transmiti2/features/streaming/domain/stream_destination.dart';
 
 /// Servicio de transmisión falso, solo para pruebas: guarda las claves en
 /// memoria en vez de en el almacén seguro de Android. Nunca se usa en la app.
+///
+/// Los permisos se controlan desde la prueba: `permissionStates` es lo
+/// que devuelve `checkPermissions()` y `requestOutcomes` fija el resultado
+/// de `requestPermissions()` por permiso (los permisos sin resultado fijado
+/// conservan su estado).
 class FakeStreamingService implements StreamingService {
   final Map<int, String> keys = <int, String>{};
+
+  PermissionStates permissionStates =
+      const PermissionStates.allNotRequested();
+
+  final Map<PermissionKind, PermissionStatus> requestOutcomes =
+      <PermissionKind, PermissionStatus>{};
+
+  int requestPermissionsCalls = 0;
+  List<PermissionKind> lastRequestedPermissions = const <PermissionKind>[];
+  int openAppSettingsCalls = 0;
 
   @override
   Future<StreamStatus> getStatus() async {
@@ -19,9 +35,35 @@ class FakeStreamingService implements StreamingService {
   }
 
   @override
-  Future<({bool camera, bool microphone})> checkPermissions() async {
-    return (camera: false, microphone: false);
+  Future<PermissionStates> checkPermissions() async {
+    return permissionStates;
   }
+
+  @override
+  Future<PermissionStates> requestPermissions({
+    required List<PermissionKind> permissions,
+  }) async {
+    requestPermissionsCalls++;
+    lastRequestedPermissions = List<PermissionKind>.unmodifiable(permissions);
+    PermissionStates updated = permissionStates;
+    for (final PermissionKind kind in permissions) {
+      final PermissionStatus? outcome = requestOutcomes[kind];
+      if (outcome != null) {
+        updated = updated.copyWithStatus(kind, outcome);
+      }
+    }
+    permissionStates = updated;
+    return permissionStates;
+  }
+
+  @override
+  Future<void> openAppSettings() async {
+    openAppSettingsCalls++;
+  }
+
+  @override
+  Stream<Map<String, Object?>> get events =>
+      const Stream<Map<String, Object?>>.empty();
 
   @override
   Future<void> saveStreamKey({
@@ -45,7 +87,12 @@ class FakeStreamingService implements StreamingService {
   }
 
   @override
-  Future<void> startPreview() async {
+  Future<PreviewInfo> startPreview() async {
+    throw const StreamingException(StreamContract.notAvailableInPhase30);
+  }
+
+  @override
+  Future<void> stopPreview() async {
     throw const StreamingException(StreamContract.notAvailableInPhase30);
   }
 
@@ -55,7 +102,14 @@ class FakeStreamingService implements StreamingService {
   }
 
   @override
-  Future<void> startRecording() async {
+  Future<String> startRecording({
+    RecordingOptions options = const RecordingOptions(),
+  }) async {
+    throw const StreamingException(StreamContract.notAvailableInPhase30);
+  }
+
+  @override
+  Future<RecordingInfo> stopRecording() async {
     throw const StreamingException(StreamContract.notAvailableInPhase30);
   }
 

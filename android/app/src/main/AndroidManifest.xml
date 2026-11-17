@@ -4,12 +4,20 @@
          son peligrosos: declararlos NO los pide ni los concede; la
          solicitud en tiempo de ejecución llega en la Fase 3.1, en el
          momento de usar la vista previa y con el motivo explicado antes.
-         No hay ningún <service> en la Fase 3.0: el servicio en primer
-         plano existe solo como esqueleto sin registrar y se activa en 3.1. -->
+         Subetapa 3.1.0: el servicio en primer plano ya está registrado
+         (tipos camera|microphone) y los permisos normales del servicio
+         declarados; el servicio todavía no arranca sesiones reales de
+         grabación (eso llega en 3.1.2). POST_NOTIFICATIONS es peligroso
+         (API 33+): se pide al iniciar la grabación, nunca al arrancar. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <application
         android:label="TRANSMITI2"
         android:name="${applicationName}"
@@ -41,6 +49,14 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+        <!-- Subetapa 3.1.0: servicio en primer plano registrado con los
+             dos tipos (camera|microphone); la máscara activa se elige en
+             startForeground() según el escenario de grabación (3.1.2).
+             No exportado: solo lo arranca la propia app. -->
+        <service
+            android:name=".streaming.StreamForegroundService"
+            android:foregroundServiceType="camera|microphone"
+            android:exported="false" />
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

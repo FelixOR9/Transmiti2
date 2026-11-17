@@ -1,22 +1,34 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:transmiti2/app/app_scope.dart';
 import 'package:transmiti2/app/theme/app_colors.dart';
+import 'package:transmiti2/features/streaming/application/permission_controller.dart';
 import 'package:transmiti2/features/streaming/application/streaming_controller.dart';
 import 'package:transmiti2/features/streaming/application/streaming_service.dart';
+import 'package:transmiti2/features/streaming/domain/permission_state.dart';
 import 'package:transmiti2/features/streaming/domain/stream_destination.dart';
 import 'package:transmiti2/shared/widgets/app_button.dart';
 import 'package:transmiti2/shared/widgets/app_input.dart';
 import 'package:transmiti2/shared/widgets/section_label.dart';
 
-/// Estudio de transmisión (Fase 3.0).
+/// Estudio de transmisión (subetapa 3.1.0).
 ///
-/// Lo que hace en esta fase: guardar el destino manual de Facebook Live
-/// (URL RTMPS + clave) y elegir el destino activo. La clave se guarda
-/// cifrada en el teléfono y nunca se muestra ni se guarda en la base.
+/// Lo que hace: guardar el destino manual de Facebook Live (URL RTMPS +
+/// clave) y elegir el destino activo. La clave se guarda cifrada en el
+/// teléfono y nunca se muestra ni se guarda en la base.
 ///
-/// Lo que NO hace todavía: vista previa (Fase 3.1), transmisión ni
-/// grabación (Fase 3.2). Esos botones aparecen deshabilitados con la fase
-/// en la que llegan. En esta fase no se pide cámara ni micrófono.
+/// Permisos (3.1.0): no se pide ningún permiso al entrar. Al tocar
+/// "Vista previa" se pide la cámara con un motivo en la app antes del
+/// diálogo del sistema. Si se concede, se muestra el estado honesto: la
+/// vista previa real llega en la subetapa 3.1.1 (no hay cámara ficticia).
+/// Si se deniega, se puede reintentar; si se deniega permanentemente, se
+/// ofrece abrir los ajustes de la aplicación. El micrófono no se pide
+/// todavía: su camino queda construido para la subetapa 3.1.3.
+///
+/// Lo que NO hace todavía: vista previa (3.1.1), transmisión ni
+/// grabación (3.1.2 / Fase 3.2). Esos botones aparecen deshabilitados con
+/// la fase en la que llegan.
 class BroadcastScreen extends StatefulWidget {
   const BroadcastScreen({super.key});
 
@@ -34,6 +46,7 @@ class _BroadcastScreenState extends State<BroadcastScreen> {
   bool _saving = false;
   bool _loading = true;
   bool _didLoad = false;
+  late PermissionController _permissions;
 
   StreamingController get _streaming => AppScope.of(context).streaming;
 
@@ -45,11 +58,15 @@ class _BroadcastScreenState extends State<BroadcastScreen> {
     if (!_didLoad) {
       _didLoad = true;
       _refresh();
+      _permissions = _streaming.permissions;
+      _permissions.attach();
+      unawaited(_permissions.refresh());
     }
   }
 
   @override
   void dispose() {
+    _permissions.detach();
     _labelController.dispose();
     _urlController.dispose();
     _keyController.dispose();
@@ -102,6 +119,106 @@ class _BroadcastScreenState extends State<BroadcastScreen> {
   Future<void> _setActive(StreamDestination destination) async {
     await _streaming.setActiveDestination(destination.id);
     await _refresh();
+  }
+
+  /// Flujo de "Vista previa": motivo en la app, diálogo del sistema y
+  /// estado honesto después. Nunca se pide el permiso al entrar ni se
+  /// muestra una cámara ficticia.
+  void _onPreviewTap() {
+    unawaited(_requestCameraPreview());
+  }
+
+  Future<void> _requestCameraPreview() async {
+    final PermissionStatus current = _permissions.states.camera;
+    if (current == PermissionStatus.granted) {
+      return;
+    }
+    if (current == PermissionStatus.permanentlyDenied) {
+      final bool? open = await _showSettingsDialog();
+      if (open == true && mounted) {
+        await _permissions.openAppSettings();
+      }
+      return;
+    }
+    final bool? allow = await _showRationaleDialog();
+    if (allow != true || !mounted) {
+      return;
+    }
+    try {
+      final PermissionStatus result =
+          await _permissions.request(PermissionKind.camera);
+      if (!mounted) {
+        return;
+      }
+      if (result == PermissionStatus.permanentlyDenied) {
+        final bool? open = await _showSettingsDialog();
+        if (open == true && mounted) {
+          await _permissions.openAppSettings();
+        }
+      }
+    } on StreamingException catch (e) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo pedir el permiso: ${e.code}')),
+      );
+    }
+  }
+
+  /// Motivo en la app, antes del diálogo del sistema.
+  Future<bool?> _showRationaleDialog() {
+    return showDialog<bool>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          title: const Text('Permiso de cámara'),
+          content: const Text(
+            'TRANSMITI2 usa la cámara trasera para mostrar la vista '
+            'previa del partido. El permiso solo se usa cuando abres la '
+            'vista previa.',
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('CANCELAR'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('PERMITIR CÁMARA'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// Denegación permanente: el diálogo del sistema ya no haría nada;
+  /// se ofrece abrir los ajustes de la aplicación.
+  Future<bool?> _showSettingsDialog() {
+    return showDialog<bool>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          title: const Text('Permiso bloqueado'),
+          content: const Text(
+            'El permiso de cámara está denegado de forma permanente. '
+            'Ábrelo en los ajustes de la aplicación para usar la vista '
+            'previa.',
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('CANCELAR'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('ABRIR AJUSTES'),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   @override
@@ -180,32 +297,73 @@ class _BroadcastScreenState extends State<BroadcastScreen> {
               else
                 ..._destinations.map(_destinationTile),
               const SizedBox(height: 24),
-              const SectionLabel('VIDEO'),
-              const SizedBox(height: 8),
-              Text(
-                'En esta fase no se pide cámara ni micrófono. Se pedirán '
-                'en la Fase 3.1, cuando vayas a usar la vista previa.',
-                style: text.bodyMedium?.copyWith(color: AppColors.textMuted),
-              ),
-              const SizedBox(height: 12),
-              const _PhaseButton(
-                label: 'VISTA PREVIA',
-                phase: 'Fase 3.1',
-              ),
-              const SizedBox(height: 12),
-              const _PhaseButton(
-                label: 'TRANSMITIR',
-                phase: 'Fase 3.2',
-              ),
-              const SizedBox(height: 12),
-              const _PhaseButton(
-                label: 'GRABAR EN EL TELÉFONO',
-                phase: 'Fase 3.2',
+              ListenableBuilder(
+                listenable: _permissions,
+                builder: (BuildContext context, Widget? child) {
+                  return _videoSection(text);
+                },
               ),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  Widget _videoSection(TextTheme text) {
+    final PermissionStatus camera = _permissions.states.camera;
+    final bool requesting = _permissions.isRequesting;
+    final String explanation;
+    switch (camera) {
+      case PermissionStatus.granted:
+        explanation =
+            'Cámara concedida. La vista previa real estará disponible '
+            'en la subetapa 3.1.1.';
+      case PermissionStatus.denied:
+        explanation =
+            'El permiso de cámara está denegado. Puedes volver a '
+            'intentarlo; la vista previa real llegará en la subetapa 3.1.1.';
+      case PermissionStatus.permanentlyDenied:
+        explanation =
+            'El permiso de cámara está bloqueado en los ajustes del '
+            'sistema. Ábrelo desde los ajustes de la aplicación para usar '
+            'la vista previa.';
+      case PermissionStatus.notRequested:
+        explanation =
+            'La vista previa usa la cámara trasera del teléfono. El '
+            'permiso se pide solo cuando tocas «Vista previa».';
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        const SectionLabel('VIDEO'),
+        const SizedBox(height: 8),
+        Text(
+          explanation,
+          style: text.bodyMedium?.copyWith(color: AppColors.textMuted),
+        ),
+        const SizedBox(height: 12),
+        if (camera == PermissionStatus.granted)
+          const _PhaseButton(
+            label: 'VISTA PREVIA',
+            phase: 'Fase 3.1.1',
+          )
+        else
+          AppButton.primary(
+            label: requesting ? 'PIDIENDO PERMISO…' : 'VISTA PREVIA',
+            onPressed: requesting ? () {} : _onPreviewTap,
+          ),
+        const SizedBox(height: 12),
+        const _PhaseButton(
+          label: 'TRANSMITIR',
+          phase: 'Fase 3.2',
+        ),
+        const SizedBox(height: 12),
+        const _PhaseButton(
+          label: 'GRABAR EN EL TELÉFONO',
+          phase: 'Fase 3.2',
+        ),
+      ],
     );
   }
 

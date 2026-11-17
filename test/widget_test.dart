@@ -84,9 +84,10 @@ void main() {
     expect(find.text('CÁMARA'), findsOneWidget);
     expect(find.text('MICRÓFONO'), findsOneWidget);
     expect(find.text('RED'), findsOneWidget);
-    // Fase 3.0: cámara y micrófono se pedirán en la Fase 3.1; la red
-    // sigue sin comprobar hasta que haya transmisión.
-    expect(find.text('Se pedirá en 3.1'), findsNWidgets(2));
+    // Subetapa 3.1.0: cámara y micrófono muestran su estado real de
+    // permiso (todavía no pedidos); la red sigue sin comprobar hasta que
+    // haya transmisión.
+    expect(find.text('No pedida'), findsNWidgets(2));
     expect(find.text('Sin comprobar'), findsOneWidget);
   });
 

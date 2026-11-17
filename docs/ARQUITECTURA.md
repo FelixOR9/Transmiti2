@@ -130,3 +130,56 @@ Detalles, decisiones y tabla de pruebas: `docs/ETAPA2C.md`.
 - `MatchSession` y `OverlayData` no cambian en esta fase.
 
 Detalles, decisiones y checklist manual: `docs/ETAPA3_FASE30.md`.
+
+## Etapa 3 — Fase 3.1.0: contratos y permisos
+- Contratos ampliados sin romper la 3.0: `startPreview()` →
+  `{textureId, width, height}`, `stopPreview()`,
+  `startRecording({matchId?, resolution: '720p', fps: 30,
+  videoBitrateBps: 2500000, audioEnabled: true})` → `{recordingId}`,
+  `stopRecording()` → `{recordingId, filePath, durationMs, sizeBytes,
+  status}` y `stopAll()` sin cambios. Los métodos de video siguen
+  devolviendo `not_available_in_phase_3_0` (la vista previa llega en
+  3.1.1 y la grabación en 3.1.2). Los 10 códigos de error nuevos
+  (`camera_unavailable`, `camera_in_use`, `camera_disconnected`,
+  `encoder_error`, `muxer_error`, `audio_unavailable`, `storage_full`,
+  `thermal_shutdown`, `permission_denied`, `recording_not_found`) están
+  definidos en ambos lados; en 3.1.0 solo se produce `permission_denied`.
+- Permisos reales: `requestPermissions` (antes
+  `permission_request_deferred_to_phase_3_1`) con
+  `ActivityResultLauncher` en `MainActivity`; nuevos `checkPermissions`
+  (estados, sin diálogos) y `openAppSettings`. Estados
+  `notRequested` / `granted` / `denied` / `permanentlyDenied` en
+  `PermissionStates` (Dart) y `PermissionManager` (Kotlin). La
+  distinción entre primera solicitud y denegación permanente NO usa
+  solo `shouldShowRequestPermissionRationale()`: hay un historial
+  persistente local de solicitudes en SharedPreferences
+  (`transmiti2_permission_history`, nunca en SQLite). Los estados se
+  vuelven a consultar al regresar a la app (`PermissionController` como
+  `WidgetsBindingObserver`, con contador para varias pantallas) y nunca
+  se cachean. La cámara solo se pide al tocar "Vista previa", con motivo
+  en la app antes del diálogo del sistema; si se concede se muestra el
+  estado honesto "vista previa en 3.1.1" (sin cámara ficticia); si se
+  deniega permanentemente se ofrece abrir los ajustes. Micrófono y
+  notificaciones quedan construidos y probados, sin activarse desde la
+  UI hasta 3.1.2 / 3.1.3. El canal de eventos
+  (`.../streaming/events`) emite `permission_result` tras cada
+  solicitud y `permission_changed` ante cambios detectados.
+- Servicio en primer plano preparado: registrado en el manifiesto con
+  `foregroundServiceType="camera|microphone"` (no exportado) y permisos
+  `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_CAMERA`,
+  `FOREGROUND_SERVICE_MICROPHONE`, `POST_NOTIFICATIONS` y `WAKE_LOCK`.
+  Dos escenarios en `ForegroundServicePrecheck`: con audio (máscara
+  `camera|microphone`, exige CAMERA y RECORD_AUDIO) y sin audio
+  (máscara `camera`, exige CAMERA); sin los permisos no se arranca y se
+  devuelve `permission_denied`. `startForeground()` es la primera
+  operación de `onStartCommand()`, con la notificación ya construida
+  (canal propio, acción "Detener", tap que abre la app) y dentro de los
+  5 s. En API < 29 se usa la llamada de dos argumentos; en API < 33 no
+  se pide `POST_NOTIFICATIONS`. El wake lock parcial existe pero solo
+  se adquiere desde 3.1.2.
+- Compatibilidad: minSdk efectivo 24, targetSdk/compileSdk 36, cero
+  dependencias nuevas. `getStatus` sigue devolviendo
+  `foregroundServiceAvailable: false` hasta 3.1.2.
+- Pendiente (NO validado en 3.1.0): el arranque real del servicio con
+  una grabación, el diálogo real del sistema y la cámara real. Se
+  verifican en 3.1.2 y en el teléfono de Félix con el checklist manual.

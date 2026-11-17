@@ -1,41 +1,93 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:transmiti2/app/app_scope.dart';
 import 'package:transmiti2/app/theme/app_colors.dart';
+import 'package:transmiti2/features/streaming/application/permission_controller.dart';
+import 'package:transmiti2/features/streaming/domain/permission_state.dart';
 
 /// Franja con el estado de cámara, micrófono y red.
 ///
-/// Fase 3.0: cámara y micrófono todavía no se piden al usuario; se pedirán
-/// en la Fase 3.1, cuando se vaya a usar la vista previa. La red sigue
+/// Subetapa 3.1.0: cámara y micrófono muestran su estado real de permiso
+/// (consulta de solo lectura, sin mostrar diálogos). Los estados se
+/// vuelven a consultar al regresar a la app. La red sigue
 /// "Sin comprobar" hasta que haya transmisión.
-class DeviceStatusStrip extends StatelessWidget {
+class DeviceStatusStrip extends StatefulWidget {
   const DeviceStatusStrip({super.key});
+
+  @override
+  State<DeviceStatusStrip> createState() => _DeviceStatusStripState();
+}
+
+class _DeviceStatusStripState extends State<DeviceStatusStrip> {
+  PermissionController? _permissions;
 
   static const String _notChecked = 'Sin comprobar';
 
-  /// Cámara y micrófono: no pedidos todavía (Fase 3.0).
-  static const String _phase31 = 'Se pedirá en 3.1';
+  static String _label(PermissionStatus status) {
+    switch (status) {
+      case PermissionStatus.granted:
+        return 'Concedida';
+      case PermissionStatus.denied:
+        return 'Denegada';
+      case PermissionStatus.permanentlyDenied:
+        return 'Bloqueada';
+      case PermissionStatus.notRequested:
+        return 'No pedida';
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_permissions == null) {
+      _permissions = AppScope.of(context).streaming.permissions;
+      _permissions!.attach();
+      unawaited(_permissions!.refresh());
+    }
+  }
+
+  @override
+  void dispose() {
+    _permissions?.detach();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: AppColors.outline),
-      ),
-      child: const Row(
-        children: <Widget>[
-          Expanded(
-            child: _StatusItem(label: 'CÁMARA', value: _phase31),
+    final PermissionController permissions = _permissions!;
+    return ListenableBuilder(
+      listenable: permissions,
+      builder: (BuildContext context, Widget? child) {
+        final PermissionStates states = permissions.states;
+        return Container(
+          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
+          decoration: BoxDecoration(
+            color: AppColors.surface,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: AppColors.outline),
           ),
-          Expanded(
-            child: _StatusItem(label: 'MICRÓFONO', value: _phase31),
+          child: Row(
+            children: <Widget>[
+              Expanded(
+                child: _StatusItem(
+                  label: 'CÁMARA',
+                  value: _label(states.camera),
+                ),
+              ),
+              Expanded(
+                child: _StatusItem(
+                  label: 'MICRÓFONO',
+                  value: _label(states.microphone),
+                ),
+              ),
+              const Expanded(
+                child: _StatusItem(label: 'RED', value: _notChecked),
+              ),
+            ],
           ),
-          Expanded(
-            child: _StatusItem(label: 'RED', value: _notChecked),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 }

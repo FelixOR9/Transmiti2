@@ -54,8 +54,31 @@ void main() {
     // Declarados, pero NO solicitados en tiempo de ejecución en la 3.0.
     expect(content.contains('android.permission.CAMERA'), isTrue);
     expect(content.contains('android.permission.RECORD_AUDIO'), isTrue);
-    // Sin servicio en primer plano registrado en la Fase 3.0.
-    expect(content.contains('<service '), isFalse);
-    expect(content.contains('foregroundServiceType'), isFalse);
+    // Subetapa 3.1.0: el servicio en primer plano ya está registrado con
+    // los dos tipos (camera|microphone) y no exportado; todavía no
+    // arranca sesiones reales de grabación (eso llega en 3.1.2).
+    expect(content.contains('<service'), isTrue);
+    expect(
+      content.contains('android:foregroundServiceType="camera|microphone"'),
+      isTrue,
+    );
+    expect(content.contains('android:exported="false"'), isTrue);
+    expect(
+      content.contains('android.permission.FOREGROUND_SERVICE"'),
+      isTrue,
+    );
+    expect(
+      content.contains('android.permission.FOREGROUND_SERVICE_CAMERA'),
+      isTrue,
+    );
+    expect(
+      content.contains('android.permission.FOREGROUND_SERVICE_MICROPHONE'),
+      isTrue,
+    );
+    expect(
+      content.contains('android.permission.POST_NOTIFICATIONS'),
+      isTrue,
+    );
+    expect(content.contains('android.permission.WAKE_LOCK'), isTrue);
   });
 }
