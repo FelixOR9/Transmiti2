@@ -5,6 +5,14 @@ name: TRANSMITI2 - Compilar APK de depuración
 # auto-commit/push del bot y publicación automática en Releases.
 # El CI ya no escribe en el repositorio: permissions contents: read.
 # Dispara en push y pull_request a Etapa-3, y manualmente.
+#
+# NOTA (Fase 3.0): android/gradlew, android/gradlew.bat y
+# android/gradle/wrapper/gradle-wrapper.jar NO están en el repositorio:
+# android/.gitignore los excluye (es el .gitignore estándar de Flutter).
+# Por eso la verificación de versiones SDK con ./gradlew VA DESPUÉS de
+# "flutter build apk --debug": ese paso regenera el wrapper (gradlew +
+# gradle-wrapper.jar) antes de invocarlo. No mover el paso SDK antes del
+# build, porque en un checkout limpio no existe ./gradlew.
 
 on:
   push:
@@ -47,10 +55,6 @@ jobs:
       - name: flutter pub get
         run: flutter pub get
 
-      - name: Verificar versiones SDK efectivas
-        working-directory: android
-        run: ./gradlew :app:printTransmiti2SdkVersions
-
       - name: flutter analyze
         run: flutter analyze --no-fatal-infos
 
@@ -59,6 +63,10 @@ jobs:
 
       - name: Compilar el APK de depuración
         run: flutter build apk --debug
+
+      - name: Verificar versiones SDK efectivas
+        working-directory: android
+        run: ./gradlew :app:printTransmiti2SdkVersions
 
       - name: Guardar el APK como archivo descargable
         uses: actions/upload-artifact@v4
