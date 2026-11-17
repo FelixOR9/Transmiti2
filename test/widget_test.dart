@@ -84,7 +84,10 @@ void main() {
     expect(find.text('CÁMARA'), findsOneWidget);
     expect(find.text('MICRÓFONO'), findsOneWidget);
     expect(find.text('RED'), findsOneWidget);
-    expect(find.text('Sin comprobar'), findsNWidgets(3));
+    // Fase 3.0: cámara y micrófono se pedirán en la Fase 3.1; la red
+    // sigue sin comprobar hasta que haya transmisión.
+    expect(find.text('Se pedirá en 3.1'), findsNWidgets(2));
+    expect(find.text('Sin comprobar'), findsOneWidget);
   });
 
   testWidgets('La tarjeta de inicio muestra el partido guardado', (

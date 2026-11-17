@@ -3,12 +3,16 @@ import 'package:transmiti2/app/theme/app_colors.dart';
 
 /// Franja con el estado de cámara, micrófono y red.
 ///
-/// Por ahora todo aparece "Sin comprobar": las comprobaciones reales se
-/// harán en la etapa de captura de video.
+/// Fase 3.0: cámara y micrófono todavía no se piden al usuario; se pedirán
+/// en la Fase 3.1, cuando se vaya a usar la vista previa. La red sigue
+/// "Sin comprobar" hasta que haya transmisión.
 class DeviceStatusStrip extends StatelessWidget {
   const DeviceStatusStrip({super.key});
 
   static const String _notChecked = 'Sin comprobar';
+
+  /// Cámara y micrófono: no pedidos todavía (Fase 3.0).
+  static const String _phase31 = 'Se pedirá en 3.1';
 
   @override
   Widget build(BuildContext context) {
@@ -22,10 +26,10 @@ class DeviceStatusStrip extends StatelessWidget {
       child: const Row(
         children: <Widget>[
           Expanded(
-            child: _StatusItem(label: 'CÁMARA', value: _notChecked),
+            child: _StatusItem(label: 'CÁMARA', value: _phase31),
           ),
           Expanded(
-            child: _StatusItem(label: 'MICRÓFONO', value: _notChecked),
+            child: _StatusItem(label: 'MICRÓFONO', value: _phase31),
           ),
           Expanded(
             child: _StatusItem(label: 'RED', value: _notChecked),

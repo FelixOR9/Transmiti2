@@ -93,15 +93,17 @@ void main() {
       expect(fk.first['foreign_keys'], 1);
     });
 
+    // La versión hipotética de estas pruebas es la 3: la 2 ya es la
+    // migración real de la Fase 3.0 (tablas de transmisión).
     test('la migración a una versión nueva conserva los datos', () async {
       Database database = await open();
       await SqliteSponsorRepository(database).add(name: 'Casa Pepe');
       await close();
 
       database = await open(
-        version: 2,
+        version: 3,
         migrations: <int, List<String>>{
-          2: <String>['ALTER TABLE sponsors ADD COLUMN website TEXT'],
+          3: <String>['ALTER TABLE sponsors ADD COLUMN website TEXT'],
         },
       );
       final List<Sponsor> sponsors = await SqliteSponsorRepository(database)
@@ -120,9 +122,9 @@ void main() {
       'crear la base directamente en una versión nueva aplica las migraciones',
       () async {
         final Database database = await open(
-          version: 2,
+          version: 3,
           migrations: <int, List<String>>{
-            2: <String>['ALTER TABLE sponsors ADD COLUMN website TEXT'],
+            3: <String>['ALTER TABLE sponsors ADD COLUMN website TEXT'],
           },
         );
         final List<Map<String, Object?>> columns = await database.rawQuery(

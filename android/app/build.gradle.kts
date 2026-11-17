@@ -19,7 +19,11 @@ android {
         applicationId = "com.transmiti2.transmiti2"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        // Fase 3.0: el minSdk efectivo es el mayor entre el de Flutter y 23.
+        // 23 es el piso de Android Keystore AES (KeyGenParameterSpec) y de
+        // Tink AEAD con AndroidKeysetManager. Si Flutter ya trae 24 o más,
+        // ese valor manda y no se baja nada.
+        minSdk = maxOf(flutter.minSdkVersion, 23)
         targetSdk = flutter.targetSdkVersion
         // Uses the version code from pubspec.yaml. When using split APKs, 1000 * ABI_VERSION
         // is added automatically by Flutter. (https://developer.android.com/studio/build/configure-apk-splits#configure-APK-versions)
@@ -44,6 +48,45 @@ kotlin {
     }
 }
 
+dependencies {
+    // Fase 3.0 — almacenamiento seguro de claves de transmisión:
+    // DataStore (Preferences, sin cifrar el archivo completo: cada valor
+    // se cifra individualmente con Tink AEAD y su propio AAD) + Tink.
+    // No se usa datastore-tink: su AeadSerializer tiene un AAD fijo por
+    // archivo y no permite un AAD distinto por destino.
+    // Tink 1.24.0: totalmente compatible desde API 24; AEAD y
+    // AndroidKeysetManager funcionan desde API 23. JWT y StreamingAead
+    // (que sí exigen API 24) no se usan en este proyecto.
+    implementation("androidx.datastore:datastore-preferences:1.3.0")
+    implementation("com.google.crypto.tink:tink-android:1.24.0")
+    testImplementation("junit:junit:4.13.2")
+}
+
 flutter {
     source = "../.."
+}
+
+// Imprime y verifica las versiones SDK efectivas. La usa el CI
+// (./gradlew :app:printTransmiti2SdkVersions) y falla si el minSdk
+// configurado no es exactamente max(flutter.minSdkVersion, 23).
+tasks.register("printTransmiti2SdkVersions") {
+    doLast {
+        val flutterMinSdk = flutter.minSdkVersion
+        val effectiveMinSdk = android.defaultConfig.minSdk ?: -1
+        val targetSdk = android.defaultConfig.targetSdk ?: -1
+        val compileSdk = android.compileSdk
+        println("TRANSMITI2 SDK: flutter.minSdkVersion=$flutterMinSdk")
+        println("TRANSMITI2 SDK: effective minSdk=$effectiveMinSdk")
+        println("TRANSMITI2 SDK: targetSdk=$targetSdk")
+        println("TRANSMITI2 SDK: compileSdk=$compileSdk")
+        val expectedMinSdk = maxOf(flutterMinSdk, 23)
+        check(effectiveMinSdk == expectedMinSdk) {
+            "minSdk efectivo ($effectiveMinSdk) no es " +
+                "max(flutter.minSdkVersion=$flutterMinSdk, 23) " +
+                "= $expectedMinSdk"
+        }
+        check(effectiveMinSdk >= 23) {
+            "minSdk efectivo ($effectiveMinSdk) es menor que 23"
+        }
+    }
 }

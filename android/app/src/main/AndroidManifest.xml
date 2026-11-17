@@ -1,4 +1,15 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Fase 3.0: solo declaraciones. INTERNET y ACCESS_NETWORK_STATE son
+         permisos normales (se conceden al instalar). CAMERA y RECORD_AUDIO
+         son peligrosos: declararlos NO los pide ni los concede; la
+         solicitud en tiempo de ejecución llega en la Fase 3.1, en el
+         momento de usar la vista previa y con el motivo explicado antes.
+         No hay ningún <service> en la Fase 3.0: el servicio en primer
+         plano existe solo como esqueleto sin registrar y se activa en 3.1. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <application
         android:label="TRANSMITI2"
         android:name="${applicationName}"

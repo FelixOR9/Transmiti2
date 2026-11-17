@@ -2,10 +2,16 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
-/// El control del partido debe funcionar sin internet: el código de la app no
-/// abre conexiones de red ni la versión de producción pide el permiso.
+/// El control del partido debe funcionar sin internet.
+///
+/// Fase 3.0: la red solo existe en el módulo de transmisión
+/// (`lib/features/streaming/`, que habla con Kotlin por MethodChannel y no
+/// abre conexiones desde Dart) y en el manifiesto, que declara INTERNET
+/// para el futuro motor RTMP nativo. El resto de la app sigue sin red:
+/// ningún otro archivo de `lib/` puede usar conexiones de red, y el
+/// partido, el marcador y el reloj nunca dependen de internet.
 void main() {
-  test('el código de la app no usa conexiones de red', () {
+  test('el código de la app no usa conexiones de red fuera del streaming', () {
     final List<String> forbidden = <String>[
       'package:http/',
       'package:dio/',
@@ -35,14 +41,21 @@ void main() {
     }
   });
 
-  test('la versión de producción no pide el permiso de internet', () {
+  test('el manifiesto declara INTERNET solo para el motor nativo', () {
     final File manifest = File('android/app/src/main/AndroidManifest.xml');
-    if (!manifest.existsSync()) {
-      return;
-    }
+    expect(manifest.existsSync(), isTrue);
+    final String content = manifest.readAsStringSync();
+    // Declarado en la Fase 3.0 para el futuro motor RTMP (Kotlin).
+    expect(content.contains('android.permission.INTERNET'), isTrue);
     expect(
-      manifest.readAsStringSync().contains('android.permission.INTERNET'),
-      isFalse,
+      content.contains('android.permission.ACCESS_NETWORK_STATE'),
+      isTrue,
     );
+    // Declarados, pero NO solicitados en tiempo de ejecución en la 3.0.
+    expect(content.contains('android.permission.CAMERA'), isTrue);
+    expect(content.contains('android.permission.RECORD_AUDIO'), isTrue);
+    // Sin servicio en primer plano registrado en la Fase 3.0.
+    expect(content.contains('<service '), isFalse);
+    expect(content.contains('foregroundServiceType'), isFalse);
   });
 }

@@ -4,7 +4,9 @@ import 'package:transmiti2/core/storage/image_store.dart';
 import 'package:transmiti2/core/time.dart';
 import 'package:transmiti2/features/match/application/match_session.dart';
 import 'package:transmiti2/features/match/domain/soccer_match.dart';
+import 'package:transmiti2/features/streaming/application/streaming_controller.dart';
 
+import 'fake_streaming.dart';
 import 'fakes.dart';
 import 'in_memory_repositories.dart';
 
@@ -34,6 +36,11 @@ AppServices createTestServices({
       teams: teams,
       players: players,
       sponsors: sponsors,
+      nowMs: nowMs,
+    ),
+    streaming: StreamingController(
+      destinations: InMemoryStreamDestinationRepository(),
+      service: FakeStreamingService(),
       nowMs: nowMs,
     ),
   );

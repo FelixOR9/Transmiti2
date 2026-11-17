@@ -913,6 +913,7 @@ void main() {
         images: env.services.images,
         gallery: env.services.gallery,
         session: reopened,
+        streaming: env.services.streaming,
         clockTick: null,
         tapCooldown: Duration.zero,
       );

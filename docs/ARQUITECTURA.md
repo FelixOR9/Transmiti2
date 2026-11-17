@@ -106,3 +106,27 @@ Detalles de la base de datos, las imágenes y el cronómetro: `docs/ETAPA2.md`.
 - `BroadcastOverlay` se dibuja sobre un lienzo de 1280 x 720 escalado al ancho disponible y con fondo transparente, para poder reutilizarlo como superposición de video en la etapa de transmisión.
 
 Detalles, decisiones y tabla de pruebas: `docs/ETAPA2C.md`.
+
+## Etapa 3 — Fase 3.0: infraestructura de transmisión
+- Solo cimientos, sin video: contrato Flutter-Kotlin por MethodChannel
+  (`com.transmiti2.transmiti2/streaming`), destino manual RTMPS, base v2
+  y CI solo de verificación. Los métodos de video devuelven el error
+  `not_available_in_phase_3_0`.
+- `features/streaming/`: `domain/` (destino, contrato, AAD canónico),
+  `data/` (repositorio SQLite de destinos), `application/` (servicio por
+  MethodChannel y controlador con flujo sin huérfanos) y `presentation/`
+  (Estudio de transmisión con el formulario de destino y los botones de
+  video deshabilitados con su fase). En Kotlin:
+  `streaming/` (contrato, AAD, almacén seguro, servicio en primer plano
+  como esqueleto, motor como interfaz y manejador del canal).
+- La clave de transmisión nunca vive en SQLite (solo `has_key`) ni en
+  Dart (solo pasa una vez por el canal): se cifra con Tink AEAD
+  (AES256-GCM) con un AAD propio por destino y se guarda en DataStore;
+  la llave maestra está en Android Keystore y el keyset de Tink se guarda
+  cifrado con ella. Si Keystore no está activo, todo falla de forma
+  segura (`keystore_not_active`) y no se escribe nada.
+- En la Fase 3.0 no se pide cámara ni micrófono al usuario: el manifiesto
+  solo los declara y `requestPermissions` está aplazado a la Fase 3.1.
+- `MatchSession` y `OverlayData` no cambian en esta fase.
+
+Detalles, decisiones y checklist manual: `docs/ETAPA3_FASE30.md`.

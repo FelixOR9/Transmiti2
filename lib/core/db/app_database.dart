@@ -3,7 +3,7 @@ import 'package:transmiti2/core/db/schema.dart';
 
 /// Apertura de la base de datos con creación y migraciones.
 abstract final class AppDatabase {
-  static const int version = 1;
+  static const int version = 2;
 
   /// Abre (o crea) la base en [path].
   ///
