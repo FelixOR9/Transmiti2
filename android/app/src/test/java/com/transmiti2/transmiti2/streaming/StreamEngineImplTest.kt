@@ -83,7 +83,7 @@ class StreamEngineImplTest {
         }
     }
 
-    private class Fixture(
+    private inner class Fixture(
         val permissionGranted: Boolean = true,
         val displayRotation: Int = 0,
     ) {
