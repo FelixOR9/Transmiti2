@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:transmiti2/features/streaming/application/streaming_service.dart';
 import 'package:transmiti2/features/streaming/data/stream_destination_repository.dart';
 import 'package:transmiti2/features/streaming/domain/permission_state.dart';
@@ -11,6 +13,11 @@ import 'package:transmiti2/features/streaming/domain/stream_destination.dart';
 /// que devuelve `checkPermissions()` y `requestOutcomes` fija el resultado
 /// de `requestPermissions()` por permiso (los permisos sin resultado fijado
 /// conservan su estado).
+///
+/// La vista previa (3.1.1) está soportada: `startPreview()` devuelve
+/// `previewInfo` (una textura ficticia) y cuenta las llamadas, salvo que
+/// `startPreviewError` fije un código de error para lanzar. Los eventos
+/// se emiten con [emitEvent].
 class FakeStreamingService implements StreamingService {
   final Map<int, String> keys = <int, String>{};
 
@@ -24,13 +31,34 @@ class FakeStreamingService implements StreamingService {
   List<PermissionKind> lastRequestedPermissions = const <PermissionKind>[];
   int openAppSettingsCalls = 0;
 
+  PreviewInfo previewInfo = const PreviewInfo(
+    textureId: 1,
+    width: 1280,
+    height: 720,
+    sensorOrientation: 90,
+    rotationDegrees: 90,
+    fps: 30,
+    lensFacing: 'back',
+  );
+  String? startPreviewError;
+  int startPreviewCalls = 0;
+  int stopPreviewCalls = 0;
+  int stopAllCalls = 0;
+
+  final StreamController<Map<String, Object?>> _eventsController =
+      StreamController<Map<String, Object?>>.broadcast();
+
+  void emitEvent(Map<String, Object?> event) {
+    _eventsController.add(event);
+  }
+
   @override
   Future<StreamStatus> getStatus() async {
     return const StreamStatus(
       foregroundServiceAvailable: false,
       cameraGranted: false,
       microphoneGranted: false,
-      streamingSupported: false,
+      streamingSupported: true,
     );
   }
 
@@ -62,8 +90,7 @@ class FakeStreamingService implements StreamingService {
   }
 
   @override
-  Stream<Map<String, Object?>> get events =>
-      const Stream<Map<String, Object?>>.empty();
+  Stream<Map<String, Object?>> get events => _eventsController.stream;
 
   @override
   Future<void> saveStreamKey({
@@ -88,12 +115,17 @@ class FakeStreamingService implements StreamingService {
 
   @override
   Future<PreviewInfo> startPreview() async {
-    throw const StreamingException(StreamContract.notAvailableInPhase30);
+    startPreviewCalls++;
+    final String? error = startPreviewError;
+    if (error != null) {
+      throw StreamingException(error);
+    }
+    return previewInfo;
   }
 
   @override
   Future<void> stopPreview() async {
-    throw const StreamingException(StreamContract.notAvailableInPhase30);
+    stopPreviewCalls++;
   }
 
   @override
@@ -115,7 +147,7 @@ class FakeStreamingService implements StreamingService {
 
   @override
   Future<void> stopAll() async {
-    throw const StreamingException(StreamContract.notAvailableInPhase30);
+    stopAllCalls++;
   }
 }
 

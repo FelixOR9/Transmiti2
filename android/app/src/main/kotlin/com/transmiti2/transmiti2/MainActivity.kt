@@ -1,5 +1,7 @@
 package com.transmiti2.transmiti2
 
+import android.content.Context
+import android.hardware.camera2.CameraManager
 import androidx.activity.result.contract.ActivityResultContracts
 import com.transmiti2.transmiti2.streaming.PermissionLauncher
 import com.transmiti2.transmiti2.streaming.PermissionManager
@@ -63,6 +65,9 @@ class MainActivity : FlutterFragmentActivity() {
                 streamingScope,
                 permissionManager = PermissionManager.create(this),
                 permissionLauncher = permissionLauncher,
+                textureRegistry = flutterEngine.renderer,
+                cameraManager =
+                    getSystemService(Context.CAMERA_SERVICE) as CameraManager,
                 onEvent = { event -> eventSink?.success(event) },
             ),
         )

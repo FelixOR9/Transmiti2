@@ -1,5 +1,6 @@
 import 'package:transmiti2/core/time.dart';
 import 'package:transmiti2/features/streaming/application/permission_controller.dart';
+import 'package:transmiti2/features/streaming/application/preview_controller.dart';
 import 'package:transmiti2/features/streaming/application/streaming_service.dart';
 import 'package:transmiti2/features/streaming/data/stream_destination_repository.dart';
 import 'package:transmiti2/features/streaming/domain/permission_state.dart';
@@ -35,6 +36,14 @@ class StreamingController {
   /// mismo servicio para que las pantallas compartan los estados.
   late final PermissionController permissions =
       PermissionController(service: _service);
+
+  /// Vista previa real de cámara (subetapa 3.1.1): estados, inicio y
+  /// parada, restauración al volver a primer plano y reinicio al girar
+  /// el teléfono. Comparte el servicio y el controlador de permisos.
+  late final PreviewController preview = PreviewController(
+    service: _service,
+    permissions: permissions,
+  );
 
   Future<List<StreamDestination>> listDestinations() =>
       _destinations.all();

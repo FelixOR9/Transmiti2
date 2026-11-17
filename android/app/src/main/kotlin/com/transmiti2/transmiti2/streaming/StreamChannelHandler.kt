@@ -4,11 +4,14 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.hardware.camera2.CameraManager
 import android.net.Uri
 import android.provider.Settings
 import androidx.core.content.ContextCompat
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.view.TextureRegistry
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -29,6 +32,12 @@ import kotlinx.coroutines.launch
  * [PermissionLauncher] de la Activity y `openAppSettings` abre los
  * ajustes de la aplicación. Los métodos de video siguen devolviendo
  * `not_available_in_phase_3_0`.
+ *
+ * Subetapa 3.1.1: `startPreview` y `stopPreview` son reales (Camera2 +
+ * `SurfaceProducer` a través de [StreamEngineImpl]) y `stopAll` detiene
+ * también la vista previa. La grabación sigue devolviendo
+ * `not_available_in_phase_3_0`. La cámara nunca se abre sin el permiso
+ * concedido: el motor lo comprueba antes de crear nada.
  */
 class StreamChannelHandler(
     private val context: Context,
@@ -38,10 +47,34 @@ class StreamChannelHandler(
     },
     private val permissionManager: PermissionManager,
     private val permissionLauncher: PermissionLauncher? = null,
+    private val textureRegistry: TextureRegistry? = null,
+    private val cameraManager: CameraManager? = null,
     private val onEvent: ((Map<String, Any?>) -> Unit)? = null,
 ) : MethodChannel.MethodCallHandler {
 
     private var store: SecureCredentialStore? = null
+
+    /** Motor de vista previa real (3.1.1), creado perezosamente. */
+    private val previewEngine: StreamEngineImpl? by lazy {
+        val registry = textureRegistry ?: return@lazy null
+        val manager = cameraManager ?: return@lazy null
+        StreamEngineImpl(
+            cameraPermissionGranted = {
+                permissionManager.checkState(PermissionKind.CAMERA) ==
+                    PermissionStatus.GRANTED
+            },
+            surfaceProvider = TextureRegistrySurfaceProducerProvider(registry),
+            sessionFactory = { handle ->
+                CameraSession(
+                    cameraManager = manager,
+                    surfaceHandle = handle,
+                )
+            },
+            displayRotationDegrees = { displayRotationDegrees(context) },
+            scope = scope,
+            onEvent = onEvent,
+        )
+    }
 
     /** Resultado pendiente de una solicitud de permisos en curso. */
     private var pendingPermissionResult: MethodChannel.Result? = null
@@ -65,7 +98,8 @@ class StreamChannelHandler(
             "foregroundServiceAvailable" to false,
             "cameraGranted" to isGranted(Manifest.permission.CAMERA),
             "microphoneGranted" to isGranted(Manifest.permission.RECORD_AUDIO),
-            "streamingSupported" to false,
+            // Desde la 3.1.1 hay vista previa real cuando el motor existe.
+            "streamingSupported" to (previewEngine != null),
         )
     }
 
@@ -96,18 +130,96 @@ class StreamChannelHandler(
             StreamContract.SAVE_STREAM_KEY -> saveStreamKey(call, result)
             StreamContract.DELETE_STREAM_KEY -> deleteStreamKey(call, result)
             StreamContract.HAS_STREAM_KEY -> hasStreamKey(call, result)
-            StreamContract.START_PREVIEW,
-            StreamContract.STOP_PREVIEW,
+            StreamContract.START_PREVIEW -> startPreview(result)
+            StreamContract.STOP_PREVIEW -> stopPreview(result)
+            StreamContract.STOP_ALL -> stopAll(result)
             StreamContract.START_STREAM,
             StreamContract.START_RECORDING,
             StreamContract.STOP_RECORDING,
-            StreamContract.STOP_ALL,
             -> result.error(
                 StreamContract.NOT_AVAILABLE_IN_PHASE_3_0,
                 "Función no disponible en la Fase 3.0.",
                 null,
             )
             else -> result.notImplemented()
+        }
+    }
+
+    /**
+     * Abre la cámara y devuelve `{textureId, width, height,
+     * sensorOrientation, rotationDegrees, fps, lensFacing}`. La apertura
+     * es asíncrona (Camera2): el resultado se responde cuando la sesión
+     * está configurada, no antes.
+     */
+    private fun startPreview(result: MethodChannel.Result) {
+        val engine = previewEngine
+        if (engine == null) {
+            result.error(
+                StreamContract.CAMERA_UNAVAILABLE,
+                "Vista previa no disponible en este dispositivo.",
+                null,
+            )
+            return
+        }
+        scope.launch {
+            try {
+                val info = engine.startPreview()
+                result.success(previewInfoMap(info))
+            } catch (e: CameraException) {
+                result.error(e.code, e.message, null)
+            } catch (e: CancellationException) {
+                result.error(
+                    StreamContract.CAMERA_UNAVAILABLE,
+                    "Inicio de la vista previa cancelado.",
+                    null,
+                )
+            } catch (e: Exception) {
+                result.error(
+                    StreamContract.CAMERA_UNAVAILABLE,
+                    "No se pudo iniciar la cámara.",
+                    null,
+                )
+            }
+        }
+    }
+
+    private fun previewInfoMap(info: PreviewInfo): Map<String, Any> {
+        return mapOf(
+            "textureId" to info.textureId,
+            "width" to info.width,
+            "height" to info.height,
+            "sensorOrientation" to info.sensorOrientation,
+            "rotationDegrees" to info.rotationDegrees,
+            "fps" to info.fps,
+            "lensFacing" to info.lensFacing,
+        )
+    }
+
+    /**
+     * Cierra la vista previa. Idempotente: parar sin vista previa no
+     * falla. La respuesta se envía cuando el cierre terminó.
+     */
+    private fun stopPreview(result: MethodChannel.Result) {
+        scope.launch {
+            try {
+                previewEngine?.stopPreview()
+            } catch (_: Exception) {
+            }
+            result.success(null)
+        }
+    }
+
+    /**
+     * Parada de emergencia: detiene la vista previa (y, en 3.1.2, la
+     * grabación y el servicio). Nunca falla por no haber nada que parar.
+     */
+    private fun stopAll(result: MethodChannel.Result) {
+        scope.launch {
+            try {
+                previewEngine?.stopAll()
+            } catch (_: Exception) {
+            }
+            result.success(null)
         }
     }
 

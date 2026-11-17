@@ -183,3 +183,68 @@ Detalles, decisiones y checklist manual: `docs/ETAPA3_FASE30.md`.
 - Pendiente (NO validado en 3.1.0): el arranque real del servicio con
   una grabación, el diálogo real del sistema y la cámara real. Se
   verifican en 3.1.2 y en el teléfono de Félix con el checklist manual.
+
+## Etapa 3 — Fase 3.1.1: vista previa real con Camera2
+- Captura: `CameraSession` (Camera2) con la cámara trasera por defecto
+  (se prefiere la cámara lógica multi-cámara si el dispositivo la
+  expone; la frontal queda diferida). La sesión recibe su superficie de
+  salida de video como parámetro intercambiable: en 3.1.1 es `null`
+  (solo preview); en 3.1.2 será la superficie de entrada del codificador
+  y más tarde la del compositor EGL. Sin MediaCodec, MediaMuxer,
+  grabación, audio, RTMP ni composición.
+- Superficie: `TextureRegistry.createSurfaceProducer()` (sin argumentos
+  → `SurfaceLifecycle.manual`), verificado en el código del motor de
+  Flutter 3.50.0: `onSurfaceAvailable` / `onSurfaceCleanup` (los
+  antiguos `onSurfaceCreated` / `onSurfaceDestroyed` están deprecados
+  desde 3.27 / 3.28), backend `ImageReader` en API ≥ 29 y
+  `SurfaceTexture` como reserva. El tamaño se fija ANTES de pedir la
+  superficie (el productor crea su `ImageReader` al primer
+  `getSurface()`); la superficie no se cachea: se pide de nuevo cada
+  vez que hace falta. La rotación NO la gestiona el motor
+  (`handlesCropAndRotation()` es falso): Dart rota la presentación con
+  `RotatedBox` según `rotationDegrees`.
+- Configuración (escalera en `PreviewConfigSelector`, sin forzar nada
+  que el dispositivo no soporte): 1280×720 @ 30 FPS → 1280×720 @ 24 →
+  640×480 @ 30 → 640×480 @ 24 → mayor tamaño ≤ 720p → mayor tamaño
+  disponible; FPS con el rango fijo [30, 30] si existe, si no un rango
+  que contenga 30 (el más ajustado), si no el máximo más alto. El tamaño
+  elegido debe estar en las listas de `SurfaceTexture` e `ImageReader`
+  a la vez. Enfoque continuo si el dispositivo lo ofrece. Los valores
+  reales del S24 Ultra se confirman con el checklist manual (la
+  escalera es determinista, el resultado depende del dispositivo).
+- Contratos: `startPreview()` → `{textureId, width, height,
+  sensorOrientation, rotationDegrees, fps, lensFacing}` (tamaño en
+  orientación del sensor; `rotationDegrees =
+  (sensorOrientation - rotación de pantalla + 360) % 360`, trasera);
+  `stopPreview()` y `stopAll()` (parada de emergencia, idempotente)
+  reales; la grabación sigue devolviendo `not_available_in_phase_3_0`.
+  Eventos nuevos: `preview_started`, `preview_stopped`,
+  `preview_error` (con `code`) y `preview_surface_lost`. `getStatus`
+  devuelve `streamingSupported: true` desde 3.1.1.
+- Ciclo de vida: al ir a segundo plano se detiene la vista previa y al
+  volver se restaura sola si estaba activa; al girar el teléfono se
+  reinicia para recalcular la rotación (la Activity NO se recrea:
+  `configChanges` incluye la orientación); al salir de la pantalla la
+  cámara se cierra. Si la superficie se pierde temporalmente, se cierra
+  solo la sesión, el productor se conserva y al volver la superficie se
+  reabre la sesión con la misma textura. Sin sesiones duplicadas:
+  `startPreview` con la vista activa devuelve la información actual y
+  dos inicios simultáneos comparten el mismo trabajo. La cámara se
+  cierra ante desconexión o error y se avisa con `preview_error`.
+- Permisos: se reutiliza el sistema 3.1.0 sin duplicarlo. La cámara no
+  se abre sin el permiso concedido (el motor lo comprueba antes de
+  crear nada); revocado → `permission_denied`; ocupada →
+  `camera_in_use`; no disponible → `camera_unavailable`; desconectada
+  → `camera_disconnected`.
+- UI: `PreviewController` (estados `closed`, `preparing`, `active`,
+  `recovering`, `unavailable`, `permissionDenied`, `error`) y
+  `BroadcastScreen` con `Texture` dentro de `AspectRatio` +
+  `RotatedBox`, sin deformar. Estados visibles: cerrada, preparando,
+  activa, recuperando, no disponible, permiso denegado y error.
+- Limitaciones conocidas: la rotación de 180° (vertical boca abajo) no
+  se detecta (no cambia la orientación apaisado/vertical) y la vista
+  previa queda boca abajo hasta girar el teléfono; la cámara frontal
+  no está implementada (diferida); la mecánica Camera2 (`CameraSession`
+  real) no se puede probar en CI sin emulador: en CI se prueban la
+  selección de configuración y toda la orquestación con sesiones
+  falsas, y la cámara real se verifica en el S24 Ultra.

@@ -12,6 +12,10 @@
 /// con estados, `openAppSettings`, `stopPreview` y `stopRecording`. Los
 /// métodos de video siguen devolviendo `not_available_in_phase_3_0` hasta
 /// su subetapa.
+///
+/// En la subetapa 3.1.1 `startPreview` y `stopPreview` son reales
+/// (Camera2 + `SurfaceProducer`) y `stopAll` detiene también la vista
+/// previa. La grabación sigue devolviendo `not_available_in_phase_3_0`.
 abstract final class StreamContract {
   /// Canal de métodos Flutter -> Kotlin.
   static const String methodChannel =
@@ -44,7 +48,9 @@ abstract final class StreamContract {
 
   /// Funciones de video: existen en el contrato pero no están disponibles
   /// en la Fase 3.0 ni en la subetapa 3.1.0 (devuelven
-  /// `not_available_in_phase_3_0`).
+  /// `not_available_in_phase_3_0`). En la subetapa 3.1.1 `startPreview`
+  /// y `stopPreview` son reales; la grabación y la transmisión siguen
+  /// sin estarlo.
   static const String startPreview = 'startPreview';
   static const String stopPreview = 'stopPreview';
   static const String startStream = 'startStream';
@@ -67,6 +73,15 @@ abstract final class StreamContract {
 
   /// Evento genérico de error del motor.
   static const String eventError = 'error';
+
+  /// Eventos de vista previa (subetapa 3.1.1). `preview_started` lleva
+  /// `textureId`, `width`, `height` y `fps`; `preview_error` lleva
+  /// `code`; `preview_surface_lost` no lleva datos (la superficie se
+  /// perdió temporalmente y el motor la recupera solo).
+  static const String eventPreviewStarted = 'preview_started';
+  static const String eventPreviewStopped = 'preview_stopped';
+  static const String eventPreviewError = 'preview_error';
+  static const String eventPreviewSurfaceLost = 'preview_surface_lost';
 
   // Códigos de error (nunca llevan la clave ni la URL dentro).
   static const String notAvailableInPhase30 = 'not_available_in_phase_3_0';
@@ -148,18 +163,41 @@ class PreviewInfo {
     required this.textureId,
     required this.width,
     required this.height,
+    this.sensorOrientation = 90,
+    this.rotationDegrees = 90,
+    this.fps = 30,
+    this.lensFacing = 'back',
   });
 
   /// Identificador de textura de Flutter para dibujar la preview.
   final int textureId;
+
+  /// Tamaño en orientación del sensor (sin rotar).
   final int width;
   final int height;
+
+  /// Orientación del sensor en grados (normalmente 90 en la trasera).
+  final int sensorOrientation;
+
+  /// Rotación en grados que hay que aplicar a la imagen para verla
+  /// derecha. La UI la aplica con `RotatedBox`.
+  final int rotationDegrees;
+
+  /// FPS del rango elegido (objetivo 30).
+  final int fps;
+
+  /// Cámara usada: `back` (la frontal queda diferida en 3.1.1).
+  final String lensFacing;
 
   factory PreviewInfo.fromMap(Map<Object?, Object?> map) {
     return PreviewInfo(
       textureId: (map['textureId'] as num?)?.toInt() ?? -1,
       width: (map['width'] as num?)?.toInt() ?? 0,
       height: (map['height'] as num?)?.toInt() ?? 0,
+      sensorOrientation: (map['sensorOrientation'] as num?)?.toInt() ?? 90,
+      rotationDegrees: (map['rotationDegrees'] as num?)?.toInt() ?? 90,
+      fps: (map['fps'] as num?)?.toInt() ?? 30,
+      lensFacing: map['lensFacing'] as String? ?? 'back',
     );
   }
 }

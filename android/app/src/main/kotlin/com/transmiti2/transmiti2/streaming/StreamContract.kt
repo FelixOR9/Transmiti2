@@ -8,6 +8,10 @@ package com.transmiti2.transmiti2.streaming
  * `not_available_in_phase_3_0`: no se simula ningún éxito. `requestPermissions`
  * se vuelve real y se añaden `checkPermissions` con estados,
  * `openAppSettings`, `stopPreview` y `stopRecording`.
+ *
+ * Subetapa 3.1.1: `startPreview` y `stopPreview` son reales (Camera2 +
+ * `SurfaceProducer`) y `stopAll` detiene también la vista previa. La
+ * grabación sigue devolviendo `not_available_in_phase_3_0`.
  */
 object StreamContract {
     const val METHOD_CHANNEL = "com.transmiti2.transmiti2/streaming"
@@ -35,6 +39,17 @@ object StreamContract {
     const val EVENT_SERVICE_STARTED = "service_started"
     const val EVENT_SERVICE_STOPPED = "service_stopped"
     const val EVENT_ERROR = "error"
+
+    /**
+     * Eventos de vista previa (subetapa 3.1.1). `preview_started` lleva
+     * `textureId`, `width`, `height` y `fps`; `preview_error` lleva
+     * `code`; `preview_surface_lost` no lleva datos (la superficie se
+     * perdió temporalmente y el motor la recupera solo).
+     */
+    const val EVENT_PREVIEW_STARTED = "preview_started"
+    const val EVENT_PREVIEW_STOPPED = "preview_stopped"
+    const val EVENT_PREVIEW_ERROR = "preview_error"
+    const val EVENT_PREVIEW_SURFACE_LOST = "preview_surface_lost"
 
     // Códigos de error (nunca llevan la clave ni la URL dentro).
     const val NOT_AVAILABLE_IN_PHASE_3_0 = "not_available_in_phase_3_0"

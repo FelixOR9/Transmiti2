@@ -155,21 +155,18 @@ void main() {
       expect(streamKeyAad(1), isNot(streamKeyAad(2)));
     });
 
-    test('el servicio falso no ofrece video en la Fase 3.0', () async {
+    test('el servicio falso ofrece vista previa en la 3.1.1, sin grabar', () async {
       final FakeStreamingService service = FakeStreamingService();
       final StreamStatus status = await service.getStatus();
       expect(status.foregroundServiceAvailable, isFalse);
-      expect(status.streamingSupported, isFalse);
-      await expectLater(
-        service.startPreview(),
-        throwsA(
-          isA<StreamingException>().having(
-            (e) => e.code,
-            'código',
-            StreamContract.notAvailableInPhase30,
-          ),
-        ),
-      );
+      expect(status.streamingSupported, isTrue);
+      final PreviewInfo preview = await service.startPreview();
+      expect(preview.textureId, 1);
+      expect(preview.width, 1280);
+      expect(preview.height, 720);
+      await service.stopPreview();
+      expect(service.startPreviewCalls, 1);
+      expect(service.stopPreviewCalls, 1);
       await expectLater(
         service.startStream(),
         throwsA(isA<StreamingException>()),

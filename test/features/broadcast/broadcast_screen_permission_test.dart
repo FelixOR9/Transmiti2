@@ -47,7 +47,7 @@ void main() {
       expect(find.text('GRABAR EN EL TELÉFONO'), findsOneWidget);
     });
 
-    testWidgets('conceder la cámara muestra el estado honesto de la 3.1.1', (
+    testWidgets('conceder la cámara inicia la vista previa real', (
       WidgetTester tester,
     ) async {
       final FakeStreamingService service = FakeStreamingService();
@@ -66,8 +66,9 @@ void main() {
         service.lastRequestedPermissions,
         <PermissionKind>[PermissionKind.camera],
       );
-      expect(find.textContaining('subetapa 3.1.1'), findsWidgets);
-      expect(find.text('Disponible en la Fase 3.1.1'), findsOneWidget);
+      expect(service.startPreviewCalls, 1);
+      expect(find.byType(Texture), findsOneWidget);
+      expect(find.text('DETENER VISTA PREVIA'), findsOneWidget);
     });
 
     testWidgets('denegar la cámara permite reintentarlo', (
@@ -121,8 +122,12 @@ void main() {
 
       expect(service.requestPermissionsCalls, 0);
       expect(find.text('VISTA PREVIA'), findsOneWidget);
-      expect(find.text('Disponible en la Fase 3.1.1'), findsOneWidget);
       expect(find.textContaining('Cámara concedida'), findsOneWidget);
+
+      await tapPreview(tester);
+      expect(service.requestPermissionsCalls, 0);
+      expect(service.startPreviewCalls, 1);
+      expect(find.byType(Texture), findsOneWidget);
     });
   });
 }

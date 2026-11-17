@@ -20,8 +20,21 @@ data class RtmpEndpoint(
 data class PreviewInfo(
     /** Identificador de textura de Flutter para dibujar la preview. */
     val textureId: Long,
+    /** Tamaño en orientación del sensor (sin rotar). */
     val width: Int,
     val height: Int,
+    /** Orientación del sensor en grados (normalmente 90 en la trasera). */
+    val sensorOrientation: Int = 90,
+    /**
+     * Rotación en grados que hay que aplicar a la imagen para verla
+     * derecha (`(sensorOrientation - rotación de pantalla + 360) % 360`,
+     * cámara trasera). Dart la aplica con `RotatedBox`.
+     */
+    val rotationDegrees: Int = 90,
+    /** FPS del rango elegido (máximo del rango; objetivo 30). */
+    val fps: Int = 30,
+    /** Cámara usada: `back` (la frontal queda diferida en 3.1.1). */
+    val lensFacing: String = "back",
 )
 
 /** Opciones de grabación para `startRecording` (3.1.2). */
@@ -60,12 +73,19 @@ enum class StreamState {
  * `UnsupportedOperationException` hasta que llegue la captura (3.1.1) y
  * la grabación (3.1.2). El manejador del canal devuelve
  * `not_available_in_phase_3_0` para todo lo de video.
+ *
+ * Subetapa 3.1.1: `startPreview` y `stopPreview` son reales (suspenden
+ * porque abrir la cámara es asíncrono) y `stopAll` detiene la vista
+ * previa. La grabación sigue sin implementarse: `startStream`,
+ * `startRecording` y `stopRecording` lanzan
+ * `UnsupportedOperationException` y el manejador sigue devolviendo
+ * `not_available_in_phase_3_0` para ellas.
  */
 interface StreamEngine {
-    fun startPreview(): PreviewInfo
-    fun stopPreview()
+    suspend fun startPreview(): PreviewInfo
+    suspend fun stopPreview()
     fun startStream(endpoint: RtmpEndpoint)
     fun startRecording(options: RecordingOptions): String
     fun stopRecording(): RecordingInfo
-    fun stopAll()
+    suspend fun stopAll()
 }

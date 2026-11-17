@@ -4,15 +4,17 @@ import 'package:flutter/material.dart';
 import 'package:transmiti2/app/app_scope.dart';
 import 'package:transmiti2/app/theme/app_colors.dart';
 import 'package:transmiti2/features/streaming/application/permission_controller.dart';
+import 'package:transmiti2/features/streaming/application/preview_controller.dart';
 import 'package:transmiti2/features/streaming/application/streaming_controller.dart';
 import 'package:transmiti2/features/streaming/application/streaming_service.dart';
 import 'package:transmiti2/features/streaming/domain/permission_state.dart';
+import 'package:transmiti2/features/streaming/domain/stream_contract.dart';
 import 'package:transmiti2/features/streaming/domain/stream_destination.dart';
 import 'package:transmiti2/shared/widgets/app_button.dart';
 import 'package:transmiti2/shared/widgets/app_input.dart';
 import 'package:transmiti2/shared/widgets/section_label.dart';
 
-/// Estudio de transmisión (subetapa 3.1.0).
+/// Estudio de transmisión (subetapas 3.1.0 y 3.1.1).
 ///
 /// Lo que hace: guardar el destino manual de Facebook Live (URL RTMPS +
 /// clave) y elegir el destino activo. La clave se guarda cifrada en el
@@ -20,15 +22,19 @@ import 'package:transmiti2/shared/widgets/section_label.dart';
 ///
 /// Permisos (3.1.0): no se pide ningún permiso al entrar. Al tocar
 /// "Vista previa" se pide la cámara con un motivo en la app antes del
-/// diálogo del sistema. Si se concede, se muestra el estado honesto: la
-/// vista previa real llega en la subetapa 3.1.1 (no hay cámara ficticia).
-/// Si se deniega, se puede reintentar; si se deniega permanentemente, se
-/// ofrece abrir los ajustes de la aplicación. El micrófono no se pide
-/// todavía: su camino queda construido para la subetapa 3.1.3.
+/// diálogo del sistema. Si se deniega, se puede reintentar; si se deniega
+/// permanentemente, se ofrece abrir los ajustes de la aplicación. El
+/// micrófono no se pide todavía: su camino queda construido para la
+/// subetapa 3.1.3.
 ///
-/// Lo que NO hace todavía: vista previa (3.1.1), transmisión ni
-/// grabación (3.1.2 / Fase 3.2). Esos botones aparecen deshabilitados con
-/// la fase en la que llegan.
+/// Vista previa (3.1.1): con el permiso concedido, "Vista previa" abre
+/// la cámara trasera real con Camera2 y muestra su imagen en vivo con el
+/// widget `Texture` (sin deformar: relación de aspecto y rotación según
+/// la orientación del sensor). Al salir de la pantalla, al ir a segundo
+/// plano o al girar el teléfono, la cámara se cierra o se reinicia.
+///
+/// Lo que NO hace todavía: transmisión ni grabación (Fase 3.2). Esos
+/// botones aparecen deshabilitados con la fase en la que llegan.
 class BroadcastScreen extends StatefulWidget {
   const BroadcastScreen({super.key});
 
@@ -47,6 +53,7 @@ class _BroadcastScreenState extends State<BroadcastScreen> {
   bool _loading = true;
   bool _didLoad = false;
   late PermissionController _permissions;
+  late PreviewController _preview;
 
   StreamingController get _streaming => AppScope.of(context).streaming;
 
@@ -61,11 +68,17 @@ class _BroadcastScreenState extends State<BroadcastScreen> {
       _permissions = _streaming.permissions;
       _permissions.attach();
       unawaited(_permissions.refresh());
+      _preview = _streaming.preview;
+      _preview.attach();
     }
   }
 
   @override
   void dispose() {
+    _preview.detach();
+    // Al salir de la pantalla la cámara se cierra: no se mantiene
+    // abierta innecesariamente.
+    unawaited(_preview.stop());
     _permissions.detach();
     _labelController.dispose();
     _urlController.dispose();
@@ -121,16 +134,25 @@ class _BroadcastScreenState extends State<BroadcastScreen> {
     await _refresh();
   }
 
-  /// Flujo de "Vista previa": motivo en la app, diálogo del sistema y
-  /// estado honesto después. Nunca se pide el permiso al entrar ni se
-  /// muestra una cámara ficticia.
+  /// Botón "Vista previa": si la cámara está activa, la detiene; si no,
+  /// comprueba el permiso y la abre.
   void _onPreviewTap() {
-    unawaited(_requestCameraPreview());
+    if (_preview.state == PreviewState.active ||
+        _preview.state == PreviewState.recovering) {
+      unawaited(_preview.stop());
+      return;
+    }
+    unawaited(_startPreviewFlow());
   }
 
-  Future<void> _requestCameraPreview() async {
+  /// Flujo de "Vista previa": si el permiso está concedido se abre la
+  /// cámara directamente; si no, motivo en la app, diálogo del sistema y,
+  /// al conceder, se abre la cámara. Nunca se pide el permiso al entrar
+  /// ni se muestra una cámara ficticia.
+  Future<void> _startPreviewFlow() async {
     final PermissionStatus current = _permissions.states.camera;
     if (current == PermissionStatus.granted) {
+      await _preview.start();
       return;
     }
     if (current == PermissionStatus.permanentlyDenied) {
@@ -150,7 +172,9 @@ class _BroadcastScreenState extends State<BroadcastScreen> {
       if (!mounted) {
         return;
       }
-      if (result == PermissionStatus.permanentlyDenied) {
+      if (result == PermissionStatus.granted) {
+        await _preview.start();
+      } else if (result == PermissionStatus.permanentlyDenied) {
         final bool? open = await _showSettingsDialog();
         if (open == true && mounted) {
           await _permissions.openAppSettings();
@@ -300,7 +324,12 @@ class _BroadcastScreenState extends State<BroadcastScreen> {
               ListenableBuilder(
                 listenable: _permissions,
                 builder: (BuildContext context, Widget? child) {
-                  return _videoSection(text);
+                  return ListenableBuilder(
+                    listenable: _preview,
+                    builder: (BuildContext context, Widget? child) {
+                      return _videoSection(text);
+                    },
+                  );
                 },
               ),
             ],
@@ -311,27 +340,48 @@ class _BroadcastScreenState extends State<BroadcastScreen> {
   }
 
   Widget _videoSection(TextTheme text) {
+    final PreviewState state = _preview.state;
     final PermissionStatus camera = _permissions.states.camera;
     final bool requesting = _permissions.isRequesting;
     final String explanation;
-    switch (camera) {
-      case PermissionStatus.granted:
+    switch (state) {
+      case PreviewState.active:
+        explanation = 'Vista previa activa: imagen real de la cámara trasera.';
+      case PreviewState.preparing:
+        explanation = 'Preparando la cámara…';
+      case PreviewState.recovering:
+        explanation = 'Recuperando la vista previa…';
+      case PreviewState.unavailable:
         explanation =
-            'Cámara concedida. La vista previa real estará disponible '
-            'en la subetapa 3.1.1.';
-      case PermissionStatus.denied:
+            'Cámara no disponible en este dispositivo.';
+      case PreviewState.permissionDenied:
         explanation =
             'El permiso de cámara está denegado. Puedes volver a '
-            'intentarlo; la vista previa real llegará en la subetapa 3.1.1.';
-      case PermissionStatus.permanentlyDenied:
+            'intentarlo para abrir la vista previa.';
+      case PreviewState.error:
         explanation =
-            'El permiso de cámara está bloqueado en los ajustes del '
-            'sistema. Ábrelo desde los ajustes de la aplicación para usar '
-            'la vista previa.';
-      case PermissionStatus.notRequested:
-        explanation =
-            'La vista previa usa la cámara trasera del teléfono. El '
-            'permiso se pide solo cuando tocas «Vista previa».';
+            'No se pudo iniciar la vista previa'
+            '${_preview.errorCode != null ? ': ${_preview.errorCode}' : '.'}';
+      case PreviewState.closed:
+        switch (camera) {
+          case PermissionStatus.granted:
+            explanation =
+                'Cámara concedida. Toca «Vista previa» para ver la '
+                'imagen real de la cámara trasera.';
+          case PermissionStatus.denied:
+            explanation =
+                'El permiso de cámara está denegado. Puedes volver a '
+                'intentarlo.';
+          case PermissionStatus.permanentlyDenied:
+            explanation =
+                'El permiso de cámara está bloqueado en los ajustes del '
+                'sistema. Ábrelo desde los ajustes de la aplicación para '
+                'usar la vista previa.';
+          case PermissionStatus.notRequested:
+            explanation =
+                'La vista previa usa la cámara trasera del teléfono. El '
+                'permiso se pide solo cuando tocas «Vista previa».';
+        }
     }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -343,10 +393,27 @@ class _BroadcastScreenState extends State<BroadcastScreen> {
           style: text.bodyMedium?.copyWith(color: AppColors.textMuted),
         ),
         const SizedBox(height: 12),
-        if (camera == PermissionStatus.granted)
-          const _PhaseButton(
-            label: 'VISTA PREVIA',
-            phase: 'Fase 3.1.1',
+        if (state == PreviewState.active ||
+            state == PreviewState.recovering)
+          ...<Widget>[
+            _previewArea(_preview.info!),
+            const SizedBox(height: 12),
+            AppButton.primary(
+              label: state == PreviewState.recovering
+                  ? 'RECUPERANDO…'
+                  : 'DETENER VISTA PREVIA',
+              onPressed: state == PreviewState.recovering
+                  ? () {}
+                  : _onPreviewTap,
+            ),
+          ]
+        else if (state == PreviewState.preparing)
+          const Center(child: CircularProgressIndicator())
+        else if (state == PreviewState.unavailable ||
+            state == PreviewState.error)
+          AppButton.primary(
+            label: 'REINTENTAR',
+            onPressed: _onPreviewTap,
           )
         else
           AppButton.primary(
@@ -364,6 +431,29 @@ class _BroadcastScreenState extends State<BroadcastScreen> {
           phase: 'Fase 3.2',
         ),
       ],
+    );
+  }
+
+  /// Imagen real de la cámara, sin deformar: la relación de aspecto es
+  /// la de la imagen ya rotada y `RotatedBox` aplica la rotación que el
+  /// motor calculó a partir de la orientación del sensor y de la
+  /// pantalla. El motor no rota los píxeles (el backend `ImageReader`
+  /// no gestiona la rotación): la rotación es solo de presentación.
+  Widget _previewArea(PreviewInfo info) {
+    final int rotation = info.rotationDegrees;
+    final bool swapped = rotation == 90 || rotation == 270;
+    final double aspect = swapped
+        ? info.height / info.width
+        : info.width / info.height;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(16),
+      child: AspectRatio(
+        aspectRatio: aspect,
+        child: RotatedBox(
+          quarterTurns: rotation ~/ 90,
+          child: Texture(textureId: info.textureId),
+        ),
+      ),
     );
   }
 
