@@ -57,6 +57,23 @@ void main() {
       expect(StreamContract.recordingNotFound, 'recording_not_found');
     });
 
+    test('los 4 códigos de diagnóstico de la Fase A son distintos', () {
+      final List<String> codes = <String>[
+        StreamContract.cameraTimeout,
+        StreamContract.cameraConfigError,
+        StreamContract.cameraStateError,
+        StreamContract.cameraDisabledBySystem,
+      ];
+      expect(codes.toSet().length, codes.length);
+      expect(StreamContract.cameraTimeout, 'camera_timeout');
+      expect(StreamContract.cameraConfigError, 'camera_config_error');
+      expect(StreamContract.cameraStateError, 'camera_state_error');
+      expect(
+        StreamContract.cameraDisabledBySystem,
+        'camera_disabled_by_system',
+      );
+    });
+
     test('el error de video de la 3.0 se conserva', () {
       expect(
         StreamContract.notAvailableInPhase30,

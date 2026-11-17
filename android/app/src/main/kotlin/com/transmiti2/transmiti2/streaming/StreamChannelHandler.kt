@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.hardware.camera2.CameraManager
 import android.net.Uri
 import android.provider.Settings
+import android.util.Log
 import androidx.core.content.ContextCompat
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -14,7 +15,77 @@ import io.flutter.view.TextureRegistry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
+
+/**
+ * Etiqueta única de los registros de diagnóstico (Fase A). Sin datos
+ * sensibles: nunca claves, URLs ni contenido de imágenes.
+ */
+private const val TAG = "Transmiti2Camera"
+
+/** Error de inicio de vista previa ya traducido al contrato. */
+internal data class MappedPreviewError(
+    val code: String,
+    val message: String,
+    val details: Map<String, Any?>,
+)
+
+/**
+ * Diferencia un fallo de `startPreview` (Fase A) sin cambiar la lógica
+ * de apertura/cierre. El orden es el contrato: `CameraException` ya
+ * trae su código; `TimeoutCancellationException` ANTES que
+ * `CancellationException` (es su subclase) y que `IllegalStateException`
+ * (superclase de `CancellationException`); una cancelación que no es
+ * timeout sigue siendo `camera_unavailable` («cancelado»).
+ *
+ * Los `details` viajan en el `PlatformException` para que Dart muestre
+ * la etapa, la cámara y la configuración elegidas. Lo desconocido es
+ * `null`: nunca se inventa un valor.
+ */
+internal fun mapStartPreviewError(e: Throwable): MappedPreviewError {
+    val baseDetails = mapOf<String, Any?>(
+        "stage" to "startPreview",
+        "cameraCount" to null,
+        "selectedCameraId" to null,
+        "selectedSize" to null,
+        "selectedFps" to null,
+        "exceptionClass" to e.javaClass.simpleName,
+    )
+    return when (e) {
+        is CameraException -> MappedPreviewError(
+            code = e.code,
+            message = e.message ?: "No se pudo iniciar la cámara.",
+            details = if (e.details.isEmpty()) baseDetails else e.details,
+        )
+        is TimeoutCancellationException -> MappedPreviewError(
+            code = StreamContract.CAMERA_TIMEOUT,
+            message = "Tiempo de espera agotado al iniciar la cámara (5 s).",
+            details = baseDetails,
+        )
+        is CancellationException -> MappedPreviewError(
+            code = StreamContract.CAMERA_UNAVAILABLE,
+            message = "Inicio de la vista previa cancelado.",
+            details = baseDetails,
+        )
+        is IllegalArgumentException -> MappedPreviewError(
+            code = StreamContract.CAMERA_CONFIG_ERROR,
+            message = "Configuración de cámara no válida: ${e.message}",
+            details = baseDetails,
+        )
+        is IllegalStateException -> MappedPreviewError(
+            code = StreamContract.CAMERA_STATE_ERROR,
+            message = "La cámara o la sesión no está en un estado " +
+                "válido: ${e.message}",
+            details = baseDetails,
+        )
+        else -> MappedPreviewError(
+            code = StreamContract.CAMERA_UNAVAILABLE,
+            message = "No se pudo iniciar la cámara.",
+            details = baseDetails,
+        )
+    }
+}
 
 /**
  * Manejador del canal `com.transmiti2.transmiti2/streaming`.
@@ -38,6 +109,11 @@ import kotlinx.coroutines.launch
  * también la vista previa. La grabación sigue devolviendo
  * `not_available_in_phase_3_0`. La cámara nunca se abre sin el permiso
  * concedido: el motor lo comprueba antes de crear nada.
+ *
+ * Fase A (diagnóstico instrumentado): `startPreview` diferencia los
+ * fallos (`camera_timeout`, `camera_config_error`,
+ * `camera_state_error`, `camera_disabled_by_system`) y devuelve sus
+ * `details` a Dart; solo instrumentación, sin corrección funcional.
  */
 class StreamChannelHandler(
     private val context: Context,
@@ -150,14 +226,27 @@ class StreamChannelHandler(
      * sensorOrientation, rotationDegrees, fps, lensFacing}`. La apertura
      * es asíncrona (Camera2): el resultado se responde cuando la sesión
      * está configurada, no antes.
+     *
+     * Fase A: el fallo se diferencia con [mapStartPreviewError]
+     * (`TimeoutCancellationException` ANTES que `CancellationException`)
+     * y viaja con sus `details` de diagnóstico; el registro deja la
+     * etapa y la clase de la excepción.
      */
     private fun startPreview(result: MethodChannel.Result) {
         val engine = previewEngine
+        Log.d(TAG, "startPreview: engine=${engine != null}")
         if (engine == null) {
             result.error(
                 StreamContract.CAMERA_UNAVAILABLE,
                 "Vista previa no disponible en este dispositivo.",
-                null,
+                mapOf<String, Any?>(
+                    "stage" to "startPreview",
+                    "cameraCount" to null,
+                    "selectedCameraId" to null,
+                    "selectedSize" to null,
+                    "selectedFps" to null,
+                    "exceptionClass" to null,
+                ),
             )
             return
         }
@@ -166,21 +255,30 @@ class StreamChannelHandler(
                 val info = engine.startPreview()
                 result.success(previewInfoMap(info))
             } catch (e: CameraException) {
-                result.error(e.code, e.message, null)
+                failPreview(result, e)
+            } catch (e: TimeoutCancellationException) {
+                failPreview(result, e)
             } catch (e: CancellationException) {
-                result.error(
-                    StreamContract.CAMERA_UNAVAILABLE,
-                    "Inicio de la vista previa cancelado.",
-                    null,
-                )
+                failPreview(result, e)
+            } catch (e: IllegalArgumentException) {
+                failPreview(result, e)
+            } catch (e: IllegalStateException) {
+                failPreview(result, e)
             } catch (e: Exception) {
-                result.error(
-                    StreamContract.CAMERA_UNAVAILABLE,
-                    "No se pudo iniciar la cámara.",
-                    null,
-                )
+                failPreview(result, e)
             }
         }
+    }
+
+    /** Registra el fallo de `startPreview` y lo devuelve con su código. */
+    private fun failPreview(result: MethodChannel.Result, e: Throwable) {
+        val mapped = mapStartPreviewError(e)
+        Log.e(
+            TAG,
+            "etapa=startPreview ex=${e.javaClass.simpleName} " +
+                "msg=${e.message} codigo=${mapped.code}",
+        )
+        result.error(mapped.code, mapped.message, mapped.details)
     }
 
     private fun previewInfoMap(info: PreviewInfo): Map<String, Any> {

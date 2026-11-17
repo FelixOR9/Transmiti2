@@ -133,7 +133,12 @@ void main() {
       expect(service.startPreviewCalls, 1);
       expect(find.byType(Texture), findsNothing);
       expect(find.textContaining('No se pudo iniciar'), findsOneWidget);
-      expect(find.textContaining('camera_in_use'), findsOneWidget);
+      // El código aparece también en el bloque de diagnóstico (Fase A):
+      // se busca el texto exacto del error, no el del bloque.
+      expect(
+        find.text('No se pudo iniciar la vista previa: camera_in_use'),
+        findsOneWidget,
+      );
       expect(find.text('REINTENTAR'), findsOneWidget);
 
       service.startPreviewError = null;

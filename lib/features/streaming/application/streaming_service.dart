@@ -4,11 +4,17 @@ import 'package:transmiti2/features/streaming/domain/stream_contract.dart';
 
 /// Error del motor de transmisión. El código nunca lleva la clave ni la
 /// URL dentro: solo el código, para que pueda mostrarse o registrarse.
+///
+/// Desde la Fase A el error lleva también el mensaje técnico nativo
+/// (`message`) y los datos de diagnóstico del fallo (`details`:
+/// `stage`, `cameraCount`, `selectedCameraId`, `selectedSize`,
+/// `selectedFps`, `exceptionClass`), cuando el lado nativo los envía.
 class StreamingException implements Exception {
-  const StreamingException(this.code, [this.message]);
+  const StreamingException(this.code, [this.message, this.details]);
 
   final String code;
   final String? message;
+  final Map<String, Object?>? details;
 
   @override
   String toString() => 'StreamingException($code)';
@@ -85,7 +91,11 @@ class MethodChannelStreamingService implements StreamingService {
   final Stream<Map<String, Object?>> _events;
 
   StreamingException _fromPlatform(PlatformException e) {
-    return StreamingException(e.code, e.message);
+    final Object? rawDetails = e.details;
+    final Map<String, Object?>? details = rawDetails is Map
+        ? Map<String, Object?>.from(rawDetails)
+        : null;
+    return StreamingException(e.code, e.message, details);
   }
 
   @override

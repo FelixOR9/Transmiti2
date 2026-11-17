@@ -73,6 +73,17 @@ object StreamContract {
     const val CAMERA_UNAVAILABLE = "camera_unavailable"
     const val CAMERA_IN_USE = "camera_in_use"
     const val CAMERA_DISCONNECTED = "camera_disconnected"
+
+    /**
+     * Códigos de diagnóstico (Fase A, 3.1.1): diferencian fallos que
+     * antes colapsaban en `camera_unavailable`, sin cambiar la lógica
+     * de apertura/cierre. Espejo en
+     * `lib/features/streaming/domain/stream_contract.dart`.
+     */
+    const val CAMERA_TIMEOUT = "camera_timeout"
+    const val CAMERA_CONFIG_ERROR = "camera_config_error"
+    const val CAMERA_STATE_ERROR = "camera_state_error"
+    const val CAMERA_DISABLED_BY_SYSTEM = "camera_disabled_by_system"
     const val ENCODER_ERROR = "encoder_error"
     const val MUXER_ERROR = "muxer_error"
     const val AUDIO_UNAVAILABLE = "audio_unavailable"

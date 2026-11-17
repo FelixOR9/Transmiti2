@@ -31,6 +31,73 @@ enum PreviewState {
   error,
 }
 
+/// Datos de diagnóstico del último intento de vista previa (Fase A).
+///
+/// Vienen de los `details` del error nativo o de la `PreviewInfo`
+/// cuando la preview está activa. Un campo `null` significa que el dato
+/// no estaba disponible en esa etapa: la UI muestra «—», nunca se
+/// inventa un valor.
+class PreviewDiagnostics {
+  const PreviewDiagnostics({
+    this.stage,
+    this.cameraCount,
+    this.selectedCameraId,
+    this.selectedSize,
+    this.selectedFps,
+    this.exceptionClass,
+    this.lastErrorStage,
+  });
+
+  /// Etapa alcanzada en el intento (`enumerate`, `openDevice`,
+  /// `createCaptureSession`, `startRepeating`, `activa`...).
+  final String? stage;
+
+  /// Número de cámaras detectadas por `cameraIdList`.
+  final int? cameraCount;
+
+  /// Cámara elegida (`0`, `1`…).
+  final String? selectedCameraId;
+
+  /// Tamaño elegido (`1280x720`).
+  final String? selectedSize;
+
+  /// FPS elegido (máximo del rango).
+  final int? selectedFps;
+
+  /// Clase de la excepción nativa, si la hubo.
+  final String? exceptionClass;
+
+  /// Etapa en la que falló el intento (`null` si no hubo error).
+  final String? lastErrorStage;
+
+  /// Diagnóstico de un error: `stage` es a la vez la etapa alcanzada
+  /// y la última etapa con error.
+  factory PreviewDiagnostics.fromDetails(Map<String, Object?>? details) {
+    if (details == null) {
+      return const PreviewDiagnostics();
+    }
+    final String? stage = details['stage'] as String?;
+    return PreviewDiagnostics(
+      stage: stage,
+      cameraCount: (details['cameraCount'] as num?)?.toInt(),
+      selectedCameraId: details['selectedCameraId'] as String?,
+      selectedSize: details['selectedSize'] as String?,
+      selectedFps: (details['selectedFps'] as num?)?.toInt(),
+      exceptionClass: details['exceptionClass'] as String?,
+      lastErrorStage: stage,
+    );
+  }
+
+  /// Diagnóstico de una vista previa activa: la configuración elegida.
+  factory PreviewDiagnostics.fromInfo(PreviewInfo info) {
+    return PreviewDiagnostics(
+      stage: 'activa',
+      selectedSize: '${info.width}x${info.height}',
+      selectedFps: info.fps,
+    );
+  }
+}
+
 /// Vista previa real de cámara (subetapa 3.1.1).
 ///
 /// Orquesta `startPreview` / `stopPreview` del servicio sin mostrar
@@ -68,6 +135,46 @@ class PreviewController extends ChangeNotifier with WidgetsBindingObserver {
 
   String? _errorCode;
   String? get errorCode => _errorCode;
+
+  /// Mensaje técnico nativo del último error (Fase A). Antes se
+  /// descartaba: solo viajaba el código.
+  String? _errorMessage;
+  String? get errorMessage => _errorMessage;
+
+  /// Diagnóstico del último intento (Fase A). Se limpia al cerrar la
+  /// preview o al iniciar un nuevo intento: nunca se muestra un
+  /// diagnóstico viejo como si fuera del intento actual.
+  PreviewDiagnostics? _diagnostics;
+  PreviewDiagnostics? get diagnostics => _diagnostics;
+
+  /// Texto del bloque de diagnóstico que muestra el Estudio (Fase A):
+  /// `null` cuando no hay ningún intento que mostrar (cerrada,
+  /// preparando, recuperando o permiso denegado).
+  String? get diagnosticText {
+    if (_state != PreviewState.active &&
+        _state != PreviewState.error &&
+        _state != PreviewState.unavailable) {
+      return null;
+    }
+    final PreviewDiagnostics diag =
+        _diagnostics ?? const PreviewDiagnostics();
+    final StringBuffer text = StringBuffer('Diagnóstico de vista previa');
+    text.writeln();
+    text.writeln('Estado: ${_state.name}');
+    text.writeln('Etapa alcanzada: ${diag.stage ?? '—'}');
+    if (_errorCode != null) {
+      text.writeln('Código de error: $_errorCode');
+    }
+    text.writeln('Mensaje técnico: ${_errorMessage ?? '—'}');
+    text.writeln(
+      'Cámaras detectadas: ${diag.cameraCount?.toString() ?? '—'}',
+    );
+    text.writeln('Cámara seleccionada: ${diag.selectedCameraId ?? '—'}');
+    text.writeln('Tamaño: ${diag.selectedSize ?? '—'}');
+    text.writeln('FPS: ${diag.selectedFps?.toString() ?? '—'}');
+    text.write('Última etapa con error: ${diag.lastErrorStage ?? '—'}');
+    return text.toString();
+  }
 
   /// Generación del inicio en curso: un reinicio o una parada dejan
   /// obsoletos los resultados de inicios anteriores.
@@ -158,12 +265,16 @@ class PreviewController extends ChangeNotifier with WidgetsBindingObserver {
     if (_permissions.states.camera != PermissionStatus.granted) {
       _state = PreviewState.permissionDenied;
       _errorCode = null;
+      _errorMessage = null;
+      _diagnostics = null;
       notifyListeners();
       return;
     }
     final int generation = ++_generation;
     _state = PreviewState.preparing;
     _errorCode = null;
+    _errorMessage = null;
+    _diagnostics = null;
     notifyListeners();
     try {
       final PreviewInfo preview = await _service.startPreview();
@@ -172,6 +283,7 @@ class PreviewController extends ChangeNotifier with WidgetsBindingObserver {
         return;
       }
       _info = preview;
+      _diagnostics = PreviewDiagnostics.fromInfo(preview);
       _state = PreviewState.active;
       notifyListeners();
     } on StreamingException catch (e) {
@@ -180,6 +292,8 @@ class PreviewController extends ChangeNotifier with WidgetsBindingObserver {
       }
       _info = null;
       _errorCode = e.code;
+      _errorMessage = e.message;
+      _diagnostics = PreviewDiagnostics.fromDetails(e.details);
       switch (e.code) {
         case StreamContract.permissionDenied:
           _state = PreviewState.permissionDenied;
@@ -205,6 +319,8 @@ class PreviewController extends ChangeNotifier with WidgetsBindingObserver {
     _state = PreviewState.closed;
     _info = null;
     _errorCode = null;
+    _errorMessage = null;
+    _diagnostics = null;
     notifyListeners();
     try {
       await _service.stopPreview();
@@ -231,6 +347,11 @@ class PreviewController extends ChangeNotifier with WidgetsBindingObserver {
             _state == PreviewState.recovering) {
           _info = null;
           _errorCode = event['code'] as String?;
+          // Fase A: el evento lleva el mensaje técnico y los datos de
+          // diagnóstico cuando el motor los tiene; en una desconexión
+          // asíncrona solo llega el código y el resto queda en «—».
+          _errorMessage = event['message'] as String?;
+          _diagnostics = PreviewDiagnostics.fromDetails(event);
           _state = PreviewState.error;
           notifyListeners();
         }

@@ -2,6 +2,7 @@ package com.transmiti2.transmiti2.streaming
 
 import android.content.Context
 import android.os.Build
+import android.util.Log
 import android.view.Display
 import android.view.Surface
 import android.view.WindowManager
@@ -14,6 +15,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+
+/**
+ * Etiqueta única de los registros de diagnóstico (Fase A). Sin datos
+ * sensibles: nunca claves, URLs ni contenido de imágenes.
+ */
+private const val TAG = "Transmiti2Camera"
 
 /**
  * Rotación de la pantalla en grados (0, 90, 180 o 270). En API 30+ se
@@ -191,6 +198,7 @@ class StreamEngineImpl(
     }
 
     private suspend fun doStartPreview(): PreviewInfo {
+        Log.d(TAG, "startPreview: permiso concedido, creando productor")
         val created = withContext(mainDispatcher) {
             surfaceProvider.create()
         }
@@ -323,14 +331,18 @@ class StreamEngineImpl(
         val currentHandle = mutex.withLock { handle } ?: return
         val newSession = try {
             sessionFactory(currentHandle)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.e(
+                TAG,
+                "etapa=recover ex=${e.javaClass.simpleName} msg=${e.message}",
+            )
             mutex.withLock {
                 state = State.IDLE
                 info = null
                 handle = null
             }
             releaseHandle(currentHandle)
-            emitError(StreamContract.CAMERA_UNAVAILABLE)
+            emitError(StreamContract.CAMERA_UNAVAILABLE, e.message)
             return
         }
         newSession.listener = sessionListener
@@ -362,7 +374,11 @@ class StreamEngineImpl(
                     "fps" to result.fps,
                 ),
             )
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.e(
+                TAG,
+                "etapa=recover ex=${e.javaClass.simpleName} msg=${e.message}",
+            )
             mutex.withLock {
                 state = State.IDLE
                 info = null
@@ -370,7 +386,12 @@ class StreamEngineImpl(
                 handle = null
             }
             releaseHandle(currentHandle)
-            emitError(StreamContract.CAMERA_UNAVAILABLE)
+            val cameraError = e as? CameraException
+            emitError(
+                cameraError?.code ?: StreamContract.CAMERA_UNAVAILABLE,
+                e.message,
+                cameraError?.details ?: emptyMap(),
+            )
         }
     }
 
@@ -430,10 +451,23 @@ class StreamEngineImpl(
         onEvent?.invoke(mapOf("type" to type) + payload)
     }
 
-    private fun emitError(code: String) {
-        emitEvent(
-            StreamContract.EVENT_PREVIEW_ERROR,
-            mapOf("code" to code),
-        )
+    /**
+     * Error asíncrono de vista previa. Fase A: el evento lleva también
+     * el mensaje técnico (`message`) y los `details` de diagnóstico
+     * cuando el motor los tiene; sin ellos, solo el código (es el caso
+     * de `teardownAfterError`, que solo recibe el código del
+     * `PreviewSessionListener`). El código emitido no cambia.
+     */
+    private fun emitError(
+        code: String,
+        message: String? = null,
+        details: Map<String, Any?> = emptyMap(),
+    ) {
+        val payload = mutableMapOf<String, Any?>("code" to code)
+        if (message != null) {
+            payload["message"] = message
+        }
+        payload.putAll(details)
+        emitEvent(StreamContract.EVENT_PREVIEW_ERROR, payload)
     }
 }

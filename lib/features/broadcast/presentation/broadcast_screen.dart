@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:transmiti2/app/app_scope.dart';
 import 'package:transmiti2/app/theme/app_colors.dart';
 import 'package:transmiti2/features/streaming/application/permission_controller.dart';
@@ -188,6 +189,24 @@ class _BroadcastScreenState extends State<BroadcastScreen> {
         SnackBar(content: Text('No se pudo pedir el permiso: ${e.code}')),
       );
     }
+  }
+
+  /// Copia el diagnóstico del último intento de vista previa al
+  /// portapapeles (Fase A), para poder pegarlo sin ordenador ni logcat.
+  Future<void> _copyDiagnostics() async {
+    final String? text = _preview.diagnosticText;
+    if (text == null) {
+      return;
+    }
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Diagnóstico copiado al portapapeles.'),
+      ),
+    );
   }
 
   /// Motivo en la app, antes del diálogo del sistema.
@@ -420,6 +439,13 @@ class _BroadcastScreenState extends State<BroadcastScreen> {
             label: requesting ? 'PIDIENDO PERMISO…' : 'VISTA PREVIA',
             onPressed: requesting ? () {} : _onPreviewTap,
           ),
+        // Bloque de diagnóstico (Fase A): tras un intento de preview,
+        // en error y también con la preview activa (configuración
+        // elegida). No interfiere con el resto de la pantalla.
+        if (_preview.diagnosticText != null) ...<Widget>[
+          const SizedBox(height: 12),
+          _diagnosticBlock(text),
+        ],
         const SizedBox(height: 12),
         const _PhaseButton(
           label: 'TRANSMITIR',
@@ -431,6 +457,41 @@ class _BroadcastScreenState extends State<BroadcastScreen> {
           phase: 'Fase 3.2',
         ),
       ],
+    );
+  }
+
+  /// Bloque de diagnóstico de la vista previa (Fase A): etapa
+  /// alcanzada, código y mensaje técnico del error, cámaras detectadas,
+  /// cámara y configuración elegidas y última etapa con error. Con
+  /// botón para copiar el texto al portapapeles.
+  Widget _diagnosticBlock(TextTheme text) {
+    final String diagnostic = _preview.diagnosticText!;
+    return Card(
+      color: AppColors.surface,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            Text(
+              'DIAGNÓSTICO DE VISTA PREVIA',
+              style: text.labelMedium?.copyWith(
+                color: AppColors.textMuted,
+              ),
+            ),
+            const SizedBox(height: 8),
+            SelectableText(
+              diagnostic,
+              style: text.bodyMedium,
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton(
+              onPressed: _copyDiagnostics,
+              child: const Text('COPIAR DIAGNÓSTICO'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 

@@ -76,8 +76,12 @@ abstract final class StreamContract {
 
   /// Eventos de vista previa (subetapa 3.1.1). `preview_started` lleva
   /// `textureId`, `width`, `height` y `fps`; `preview_error` lleva
-  /// `code`; `preview_surface_lost` no lleva datos (la superficie se
-  /// perdió temporalmente y el motor la recupera solo).
+  /// `code` y, desde la Fase A, también `message` y los datos de
+  /// diagnóstico (`stage`, `cameraCount`, `selectedCameraId`,
+  /// `selectedSize`, `selectedFps`, `exceptionClass`) cuando el motor
+  /// los tiene (en una desconexión asíncrona solo llega el código);
+  /// `preview_surface_lost` no lleva datos (la superficie se perdió
+  /// temporalmente y el motor la recupera solo).
   static const String eventPreviewStarted = 'preview_started';
   static const String eventPreviewStopped = 'preview_stopped';
   static const String eventPreviewError = 'preview_error';
@@ -102,6 +106,15 @@ abstract final class StreamContract {
   static const String cameraUnavailable = 'camera_unavailable';
   static const String cameraInUse = 'camera_in_use';
   static const String cameraDisconnected = 'camera_disconnected';
+
+  /// Códigos de diagnóstico (Fase A, 3.1.1): diferencian fallos que
+  /// antes colapsaban en `camera_unavailable`, sin cambiar la lógica
+  /// de apertura/cierre. Espejo en Kotlin
+  /// (`StreamContract.kt`).
+  static const String cameraTimeout = 'camera_timeout';
+  static const String cameraConfigError = 'camera_config_error';
+  static const String cameraStateError = 'camera_state_error';
+  static const String cameraDisabledBySystem = 'camera_disabled_by_system';
   static const String encoderError = 'encoder_error';
   static const String muxerError = 'muxer_error';
   static const String audioUnavailable = 'audio_unavailable';

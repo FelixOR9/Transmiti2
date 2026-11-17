@@ -41,6 +41,8 @@ class FakeStreamingService implements StreamingService {
     lensFacing: 'back',
   );
   String? startPreviewError;
+  String? startPreviewErrorMessage;
+  Map<String, Object?>? startPreviewErrorDetails;
   int startPreviewCalls = 0;
   int stopPreviewCalls = 0;
   int stopAllCalls = 0;
@@ -118,7 +120,11 @@ class FakeStreamingService implements StreamingService {
     startPreviewCalls++;
     final String? error = startPreviewError;
     if (error != null) {
-      throw StreamingException(error);
+      throw StreamingException(
+        error,
+        startPreviewErrorMessage,
+        startPreviewErrorDetails,
+      );
     }
     return previewInfo;
   }

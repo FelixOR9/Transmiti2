@@ -21,6 +21,24 @@ void main() {
       'Log.v(',
       'Log.w(',
     ];
+    // Fase A: los tres archivos del motor de cámara registran
+    // diagnóstico con tag `Transmiti2Camera` (etapa, cámara elegida,
+    // configuración, clase de excepción). Siguen prohibidos en todo
+    // lo demás, y en ellos ninguna línea de log puede mencionar una
+    // clave, una URL ni un secreto (se comprueba abajo).
+    const List<String> logAllowed = <String>[
+      'streaming/StreamChannelHandler.kt',
+      'streaming/StreamEngineImpl.kt',
+      'streaming/CameraSession.kt',
+    ];
+    const List<String> logForbiddenWords = <String>[
+      'key',
+      'clave',
+      'secret',
+      'url',
+      'ingest',
+      'streamKey',
+    ];
     final List<Directory> roots = <Directory>[
       Directory('lib'),
       Directory('android/app/src/main'),
@@ -40,12 +58,37 @@ void main() {
     expect(files, isNotEmpty);
     for (final File file in files) {
       final String content = file.readAsStringSync();
+      final bool logsAllowed = logAllowed.any(
+        (String suffix) => file.path.endsWith(suffix),
+      );
       for (final String word in forbidden) {
+        // Los `Log.*` solo se permiten en los archivos de diagnóstico.
+        if (logsAllowed && word.startsWith('Log.')) {
+          continue;
+        }
         expect(
           content.contains(word),
           isFalse,
           reason: '${file.path} contiene "$word"',
         );
+      }
+      if (logsAllowed) {
+        // Ninguna llamada de log menciona claves, URLs ni secretos
+        // (la llamada puede ocupar varias líneas: se busca completa).
+        final RegExp logCall = RegExp(
+          r'Log\.[a-z]+\([^;]*?\);',
+          dotAll: true,
+        );
+        for (final Match match in logCall.allMatches(content)) {
+          final String call = match.group(0)!.toLowerCase();
+          for (final String word in logForbiddenWords) {
+            expect(
+              call.contains(word),
+              isFalse,
+              reason: '${file.path} registra un secreto: ${match.group(0)}',
+            );
+          }
+        }
       }
       // Ningún print/debugPrint puede interpolar una variable llamada clave.
       for (final String line in content.split('\n')) {

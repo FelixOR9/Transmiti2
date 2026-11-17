@@ -13,11 +13,14 @@ import android.media.ImageReader
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.util.Log
 import android.util.Range
 import android.view.Surface
 import java.util.concurrent.Executor
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeout
 
@@ -119,6 +122,80 @@ class CameraSession(
     private var captureSession: CameraCaptureSession? = null
     private var currentConfig: PreviewConfig? = null
 
+    /**
+     * Diagnóstico de la Fase A: última etapa alcanzada y datos de la
+     * selección, para los `details` del error que se devuelve a Dart.
+     * Solo lectura de la sesión (IDs «0», «1»… y tamaños no son
+     * sensibles). Nunca se inventa un valor: lo desconocido es `null`.
+     */
+    private var lastStage: String = "inicio"
+    private var lastCameraCount: Int? = null
+    private var lastSelectedCameraId: String? = null
+    private var lastConfig: PreviewConfig? = null
+
+    /** Datos de diagnóstico del fallo en `stage`, causados por `e`. */
+    private fun diagnostics(
+        stage: String,
+        e: Throwable? = null,
+    ): Map<String, Any?> {
+        val config = lastConfig
+        return mapOf(
+            "stage" to stage,
+            "cameraCount" to lastCameraCount,
+            "selectedCameraId" to lastSelectedCameraId,
+            "selectedSize" to config?.let {
+                "${it.size.width}x${it.size.height}"
+            },
+            "selectedFps" to config?.fpsRange?.max,
+            "exceptionClass" to e?.javaClass?.simpleName,
+        )
+    }
+
+    /**
+     * Diferencia un fallo de `open()` sin cambiar el resultado de
+     * apertura/cierre: el mismo fallo que antes, con un código y unos
+     * `details` que lo distinguen. `TimeoutCancellationException` se
+     * comprueba ANTES que `CancellationException` (es su subclase) y
+     * que `IllegalStateException` (superclase de `CancellationException`);
+     * una cancelación que no es timeout se devuelve tal cual para que el
+     * manejador la siga tratando como cancelación.
+     */
+    private fun mapOpenFailure(e: Exception): Exception {
+        val stage = lastStage
+        Log.e(
+            TAG,
+            "etapa=$stage ex=${e.javaClass.simpleName} msg=${e.message}",
+        )
+        return when (e) {
+            is CameraException -> if (e.details.isEmpty()) {
+                e.withDetails(diagnostics(stage, e))
+            } else {
+                e
+            }
+            is TimeoutCancellationException -> CameraException(
+                StreamContract.CAMERA_TIMEOUT,
+                "Tiempo de espera agotado en la etapa $stage (5 s).",
+                diagnostics(stage, e),
+            )
+            is CancellationException -> e
+            is CameraAccessException -> mapCameraAccessException(e)
+                .withDetails(diagnostics(stage, e))
+            is IllegalArgumentException -> CameraException(
+                StreamContract.CAMERA_CONFIG_ERROR,
+                "Configuración de cámara no válida en la etapa $stage: " +
+                    "${e.message}",
+                diagnostics(stage, e),
+            )
+            is IllegalStateException -> CameraException(
+                StreamContract.CAMERA_STATE_ERROR,
+                "La cámara o la sesión no está en un estado válido en " +
+                    "la etapa $stage: ${e.message}",
+                diagnostics(stage, e),
+            )
+            else -> e
+        }
+    }
+
     @Volatile
     override var isOpen: Boolean = false
         private set
@@ -129,39 +206,60 @@ class CameraSession(
         synchronized(lock) {
             currentConfig?.let { if (isOpen) return it }
         }
+        lastStage = "enumerate"
         val cameraId = selectBackCamera()
             ?: throw CameraException(
                 StreamContract.CAMERA_UNAVAILABLE,
                 "Este dispositivo no tiene cámara trasera.",
+                diagnostics("enumerate"),
             )
+        lastSelectedCameraId = cameraId
+        lastStage = "characteristics"
         val characteristics = try {
             cameraManager.getCameraCharacteristics(cameraId)
         } catch (e: CameraAccessException) {
             throw mapCameraAccessException(e)
+                .withDetails(diagnostics("characteristics", e))
         }
+        lastStage = "selectConfig"
         val config = selectConfig(cameraId, characteristics)
             ?: throw CameraException(
                 StreamContract.CAMERA_UNAVAILABLE,
                 "Sin configuración de vista previa compatible.",
+                diagnostics("selectConfig"),
             )
-        val opened = openDevice(cameraId)
+        lastConfig = config
+        lastStage = "openDevice"
+        val opened = try {
+            openDevice(cameraId)
+        } catch (e: Exception) {
+            throw mapOpenFailure(e)
+        }
         try {
             // El tamaño se fija ANTES de pedir la superficie: el
             // productor crea su ImageReader al primer getSurface() y
             // después ya no se puede cambiar el tamaño de la superficie
             // que usa la sesión.
+            lastStage = "surface"
             surfaceHandle.setSize(config.size.width, config.size.height)
             val previewSurface = surfaceHandle.surface() as? Surface
                 ?: throw CameraException(
                     StreamContract.CAMERA_UNAVAILABLE,
                     "Sin superficie de vista previa.",
+                    diagnostics("surface"),
                 )
+            Log.d(
+                TAG,
+                "surface: $previewSurface valid=${previewSurface.isValid}",
+            )
             // La superficie se pide UNA vez y es la misma para la sesión
             // y para la petición de repetición: Camera2 exige que el
             // destino de la petición sea una de las superficies de la
             // sesión. (El productor puede recrear su superficie, pero
             // dentro de una sesión abierta siempre es la misma.)
+            lastStage = "createCaptureSession"
             val session = createCaptureSession(opened, config, previewSurface)
+            lastStage = "startRepeating"
             startRepeating(
                 opened,
                 session,
@@ -181,7 +279,7 @@ class CameraSession(
                 opened.close()
             } catch (_: Exception) {
             }
-            throw e
+            throw mapOpenFailure(e)
         }
     }
 
@@ -206,12 +304,33 @@ class CameraSession(
      * Cámara trasera: primero la lógica multi-cámara (si el dispositivo
      * la expone), si no la primera trasera. Nunca ultra-angular ni tele
      * por defecto.
+     *
+     * Fase A: una lista de cámaras VACÍA es un código distinto
+     * (`camera_disabled_by_system`): es el síntoma del posible bloqueo
+     * del sistema (interruptor «Acceso a la cámara» / «Sensors Off»),
+     * sin asumir que esa sea la causa. Si la lista no está vacía pero
+     * no hay trasera, sigue siendo `null` → `camera_unavailable`.
+     * Si `cameraIdList` lanza, se mapea con `mapCameraAccessException`
+     * en vez de devolver `null` (misma salida de fallo, mejor código).
      */
     private fun selectBackCamera(): String? {
         val ids = try {
             cameraManager.cameraIdList
         } catch (e: CameraAccessException) {
-            return null
+            throw mapCameraAccessException(e)
+                .withDetails(diagnostics("enumerate", e))
+        }
+        lastCameraCount = ids.size
+        if (ids.isEmpty()) {
+            Log.e(TAG, "cameraIdList= elegida=ninguna")
+            throw CameraException(
+                StreamContract.CAMERA_DISABLED_BY_SYSTEM,
+                "No se detectó ninguna cámara. Es posible que la cámara " +
+                    "esté bloqueada a nivel del sistema (interruptor " +
+                    "«Acceso a la cámara» o «Sensors Off»); comprueba " +
+                    "que la app de cámara del sistema funciona.",
+                diagnostics("enumerate"),
+            )
         }
         var fallback: String? = null
         for (id in ids) {
@@ -233,12 +352,20 @@ class CameraSession(
                         .REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA,
                 )
             ) {
+                Log.d(
+                    TAG,
+                    "cameraIdList=${ids.joinToString()} elegida=$id",
+                )
                 return id
             }
             if (fallback == null) {
                 fallback = id
             }
         }
+        Log.d(
+            TAG,
+            "cameraIdList=${ids.joinToString()} elegida=${fallback ?: "ninguna"}",
+        )
         return fallback
     }
 
@@ -271,7 +398,7 @@ class CameraSession(
         val ranges = characteristics.get(
             CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES,
         )?.map { FpsRange(it.lower, it.upper) } ?: emptyList()
-        return PreviewConfigSelector.select(
+        val selected = PreviewConfigSelector.select(
             cameraId = cameraId,
             sensorOrientation = characteristics.get(
                 CameraCharacteristics.SENSOR_ORIENTATION,
@@ -282,9 +409,19 @@ class CameraSession(
             outputSizes = sizes,
             fpsRanges = ranges,
         )
+        selected?.let {
+            Log.d(
+                TAG,
+                "config=${it.size.width}x${it.size.height} " +
+                    "fps=${it.fpsRange.min}-${it.fpsRange.max} " +
+                    "sensor=${it.sensorOrientation}",
+            )
+        }
+        return selected
     }
 
     private suspend fun openDevice(cameraId: String): CameraDevice {
+        Log.d(TAG, "openDevice: cameraId=$cameraId")
         return try {
             withTimeout(OPEN_TIMEOUT_MS) {
                 suspendCancellableCoroutine { cont ->
@@ -303,11 +440,13 @@ class CameraSession(
                         }
 
                         override fun onDisconnected(camera: CameraDevice) {
+                            Log.e(TAG, "onDisconnected: cameraId=$cameraId")
                             if (cont.isActive) {
                                 cont.resumeWithException(
                                     CameraException(
                                         StreamContract.CAMERA_DISCONNECTED,
                                         "La cámara se desconectó al abrirla.",
+                                        diagnostics("openDevice"),
                                     ),
                                 )
                             } else {
@@ -324,6 +463,7 @@ class CameraSession(
                             camera: CameraDevice,
                             error: Int,
                         ) {
+                            Log.e(TAG, "onError: error=$error")
                             val code = when (error) {
                                 ERROR_CAMERA_IN_USE,
                                 ERROR_MAX_CAMERAS_IN_USE,
@@ -332,7 +472,12 @@ class CameraSession(
                             }
                             if (cont.isActive) {
                                 cont.resumeWithException(
-                                    CameraException(code, "Error al abrir la cámara."),
+                                    CameraException(
+                                        code,
+                                        "Error al abrir la cámara.",
+                                        diagnostics("openDevice") +
+                                            mapOf("cameraError" to error),
+                                    ),
                                 )
                             } else {
                                 close()
@@ -353,10 +498,12 @@ class CameraSession(
             }
         } catch (e: CameraAccessException) {
             throw mapCameraAccessException(e)
+                .withDetails(diagnostics("openDevice", e))
         } catch (e: SecurityException) {
             throw CameraException(
                 StreamContract.PERMISSION_DENIED,
                 "Permiso de cámara no concedido.",
+                diagnostics("openDevice", e),
             )
         }
     }
@@ -370,6 +517,7 @@ class CameraSession(
             add(previewSurface)
             videoOutputSurface?.let { add(it) }
         }
+        Log.d(TAG, "createCaptureSession: surfaces=${surfaces.size}")
         return withTimeout(SESSION_TIMEOUT_MS) {
             suspendCancellableCoroutine { cont ->
                 val callback = object : CameraCaptureSession.StateCallback() {
@@ -390,11 +538,16 @@ class CameraSession(
                     override fun onConfigureFailed(
                         session: CameraCaptureSession,
                     ) {
+                        Log.e(
+                            TAG,
+                            "onConfigureFailed: sesion no configurable",
+                        )
                         if (cont.isActive) {
                             cont.resumeWithException(
                                 CameraException(
                                     StreamContract.CAMERA_UNAVAILABLE,
                                     "No se pudo configurar la sesión de cámara.",
+                                    diagnostics("createCaptureSession"),
                                 ),
                             )
                         }
@@ -446,6 +599,7 @@ class CameraSession(
             }
         }
         session.setRepeatingRequest(builder.build(), null, handler)
+        Log.d(TAG, "startRepeating: ok")
     }
 
     private fun afMode(characteristics: CameraCharacteristics): Int {
@@ -464,6 +618,9 @@ class CameraSession(
     }
 
     companion object {
+        /** Etiqueta única de los registros de diagnóstico (Fase A). */
+        const val TAG = "Transmiti2Camera"
+
         const val OPEN_TIMEOUT_MS = 5_000L
         const val SESSION_TIMEOUT_MS = 5_000L
 
