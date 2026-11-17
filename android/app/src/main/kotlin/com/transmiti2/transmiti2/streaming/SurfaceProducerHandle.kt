@@ -51,7 +51,7 @@ interface SurfaceProducerHandle {
 }
 
 /** Crea productores de superficie de vista previa. */
-interface SurfaceProducerProvider {
+fun interface SurfaceProducerProvider {
     fun create(): SurfaceProducerHandle
 }
 
