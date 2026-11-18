@@ -1,4 +1,6 @@
 // SPIKE 3.1.2 — TEMPORAL
+import 'dart:convert';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:transmiti2/features/spike/muxer_spike_service.dart';
@@ -297,6 +299,115 @@ void main() {
       expect(text, contains('Sin sonda.'));
       expect(text, contains('Sin pasadas.'));
       expect(text, contains('Sin archivos.'));
+    });
+  });
+
+  group('SpikeRunResult.toMap', () {
+    test('toMap reproduce el mapa completo', () {
+      final Map<Object?, Object?> original = _fullRunMap();
+      final SpikeRunResult run = SpikeRunResult.fromMap(original);
+      final Map<String, Object?> serialized = run.toMap();
+      for (final MapEntry<Object?, Object?> entry in original.entries) {
+        expect(serialized[entry.key as String], entry.value);
+      }
+      expect(serialized.length, original.length);
+    });
+
+    test('toMap y fromMap sobreviven a JSON', () {
+      final SpikeRunResult run = SpikeRunResult.fromMap(_fullRunMap());
+      final Map<String, dynamic> decoded =
+          jsonDecode(jsonEncode(run.toMap())) as Map<String, dynamic>;
+      final SpikeRunResult restored = SpikeRunResult.fromMap(decoded);
+      expect(restored.muxer, run.muxer);
+      expect(restored.fileName, run.fileName);
+      expect(restored.durationMs, run.durationMs);
+      expect(restored.fpsMeasured, run.fpsMeasured);
+      expect(restored.profileIdc, run.profileIdc);
+      expect(restored.cttsAllZero, isNull);
+    });
+  });
+
+  group('EncoderProbeResult.toMap', () {
+    test('toMap y fromMap sobreviven a JSON', () {
+      final EncoderProbeResult probe = EncoderProbeResult.fromMap(
+        <Object?, Object?>{
+          'encoderName': 'c2.qti.avc.encoder',
+          'profiles': <int>[66, 77],
+          'levels': <int>[512],
+          'cbrSupported': true,
+          'supports720pForMediaCodec': true,
+          'outputProfile': 66,
+          'outputLevel': 512,
+          'hasCsd0': true,
+          'hasCsd1': true,
+          'profileIdc': 66,
+          'levelIdc': 40,
+        },
+      );
+      final Map<String, dynamic> decoded =
+          jsonDecode(jsonEncode(probe.toMap())) as Map<String, dynamic>;
+      final EncoderProbeResult restored = EncoderProbeResult.fromMap(
+        decoded,
+      );
+      expect(restored.encoderName, 'c2.qti.avc.encoder');
+      expect(restored.profiles, <int>[66, 77]);
+      expect(restored.levels, <int>[512]);
+      expect(restored.cbrSupported, isTrue);
+      expect(restored.profileIdc, 66);
+      expect(restored.levelIdc, 40);
+      expect(restored.encoderError, isNull);
+    });
+  });
+
+  group('addSpikeVerifyResult', () {
+    SpikeRunResult verifyResult(String fileName) {
+      return SpikeRunResult(
+        muxer: 'verify',
+        fileName: fileName,
+        moovPresent: true,
+        extractorOpens: true,
+        exoplayerReady: true,
+      );
+    }
+
+    test('añade la verificación a la lista vacía', () {
+      final List<SpikeRunResult> runs = addSpikeVerifyResult(
+        const <SpikeRunResult>[],
+        verifyResult('spike_classic_1.mp4'),
+      );
+      expect(runs.length, 1);
+      expect(runs.first.muxer, 'verify');
+      expect(runs.first.fileName, 'spike_classic_1.mp4');
+    });
+
+    test('verificar dos veces el mismo archivo no duplica', () {
+      final List<SpikeRunResult> once = addSpikeVerifyResult(
+        const <SpikeRunResult>[],
+        verifyResult('spike_classic_1.mp4'),
+      );
+      final List<SpikeRunResult> twice = addSpikeVerifyResult(
+        once,
+        verifyResult('spike_classic_1.mp4'),
+      );
+      expect(twice.length, 1);
+      expect(twice.first.fileName, 'spike_classic_1.mp4');
+    });
+
+    test('archivos distintos se acumulan y no borra grabaciones', () {
+      final SpikeRunResult classic = SpikeRunResult.fromMap(_fullRunMap());
+      final List<SpikeRunResult> runs = addSpikeVerifyResult(
+        addSpikeVerifyResult(
+          <SpikeRunResult>[classic],
+          verifyResult('spike_classic_1.mp4'),
+        ),
+        verifyResult('spike_compat_1.mp4'),
+      );
+      expect(runs.length, 3);
+      expect(runs.first, classic);
+      expect(
+        runs.where((SpikeRunResult r) => r.muxer == 'verify').length,
+        2,
+      );
     });
   });
 

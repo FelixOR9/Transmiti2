@@ -103,6 +103,26 @@ class EncoderProbeResult {
     );
   }
 
+  /// Serialización para persistir la sonda en `spike_results.json`.
+  /// Las claves son las mismas que lee [EncoderProbeResult.fromMap], así
+  /// que `fromMap(toMap())` reconstruye el mismo resultado.
+  Map<String, Object?> toMap() {
+    return <String, Object?>{
+      'encoderName': encoderName,
+      'profiles': profiles,
+      'levels': levels,
+      'cbrSupported': cbrSupported,
+      'supports720pForMediaCodec': supports720pForMediaCodec,
+      'outputProfile': outputProfile,
+      'outputLevel': outputLevel,
+      'hasCsd0': hasCsd0,
+      'hasCsd1': hasCsd1,
+      'profileIdc': profileIdc,
+      'levelIdc': levelIdc,
+      'encoderError': encoderError,
+    };
+  }
+
   /// Nombre legible del perfil según `profile_idc`.
   String get profileLabel {
     return switch (profileIdc) {
@@ -241,6 +261,47 @@ class SpikeRunResult {
       muxerError: map['muxerError'] as String?,
       eosTimeout: map['eosTimeout'] as bool? ?? false,
     );
+  }
+
+  /// Serialización para persistir la pasada en `spike_results.json`.
+  /// Las claves son las mismas que lee [SpikeRunResult.fromMap], así
+  /// que `fromMap(toMap())` reconstruye el mismo resultado.
+  Map<String, Object?> toMap() {
+    return <String, Object?>{
+      'muxer': muxer,
+      'interrupted': interrupted,
+      'fileName': fileName,
+      'filePath': filePath,
+      'sizeBytes': sizeBytes,
+      'durationTargetMs': durationTargetMs,
+      'durationMs': durationMs,
+      'width': width,
+      'height': height,
+      'fpsMeasured': fpsMeasured,
+      'sampleCount': sampleCount,
+      'keyframeCount': keyframeCount,
+      'firstSampleKeyframe': firstSampleKeyframe,
+      'ptsMonotonic': ptsMonotonic,
+      'moovPresent': moovPresent,
+      'extractorOpens': extractorOpens,
+      'exoplayerReady': exoplayerReady,
+      'exoplayerDurationMs': exoplayerDurationMs,
+      'maxWriteLatencyMs': maxWriteLatencyMs,
+      'avgBitrateBps': avgBitrateBps,
+      'profileIdc': profileIdc,
+      'cttsPresent': cttsPresent,
+      'cttsAllZero': cttsAllZero,
+      'readableDurationMs': readableDurationMs,
+      'lossMs': lossMs,
+      'encoderName': encoderName,
+      'templateUsed': templateUsed,
+      'configWidth': configWidth,
+      'configHeight': configHeight,
+      'configFps': configFps,
+      'samplesBeforeMuxer': samplesBeforeMuxer,
+      'muxerError': muxerError,
+      'eosTimeout': eosTimeout,
+    };
   }
 
   String get kindLabel {
@@ -520,6 +581,23 @@ List<SpikeTableRow> spikeComparisonRows(List<SpikeRunResult> runs) {
       value(compatInt, (SpikeRunResult r) => spikeSecondsLabel(r.lossMs)),
     ),
   ];
+}
+
+/// Añade el resultado de verificar un archivo a las pasadas, sin
+/// duplicados exactos: verificar el mismo archivo dos veces reemplaza
+/// la verificación anterior en vez de acumularla. Puro: se prueba sin
+/// dispositivo.
+List<SpikeRunResult> addSpikeVerifyResult(
+  List<SpikeRunResult> runs,
+  SpikeRunResult result,
+) {
+  final List<SpikeRunResult> kept = runs
+      .where(
+        (SpikeRunResult run) =>
+            !(run.muxer == 'verify' && run.fileName == result.fileName),
+      )
+      .toList();
+  return <SpikeRunResult>[...kept, result];
 }
 
 /// Texto completo de resultados para «COPIAR RESULTADOS»: sonda,

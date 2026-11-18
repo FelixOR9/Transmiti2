@@ -1,11 +1,15 @@
 // SPIKE 3.1.2 — TEMPORAL
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:transmiti2/app/app_scope.dart';
 import 'package:transmiti2/app/theme/app_colors.dart';
 import 'package:transmiti2/features/spike/muxer_spike_service.dart';
+import 'package:transmiti2/features/spike/spike_results_store.dart';
 import 'package:transmiti2/features/streaming/application/permission_controller.dart';
 import 'package:transmiti2/features/streaming/application/streaming_service.dart';
 import 'package:transmiti2/features/streaming/domain/permission_state.dart';
@@ -26,13 +30,21 @@ import 'package:transmiti2/shared/widgets/section_label.dart';
 ///
 /// Uso: sondear el codificador, grabar 10 s × 2 por muxer, interrumpir
 /// 5 s × 3 por muxer, copiar los resultados y borrar los archivos.
-/// Ningún resultado se presenta como definitivo hasta repetirse.
+/// Los resultados se guardan en `recordings/spike/spike_results.json`
+/// tras cada repetición, sonda y verificación, y sobreviven a cerrar
+/// esta pantalla o a que la app muera. Ningún resultado se presenta
+/// como definitivo hasta repetirse.
 // SPIKE 3.1.2 — TEMPORAL
 class MuxerSpikeScreen extends StatefulWidget {
-  const MuxerSpikeScreen({super.key, MuxerSpikeService? service})
-    : _service = service ?? const _DefaultSpikeService();
+  const MuxerSpikeScreen({super.key, MuxerSpikeService? service, SpikeResultsStore? resultsStore})
+    : _service = service ?? const _DefaultSpikeService(),
+      _resultsStore = resultsStore;
 
   final MuxerSpikeService _service;
+
+  /// Almacén de resultados persistidos. Solo para pruebas: en la app
+  /// se resuelve en `<documents>/recordings/spike/spike_results.json`.
+  final SpikeResultsStore? _resultsStore;
 
   @override
   State<MuxerSpikeScreen> createState() => _MuxerSpikeScreenState();
@@ -95,6 +107,7 @@ class _MuxerSpikeScreenState extends State<MuxerSpikeScreen> {
   EncoderProbeResult? _probe;
   List<SpikeRunResult> _runs = const <SpikeRunResult>[];
   List<SpikeFileInfo> _files = const <SpikeFileInfo>[];
+  SpikeResultsStore? _store;
   String? _busy;
   String? _error;
 
@@ -107,7 +120,62 @@ class _MuxerSpikeScreenState extends State<MuxerSpikeScreen> {
       _permissions.attach();
       unawaited(_permissions.refresh());
       unawaited(_maybeStartPreview());
-      unawaited(_refreshFiles());
+      unawaited(_loadPersistedResults());
+    }
+  }
+
+  /// Carga la sonda y las pasadas guardadas en disco (si las hay) y
+  /// después lista los archivos. Sin persistencia, salir de la
+  /// pantalla o que la app muriera borraba los resultados acumulados
+  /// mientras los archivos se volvían a listar: el informe copiado
+  /// salía con 0 pasadas.
+  Future<void> _loadPersistedResults() async {
+    try {
+      _store ??= widget._resultsStore ?? SpikeResultsStore(
+        await _defaultResultsFile(),
+      );
+      final SpikeResultsData data = await _store!.load();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        if (data.probe != null) {
+          _probe = data.probe;
+        }
+        _runs = data.runs;
+      });
+    } catch (_) {
+      // Sin persistencia, la pantalla sigue funcionando en memoria.
+    }
+    await _refreshFiles();
+  }
+
+  /// Archivo de resultados por defecto: el mismo directorio del spike
+  /// del nativo (`<documents>/recordings/spike/`).
+  Future<File> _defaultResultsFile() async {
+    final Directory docs = await getApplicationDocumentsDirectory();
+    return File(
+      p.join(
+        docs.path,
+        'recordings',
+        'spike',
+        SpikeResultsStore.fileName,
+      ),
+    );
+  }
+
+  /// Guarda la sonda y las pasadas actuales en disco. La persistencia
+  /// es un extra del spike: si falla, la pantalla sigue funcionando
+  /// con los resultados en memoria.
+  Future<void> _persistResults() async {
+    final SpikeResultsStore? store = _store;
+    if (store == null) {
+      return;
+    }
+    try {
+      await store.save(probe: _probe, runs: _runs);
+    } catch (_) {
+      // Sin persistencia, la pantalla sigue funcionando en memoria.
     }
   }
 
@@ -181,14 +249,23 @@ class _MuxerSpikeScreenState extends State<MuxerSpikeScreen> {
       }
       setState(() => _probe = result);
     } on SpikeException catch (e) {
-      if (mounted) {
-        setState(() => _error = _errorText(e));
+      if (!mounted) {
+        return;
       }
+      // La sonda fallida también queda registrada: sin ella, la
+      // pantalla muestra «Sin sonda» y no se sabe si no se pulsó el
+      // botón o si lanzó una excepción.
+      final String text = _errorText(e);
+      setState(() {
+        _probe = EncoderProbeResult(encoderError: text);
+        _error = text;
+      });
     } finally {
       if (mounted) {
         setState(() => _busy = null);
       }
     }
+    await _persistResults();
   }
 
   Future<void> _runBatch({
@@ -211,6 +288,9 @@ class _MuxerSpikeScreenState extends State<MuxerSpikeScreen> {
           return;
         }
         setState(() => _runs = <SpikeRunResult>[..._runs, result]);
+        // Persistir tras cada repetición: si la app muere a mitad del
+        // lote, las repeticiones ya completadas sobreviven.
+        await _persistResults();
       }
       await _refreshFiles();
     } on SpikeException catch (e) {
@@ -230,7 +310,14 @@ class _MuxerSpikeScreenState extends State<MuxerSpikeScreen> {
       if (!mounted) {
         return;
       }
-      setState(() => _files = files);
+      setState(
+        () => _files = files
+            .where(
+              (SpikeFileInfo file) =>
+                  !SpikeResultsStore.isResultsFileName(file.name),
+            )
+            .toList(),
+      );
     } on SpikeException catch (e) {
       if (mounted) {
         setState(() => _error = _errorText(e));
@@ -262,7 +349,7 @@ class _MuxerSpikeScreenState extends State<MuxerSpikeScreen> {
           content: Text(
             'Se borran los ${_files.length} archivos de '
             '<documents>/recordings/spike/. Los resultados ya medidos '
-            'se conservan en esta pantalla.',
+            'se conservan guardados en el teléfono.',
           ),
           actions: <Widget>[
             TextButton(
@@ -286,6 +373,9 @@ class _MuxerSpikeScreenState extends State<MuxerSpikeScreen> {
         return;
       }
       await _refreshFiles();
+      // El borrado nativo borra también `spike_results.json`: volver
+      // a persistir para que los resultados ya medidos sobrevivan.
+      await _persistResults();
       if (!mounted) {
         return;
       }
@@ -320,9 +410,67 @@ class _MuxerSpikeScreenState extends State<MuxerSpikeScreen> {
           );
         },
       );
+      if (!mounted) {
+        return;
+      }
+      // La verificación también es una pasada: entra en la tabla y
+      // en «COPIAR RESULTADOS». Antes solo se mostraba en el diálogo
+      // y se perdía al cerrarlo.
+      setState(() => _runs = addSpikeVerifyResult(_runs, result));
+      await _persistResults();
     } on SpikeException catch (e) {
       if (mounted) {
         setState(() => _error = _errorText(e));
+      }
+    }
+  }
+
+  /// Verifica uno a uno los archivos de la lista y añade cada
+  /// resultado a las pasadas. Así los archivos ya grabados se pueden
+  /// verificar sin regrabar y sin tocarlos uno a uno. Muestra el
+  /// progreso por archivo; un archivo que no se pueda verificar no
+  /// bloquea los demás.
+  Future<void> _verifyExistingFiles() async {
+    if (_busy != null || _files.isEmpty) {
+      return;
+    }
+    setState(() {
+      _busy = 'Verificando archivos…';
+      _error = null;
+    });
+    try {
+      final List<SpikeFileInfo> files = _files;
+      for (int i = 0; i < files.length; i++) {
+        final SpikeFileInfo file = files[i];
+        if (!mounted) {
+          return;
+        }
+        setState(
+          () =>
+              _busy =
+                  'Verificando ${i + 1} de ${files.length}: ${file.name}',
+        );
+        try {
+          final SpikeRunResult result = await _service.verifyFile(
+            file.name,
+          );
+          if (!mounted) {
+            return;
+          }
+          setState(() => _runs = addSpikeVerifyResult(_runs, result));
+          await _persistResults();
+        } on SpikeException catch (e) {
+          if (mounted) {
+            setState(
+              () => _error =
+                  'No se pudo verificar ${file.name}: ${_errorText(e)}',
+            );
+          }
+        }
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _busy = null);
       }
     }
   }
@@ -368,7 +516,10 @@ class _MuxerSpikeScreenState extends State<MuxerSpikeScreen> {
                     'Compara MediaMuxer clásico con MediaMuxerCompat '
                     'con el codificador real (720p, 30 fps, 2,5 Mbps). '
                     'Los archivos quedan en recordings/spike/ y no se '
-                    'registran como grabaciones.',
+                    'registran como grabaciones. Los resultados se '
+                    'guardan en el teléfono '
+                    '(recordings/spike/spike_results.json) y sobreviven '
+                    'a cerrar esta pantalla o a que la app muera.',
                     style: text.bodyMedium?.copyWith(color: Colors.white),
                   ),
                 ),
@@ -571,6 +722,20 @@ class _MuxerSpikeScreenState extends State<MuxerSpikeScreen> {
                 ),
               const SizedBox(height: 16),
               AppButton.primary(
+                label: 'VERIFICAR ARCHIVOS EXISTENTES',
+                onPressed: busy || _files.isEmpty
+                    ? () {}
+                    : _verifyExistingFiles,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Verifica uno a uno los archivos de la lista y añade '
+                'cada resultado a las pasadas, sin regrabar. Puede '
+                'tardar unos segundos por archivo.',
+                style: text.bodyMedium?.copyWith(color: AppColors.textMuted),
+              ),
+              const SizedBox(height: 12),
+              AppButton.primary(
                 label: 'COPIAR RESULTADOS',
                 onPressed: busy ? () {} : _copyResults,
               ),
@@ -581,9 +746,13 @@ class _MuxerSpikeScreenState extends State<MuxerSpikeScreen> {
               ),
               const SizedBox(height: 16),
               Text(
-                'Variante manual: inicia una interrupción, saca la app '
-                'de Recientes a mitad de grabación (muerte real del '
-                'proceso), reabre y toca el archivo para verificarlo.',
+                'Variante manual: los resultados se guardan en el '
+                'teléfono y sobreviven a la muerte del proceso; aun '
+                'así, copia los resultados antes si quieres conservar '
+                'el informe de esta sesión. Inicia una interrupción, '
+                'saca la app de Recientes a mitad de grabación (muerte '
+                'real del proceso), reabre y toca el archivo para '
+                'verificarlo.',
                 style: text.bodyMedium?.copyWith(color: AppColors.textMuted),
               ),
             ],
