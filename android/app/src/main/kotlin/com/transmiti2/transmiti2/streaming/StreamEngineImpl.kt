@@ -260,9 +260,15 @@ class StreamEngineImpl(
                 createdSession.open()
             }
         } catch (e: Exception) {
+            // Fase B: la liberación del productor toca el motor de
+            // Flutter (`unregisterTexture` exige el hilo principal, igual
+            // que el envío de eventos), así que se hace en el
+            // dispatcher principal y no en el hilo del `streamingScope`.
             try {
-                created.setCallback(null)
-                created.release()
+                withContext(mainDispatcher) {
+                    created.setCallback(null)
+                    created.release()
+                }
             } catch (_: Exception) {
             }
             throw e
@@ -488,16 +494,46 @@ class StreamEngineImpl(
         resources.second?.let { releaseHandle(it) }
     }
 
-    private fun releaseHandle(toRelease: SurfaceProducerHandle) {
+    /**
+     * Libera el productor en el hilo principal (Fase B):
+     * `release()` llega a `FlutterJNI.unregisterTexture`, marcado
+     * `@UiThread` en el motor de Flutter 3.50, y en un hilo secundario
+     * lanza `RuntimeException` («Methods marked with @UiThread must be
+     * executed on the main thread»). Hoy esa excepción se traga aquí
+     * mismo, así que no se ve en el diagnóstico, pero la textura queda
+     * registrada en el motor (fuga): `releaseInternal()` ya marcó el
+     * productor como liberado y un segundo `release()` no reintenta
+     * `unregisterTexture`. Solo cambia el hilo en el que se ejecuta;
+     * la lógica y la idempotencia no cambian.
+     */
+    private suspend fun releaseHandle(toRelease: SurfaceProducerHandle) {
         try {
-            toRelease.setCallback(null)
-            toRelease.release()
+            withContext(mainDispatcher) {
+                toRelease.setCallback(null)
+                toRelease.release()
+            }
         } catch (_: Exception) {
         }
     }
 
-    private fun emitEvent(type: String, payload: Map<String, Any?>) {
-        onEvent?.invoke(mapOf("type" to type) + payload)
+    /**
+     * Emite un evento al canal de Flutter en el hilo principal
+     * (Fase B): `EventChannel.EventSink.success()` está marcado
+     * `@UiThread` y termina en `FlutterJNI.dispatchPlatformMessage`,
+     * que lanza `RuntimeException` fuera del hilo principal. El
+     * `startPreview()` corría en el dispatcher por defecto del
+     * `streamingScope`, así que anunciar el éxito de la apertura
+     * (`EVENT_PREVIEW_STARTED`) fallaba DESPUÉS de abrir la cámara:
+     * el `catch` cerraba la sesión que acababa de abrirse y el teléfono
+     * mostraba «Cámara no disponible» con la etapa «session». Solo
+     * cambia el hilo de entrega; el contenido y el orden no cambian.
+     */
+    private suspend fun emitEvent(type: String, payload: Map<String, Any?>) {
+        val handler = onEvent ?: return
+        val event = mapOf("type" to type) + payload
+        withContext(mainDispatcher) {
+            handler(event)
+        }
     }
 
     /**
@@ -507,7 +543,7 @@ class StreamEngineImpl(
      * de `teardownAfterError`, que solo recibe el código del
      * `PreviewSessionListener`). El código emitido no cambia.
      */
-    private fun emitError(
+    private suspend fun emitError(
         code: String,
         message: String? = null,
         details: Map<String, Any?> = emptyMap(),

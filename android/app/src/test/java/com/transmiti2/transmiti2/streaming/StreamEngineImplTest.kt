@@ -4,6 +4,7 @@ import android.hardware.camera2.CameraCharacteristics
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -14,6 +15,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
+import java.util.concurrent.Executors
 
 /**
  * Pruebas del motor de vista previa con sesiones y productores falsos:
@@ -54,6 +56,9 @@ class StreamEngineImplTest {
     ) : SurfaceProducerHandle {
         var size: Pair<Int, Int>? = null
         var released = false
+        // Fase B: en qué hilo se llamó a release() (debe ser el
+        // dispatcher principal, porque llega a unregisterTexture).
+        var releaseThread: String? = null
         var lastCallback: SurfaceProducerCallback? = null
 
         override fun setSize(width: Int, height: Int) {
@@ -67,6 +72,7 @@ class StreamEngineImplTest {
         }
 
         override fun release() {
+            releaseThread = Thread.currentThread().name
             released = true
         }
     }
@@ -185,6 +191,79 @@ class StreamEngineImplTest {
                     StreamContract.EVENT_PREVIEW_STARTED,
                 ),
             )
+        }
+
+    @Test
+    fun `el evento preview_started se emite en el hilo principal`() =
+        runBlocking {
+            // Fase B: EventChannel.EventSink.success() es @UiThread y
+            // termina en FlutterJNI.dispatchPlatformMessage, que lanza
+            // RuntimeException fuera del hilo principal. El motor debe
+            // entregar el evento en mainDispatcher, no en el hilo del
+            // scope (que en producción es DefaultDispatcher-worker).
+            // El dispatcher de prueba es un hilo único llamado
+            // "TestMain": si el evento llega en otro hilo, el test
+            // falla y el error real volvería a aparecer en el teléfono.
+            val fixture = Fixture()
+            val eventThreads = mutableListOf<String>()
+            val executor = Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "TestMain")
+            }
+            try {
+                val engine = StreamEngineImpl(
+                    cameraPermissionGranted = { true },
+                    surfaceProvider = fixture.provider,
+                    sessionFactory = fixture.factory,
+                    displayRotationDegrees = { 0 },
+                    scope = fixture.scope,
+                    mainDispatcher = executor.asCoroutineDispatcher(),
+                    onEvent = { event ->
+                        eventThreads.add(Thread.currentThread().name)
+                        fixture.events.add(event)
+                    },
+                )
+                val info = engine.startPreview()
+                assertEquals(42L, info.textureId)
+                assertTrue(
+                    fixture.eventTypes().contains(
+                        StreamContract.EVENT_PREVIEW_STARTED,
+                    ),
+                )
+                assertEquals(listOf("TestMain"), eventThreads)
+            } finally {
+                executor.shutdown()
+            }
+        }
+
+    @Test
+    fun `la liberacion del productor ocurre en el hilo principal`() =
+        runBlocking {
+            // Fase B: producer.release() llega a
+            // FlutterJNI.unregisterTexture (@UiThread). En un hilo
+            // secundario lanza RuntimeException que se traga en
+            // releaseHandle y deja la textura registrada en el motor
+            // (fuga: un segundo release() ya no reintenta).
+            val fixture = Fixture()
+            val executor = Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "TestMain")
+            }
+            try {
+                val engine = StreamEngineImpl(
+                    cameraPermissionGranted = { true },
+                    surfaceProvider = fixture.provider,
+                    sessionFactory = fixture.factory,
+                    displayRotationDegrees = { 0 },
+                    scope = fixture.scope,
+                    mainDispatcher = executor.asCoroutineDispatcher(),
+                    onEvent = { fixture.events.add(it) },
+                )
+                engine.startPreview()
+                engine.stopPreview()
+                assertTrue(fixture.handle.released)
+                assertEquals("TestMain", fixture.handle.releaseThread)
+            } finally {
+                executor.shutdown()
+            }
         }
 
     @Test
