@@ -1,4 +1,10 @@
 // SPIKE 3.1.2 — TEMPORAL
+// Timeout de biblioteca (60 s para todo el archivo: hay E/S real de
+// disco): `Timeout` solo puede anotar la biblioteca, no `main()`
+// (`invalid_annotation_target` si se pone sobre una función).
+@Timeout(Duration(seconds: 60))
+library;
+
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -171,7 +177,6 @@ Future<void> pumpSpike(
   await settleAsync(tester);
 }
 
-@Timeout(Duration(seconds: 60))
 void main() {
   group('MuxerSpikeScreen: persistencia de resultados', () {
     late Directory tempDir;
