@@ -6,10 +6,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
+import org.junit.Before
 import org.junit.Test
 
 /**
@@ -20,6 +22,20 @@ import org.junit.Test
  * recreación de la superficie y traducción de errores.
  */
 class StreamEngineImplTest {
+
+    @Before
+    fun setUp() {
+        // En las pruebas unitarias JVM puras, android.util.Log lanza
+        // RuntimeException ("not mocked"): el registro se desvía a un
+        // receptor no-op para que el motor pueda registrar sin fallar.
+        // En el dispositivo el receptor es nulo y todo va a Logcat.
+        Transmiti2Logger.sink = { _, _ -> }
+    }
+
+    @After
+    fun tearDown() {
+        Transmiti2Logger.sink = null
+    }
 
     private val testConfig = PreviewConfig(
         cameraId = "0",

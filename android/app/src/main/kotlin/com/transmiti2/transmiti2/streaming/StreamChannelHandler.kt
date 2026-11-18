@@ -7,7 +7,6 @@ import android.content.pm.PackageManager
 import android.hardware.camera2.CameraManager
 import android.net.Uri
 import android.provider.Settings
-import android.util.Log
 import androidx.core.content.ContextCompat
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -17,12 +16,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
-
-/**
- * Etiqueta única de los registros de diagnóstico (Fase A). Sin datos
- * sensibles: nunca claves, URLs ni contenido de imágenes.
- */
-private const val TAG = "Transmiti2Camera"
 
 /** Error de inicio de vista previa ya traducido al contrato. */
 internal data class MappedPreviewError(
@@ -234,7 +227,7 @@ class StreamChannelHandler(
      */
     private fun startPreview(result: MethodChannel.Result) {
         val engine = previewEngine
-        Log.d(TAG, "startPreview: engine=${engine != null}")
+        Transmiti2Logger.d("startPreview: engine=${engine != null}")
         if (engine == null) {
             result.error(
                 StreamContract.CAMERA_UNAVAILABLE,
@@ -273,8 +266,7 @@ class StreamChannelHandler(
     /** Registra el fallo de `startPreview` y lo devuelve con su código. */
     private fun failPreview(result: MethodChannel.Result, e: Throwable) {
         val mapped = mapStartPreviewError(e)
-        Log.e(
-            TAG,
+        Transmiti2Logger.e(
             "etapa=startPreview ex=${e.javaClass.simpleName} " +
                 "msg=${e.message} codigo=${mapped.code}",
         )

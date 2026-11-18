@@ -13,7 +13,6 @@ import android.media.ImageReader
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
-import android.util.Log
 import android.util.Range
 import android.view.Surface
 import java.util.concurrent.Executor
@@ -162,8 +161,7 @@ class CameraSession(
      */
     private fun mapOpenFailure(e: Exception): Exception {
         val stage = lastStage
-        Log.e(
-            TAG,
+        Transmiti2Logger.e(
             "etapa=$stage ex=${e.javaClass.simpleName} msg=${e.message}",
         )
         return when (e) {
@@ -248,8 +246,7 @@ class CameraSession(
                     "Sin superficie de vista previa.",
                     diagnostics("surface"),
                 )
-            Log.d(
-                TAG,
+            Transmiti2Logger.d(
                 "surface: $previewSurface valid=${previewSurface.isValid}",
             )
             // La superficie se pide UNA vez y es la misma para la sesión
@@ -322,7 +319,7 @@ class CameraSession(
         }
         lastCameraCount = ids.size
         if (ids.isEmpty()) {
-            Log.e(TAG, "cameraIdList= elegida=ninguna")
+            Transmiti2Logger.e("cameraIdList= elegida=ninguna")
             throw CameraException(
                 StreamContract.CAMERA_DISABLED_BY_SYSTEM,
                 "No se detectó ninguna cámara. Es posible que la cámara " +
@@ -352,8 +349,7 @@ class CameraSession(
                         .REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA,
                 )
             ) {
-                Log.d(
-                    TAG,
+                Transmiti2Logger.d(
                     "cameraIdList=${ids.joinToString()} elegida=$id",
                 )
                 return id
@@ -362,8 +358,7 @@ class CameraSession(
                 fallback = id
             }
         }
-        Log.d(
-            TAG,
+        Transmiti2Logger.d(
             "cameraIdList=${ids.joinToString()} elegida=${fallback ?: "ninguna"}",
         )
         return fallback
@@ -410,8 +405,7 @@ class CameraSession(
             fpsRanges = ranges,
         )
         selected?.let {
-            Log.d(
-                TAG,
+            Transmiti2Logger.d(
                 "config=${it.size.width}x${it.size.height} " +
                     "fps=${it.fpsRange.min}-${it.fpsRange.max} " +
                     "sensor=${it.sensorOrientation}",
@@ -421,7 +415,7 @@ class CameraSession(
     }
 
     private suspend fun openDevice(cameraId: String): CameraDevice {
-        Log.d(TAG, "openDevice: cameraId=$cameraId")
+        Transmiti2Logger.d("openDevice: cameraId=$cameraId")
         return try {
             withTimeout(OPEN_TIMEOUT_MS) {
                 suspendCancellableCoroutine { cont ->
@@ -440,7 +434,7 @@ class CameraSession(
                         }
 
                         override fun onDisconnected(camera: CameraDevice) {
-                            Log.e(TAG, "onDisconnected: cameraId=$cameraId")
+                            Transmiti2Logger.e("onDisconnected: cameraId=$cameraId")
                             if (cont.isActive) {
                                 cont.resumeWithException(
                                     CameraException(
@@ -463,7 +457,7 @@ class CameraSession(
                             camera: CameraDevice,
                             error: Int,
                         ) {
-                            Log.e(TAG, "onError: error=$error")
+                            Transmiti2Logger.e("onError: error=$error")
                             val code = when (error) {
                                 ERROR_CAMERA_IN_USE,
                                 ERROR_MAX_CAMERAS_IN_USE,
@@ -517,7 +511,7 @@ class CameraSession(
             add(previewSurface)
             videoOutputSurface?.let { add(it) }
         }
-        Log.d(TAG, "createCaptureSession: surfaces=${surfaces.size}")
+        Transmiti2Logger.d("createCaptureSession: surfaces=${surfaces.size}")
         return withTimeout(SESSION_TIMEOUT_MS) {
             suspendCancellableCoroutine { cont ->
                 val callback = object : CameraCaptureSession.StateCallback() {
@@ -538,8 +532,7 @@ class CameraSession(
                     override fun onConfigureFailed(
                         session: CameraCaptureSession,
                     ) {
-                        Log.e(
-                            TAG,
+                        Transmiti2Logger.e(
                             "onConfigureFailed: sesion no configurable",
                         )
                         if (cont.isActive) {
@@ -599,7 +592,7 @@ class CameraSession(
             }
         }
         session.setRepeatingRequest(builder.build(), null, handler)
-        Log.d(TAG, "startRepeating: ok")
+        Transmiti2Logger.d("startRepeating: ok")
     }
 
     private fun afMode(characteristics: CameraCharacteristics): Int {
@@ -618,9 +611,6 @@ class CameraSession(
     }
 
     companion object {
-        /** Etiqueta única de los registros de diagnóstico (Fase A). */
-        const val TAG = "Transmiti2Camera"
-
         const val OPEN_TIMEOUT_MS = 5_000L
         const val SESSION_TIMEOUT_MS = 5_000L
 

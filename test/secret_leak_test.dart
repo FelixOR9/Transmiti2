@@ -23,13 +23,17 @@ void main() {
     ];
     // Fase A: los tres archivos del motor de cámara registran
     // diagnóstico con tag `Transmiti2Camera` (etapa, cámara elegida,
-    // configuración, clase de excepción). Siguen prohibidos en todo
-    // lo demás, y en ellos ninguna línea de log puede mencionar una
-    // clave, una URL ni un secreto (se comprueba abajo).
+    // configuración, clase de excepción), y `Transmiti2Logger.kt` es
+    // el envoltorio central que delega en `android.util.Log` (las
+    // pruebas unitarias JVM puras no pueden llamar a `Log`
+    // directamente y lo desvían con su `sink`). Siguen prohibidos en
+    // todo lo demás, y en ellos ninguna línea de log puede mencionar
+    // una clave, una URL ni un secreto (se comprueba abajo).
     const List<String> logAllowed = <String>[
       'streaming/StreamChannelHandler.kt',
       'streaming/StreamEngineImpl.kt',
       'streaming/CameraSession.kt',
+      'streaming/Transmiti2Logger.kt',
     ];
     const List<String> logForbiddenWords = <String>[
       'key',

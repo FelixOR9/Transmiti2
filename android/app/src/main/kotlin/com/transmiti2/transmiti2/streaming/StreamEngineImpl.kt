@@ -2,7 +2,6 @@ package com.transmiti2.transmiti2.streaming
 
 import android.content.Context
 import android.os.Build
-import android.util.Log
 import android.view.Display
 import android.view.Surface
 import android.view.WindowManager
@@ -15,12 +14,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-
-/**
- * Etiqueta única de los registros de diagnóstico (Fase A). Sin datos
- * sensibles: nunca claves, URLs ni contenido de imágenes.
- */
-private const val TAG = "Transmiti2Camera"
 
 /**
  * Rotación de la pantalla en grados (0, 90, 180 o 270). En API 30+ se
@@ -198,7 +191,7 @@ class StreamEngineImpl(
     }
 
     private suspend fun doStartPreview(): PreviewInfo {
-        Log.d(TAG, "startPreview: permiso concedido, creando productor")
+        Transmiti2Logger.d("startPreview: permiso concedido, creando productor")
         val created = withContext(mainDispatcher) {
             surfaceProvider.create()
         }
@@ -332,8 +325,7 @@ class StreamEngineImpl(
         val newSession = try {
             sessionFactory(currentHandle)
         } catch (e: Exception) {
-            Log.e(
-                TAG,
+            Transmiti2Logger.e(
                 "etapa=recover ex=${e.javaClass.simpleName} msg=${e.message}",
             )
             mutex.withLock {
@@ -375,8 +367,7 @@ class StreamEngineImpl(
                 ),
             )
         } catch (e: Exception) {
-            Log.e(
-                TAG,
+            Transmiti2Logger.e(
                 "etapa=recover ex=${e.javaClass.simpleName} msg=${e.message}",
             )
             mutex.withLock {
