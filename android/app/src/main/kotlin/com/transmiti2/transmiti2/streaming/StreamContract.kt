@@ -91,4 +91,12 @@ object StreamContract {
     const val THERMAL_SHUTDOWN = "thermal_shutdown"
     const val PERMISSION_DENIED = "permission_denied"
     const val RECORDING_NOT_FOUND = "recording_not_found"
+
+    /**
+     * Código de grabación (Fase B, 3.1.2): transición ilegal o
+     * solicitud duplicada (`startRecording` con una grabación ya
+     * activa o en curso de inicio; plan §6.2). Espejo en
+     * `lib/features/streaming/domain/stream_contract.dart`.
+     */
+    const val RECORDING_STATE_ERROR = "recording_state_error"
 }
