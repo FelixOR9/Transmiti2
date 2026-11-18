@@ -117,6 +117,12 @@ void main() {
       expect(find.textContaining('Etapa alcanzada: openDevice'), findsOneWidget);
       expect(find.textContaining('Cámaras detectadas: 5'), findsOneWidget);
       expect(find.textContaining('Cámara seleccionada: 0'), findsOneWidget);
+      expect(
+        find.textContaining(
+          'Clase de excepción: TimeoutCancellationException',
+        ),
+        findsOneWidget,
+      );
       expect(find.text('COPIAR DIAGNÓSTICO'), findsOneWidget);
       expect(find.text('REINTENTAR'), findsOneWidget);
     });

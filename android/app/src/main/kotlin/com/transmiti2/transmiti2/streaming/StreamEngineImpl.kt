@@ -99,6 +99,49 @@ class StreamEngineImpl(
     private var info: PreviewInfo? = null
     private var pendingStart: Deferred<PreviewInfo>? = null
 
+    /**
+     * Etapa del motor antes de que exista sesión (revisión 2 de la
+     * Fase A): `createProducer` (crear el productor de superficie),
+     * `createSession` (crear la sesión y su callback) o `session`
+     * (abrir la sesión). Cuando el fallo es previo a la sesión no hay
+     * diagnóstico de sesión que adjuntar a la excepción, así que el
+     * manejador usa estos datos como reserva para no inventar la etapa
+     * «startPreview». Se reinicia en cada `startPreview()`.
+     */
+    private var lastEngineStage: String = "startPreview"
+    private var lastEngineExceptionClass: String? = null
+
+    /** Diagnóstico de reserva del último intento fallido (ver arriba). */
+    fun lastFailureDiagnostics(): Map<String, Any?> {
+        return mapOf(
+            "stage" to lastEngineStage,
+            "cameraCount" to null,
+            "selectedCameraId" to null,
+            "selectedSize" to null,
+            "selectedFps" to null,
+            "exceptionClass" to lastEngineExceptionClass,
+        )
+    }
+
+    /**
+     * Ejecuta un paso previo a la sesión registrando su etapa: si
+     * falla, la excepción se vuelve a lanzar tal cual (el manejador
+     * sigue clasificándola), pero la etapa y la clase quedan guardadas
+     * para `lastFailureDiagnostics()`.
+     */
+    private suspend fun <T> trackEngineStage(
+        stage: String,
+        block: suspend () -> T,
+    ): T {
+        lastEngineStage = stage
+        return try {
+            block()
+        } catch (e: Exception) {
+            lastEngineExceptionClass = e.javaClass.simpleName
+            throw e
+        }
+    }
+
     private val surfaceCallback = object : SurfaceProducerCallback {
         override fun onSurfaceAvailable() {
             scope.launch { recoverAfterSurfaceAvailable() }
@@ -122,6 +165,12 @@ class StreamEngineImpl(
     }
 
     override suspend fun startPreview(): PreviewInfo {
+        // Revisión 2: el diagnóstico de reserva empieza en
+        // «startPreview» en cada intento; los pasos de `doStartPreview`
+        // lo van precisando (`createProducer`, `createSession`,
+        // `session`). Un intento anterior no contamina el siguiente.
+        lastEngineStage = "startPreview"
+        lastEngineExceptionClass = null
         if (!cameraPermissionGranted()) {
             throw CameraException(
                 StreamContract.PERMISSION_DENIED,
@@ -192,15 +241,24 @@ class StreamEngineImpl(
 
     private suspend fun doStartPreview(): PreviewInfo {
         Transmiti2Logger.d("startPreview: permiso concedido, creando productor")
-        val created = withContext(mainDispatcher) {
-            surfaceProvider.create()
+        val created = trackEngineStage("createProducer") {
+            withContext(mainDispatcher) {
+                surfaceProvider.create()
+            }
         }
-        val createdSession = sessionFactory(created)
-        createdSession.listener = sessionListener
-        created.setCallback(surfaceCallback)
+        val createdSession = trackEngineStage("createSession") {
+            sessionFactory(created).also {
+                it.listener = sessionListener
+            }
+        }
+        trackEngineStage("createSession") {
+            created.setCallback(surfaceCallback)
+        }
         val config: PreviewConfig
         try {
-            config = createdSession.open()
+            config = trackEngineStage("session") {
+                createdSession.open()
+            }
         } catch (e: Exception) {
             try {
                 created.setCallback(null)

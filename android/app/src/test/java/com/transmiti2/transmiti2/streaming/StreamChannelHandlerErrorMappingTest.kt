@@ -96,6 +96,92 @@ class StreamChannelHandlerErrorMappingTest {
     }
 
     @Test
+    fun `una excepcion generica conserva su mensaje real`() {
+        // Revisión 2: antes el mensaje genérico «No se pudo iniciar
+        // la cámara.» sustituía siempre al mensaje real; ahora solo se
+        // usa cuando la excepción no trae mensaje.
+        val mapped = mapStartPreviewError(
+            RuntimeException("servicio de cámara no disponible"),
+        )
+        assertEquals(StreamContract.CAMERA_UNAVAILABLE, mapped.code)
+        assertEquals(
+            "servicio de cámara no disponible",
+            mapped.message,
+        )
+        assertEquals("startPreview", mapped.details["stage"])
+    }
+
+    @Test
+    fun `una excepcion generica sin mensaje usa el generico`() {
+        val mapped = mapStartPreviewError(RuntimeException())
+        assertEquals(StreamContract.CAMERA_UNAVAILABLE, mapped.code)
+        assertEquals("No se pudo iniciar la cámara.", mapped.message)
+    }
+
+    @Test
+    fun `la reserva del motor aporta la etapa real`() {
+        // Revisión 2: un fallo previo a la sesión (crear el productor)
+        // no tiene diagnóstico de sesión; la etapa la da el motor.
+        val fallback = mapOf<String, Any?>(
+            "stage" to "createProducer",
+            "cameraCount" to null,
+            "selectedCameraId" to null,
+            "selectedSize" to null,
+            "selectedFps" to null,
+            "exceptionClass" to null,
+        )
+        val mapped = mapStartPreviewError(
+            RuntimeException("no se pudo crear el productor"),
+            fallback,
+        )
+        assertEquals(StreamContract.CAMERA_UNAVAILABLE, mapped.code)
+        assertEquals("no se pudo crear el productor", mapped.message)
+        assertEquals("createProducer", mapped.details["stage"])
+        assertEquals("RuntimeException", mapped.details["exceptionClass"])
+        assertNull(mapped.details["cameraCount"])
+    }
+
+    @Test
+    fun `CameraException sin details usa la etapa de reserva`() {
+        val fallback = mapOf<String, Any?>(
+            "stage" to "session",
+            "cameraCount" to 5,
+            "selectedCameraId" to "0",
+            "selectedSize" to "1280x720",
+            "selectedFps" to 30,
+            "exceptionClass" to null,
+        )
+        val mapped = mapStartPreviewError(
+            CameraException(
+                StreamContract.CAMERA_IN_USE,
+                "La cámara está en uso por otra aplicación.",
+            ),
+            fallback,
+        )
+        assertEquals(StreamContract.CAMERA_IN_USE, mapped.code)
+        assertEquals("session", mapped.details["stage"])
+        assertEquals(5, mapped.details["cameraCount"])
+        assertEquals("0", mapped.details["selectedCameraId"])
+        assertEquals("CameraException", mapped.details["exceptionClass"])
+    }
+
+    @Test
+    fun `timeout con reserva usa la etapa de reserva`() {
+        val timeout: TimeoutCancellationException = try {
+            withTimeout(1) { delay(10) }
+            error("Se esperaba TimeoutCancellationException")
+        } catch (e: TimeoutCancellationException) {
+            e
+        }
+        val mapped = mapStartPreviewError(
+            timeout,
+            mapOf<String, Any?>("stage" to "openDevice"),
+        )
+        assertEquals(StreamContract.CAMERA_TIMEOUT, mapped.code)
+        assertEquals("openDevice", mapped.details["stage"])
+    }
+
+    @Test
     fun `CameraException conserva su codigo y sus details`() {
         val details = mapOf<String, Any?>(
             "stage" to "enumerate",

@@ -35,47 +35,63 @@ internal data class MappedPreviewError(
  * Los `details` viajan en el `PlatformException` para que Dart muestre
  * la etapa, la cámara y la configuración elegidas. Lo desconocido es
  * `null`: nunca se inventa un valor.
+ *
+ * Revisión 2: cuando la excepción no trae datos propios (fallo previo
+ * a la sesión), `fallbackDetails` aporta la etapa real que registró el
+ * motor (`createProducer`, `createSession`, `session`); sin reserva, la
+ * etapa es «startPreview». Y el mensaje genérico «No se pudo iniciar
+ * la cámara.» solo se usa cuando la excepción no trae mensaje: antes se
+ * descartaba siempre el mensaje real, por eso la tarjeta del teléfono
+ * solo mostraba el genérico aunque la excepción dijera otra cosa.
  */
-internal fun mapStartPreviewError(e: Throwable): MappedPreviewError {
-    val baseDetails = mapOf<String, Any?>(
-        "stage" to "startPreview",
-        "cameraCount" to null,
-        "selectedCameraId" to null,
-        "selectedSize" to null,
-        "selectedFps" to null,
+internal fun mapStartPreviewError(
+    e: Throwable,
+    fallbackDetails: Map<String, Any?> = emptyMap(),
+): MappedPreviewError {
+    val fallbackStage = fallbackDetails["stage"] as? String
+    val detailsWithoutSession = mapOf<String, Any?>(
+        "stage" to (fallbackStage ?: "startPreview"),
+        "cameraCount" to fallbackDetails["cameraCount"],
+        "selectedCameraId" to fallbackDetails["selectedCameraId"],
+        "selectedSize" to fallbackDetails["selectedSize"],
+        "selectedFps" to fallbackDetails["selectedFps"],
         "exceptionClass" to e.javaClass.simpleName,
     )
     return when (e) {
         is CameraException -> MappedPreviewError(
             code = e.code,
             message = e.message ?: "No se pudo iniciar la cámara.",
-            details = if (e.details.isEmpty()) baseDetails else e.details,
+            details = if (e.details.isEmpty()) {
+                detailsWithoutSession
+            } else {
+                e.details
+            },
         )
         is TimeoutCancellationException -> MappedPreviewError(
             code = StreamContract.CAMERA_TIMEOUT,
             message = "Tiempo de espera agotado al iniciar la cámara (5 s).",
-            details = baseDetails,
+            details = detailsWithoutSession,
         )
         is CancellationException -> MappedPreviewError(
             code = StreamContract.CAMERA_UNAVAILABLE,
             message = "Inicio de la vista previa cancelado.",
-            details = baseDetails,
+            details = detailsWithoutSession,
         )
         is IllegalArgumentException -> MappedPreviewError(
             code = StreamContract.CAMERA_CONFIG_ERROR,
             message = "Configuración de cámara no válida: ${e.message}",
-            details = baseDetails,
+            details = detailsWithoutSession,
         )
         is IllegalStateException -> MappedPreviewError(
             code = StreamContract.CAMERA_STATE_ERROR,
             message = "La cámara o la sesión no está en un estado " +
                 "válido: ${e.message}",
-            details = baseDetails,
+            details = detailsWithoutSession,
         )
         else -> MappedPreviewError(
             code = StreamContract.CAMERA_UNAVAILABLE,
-            message = "No se pudo iniciar la cámara.",
-            details = baseDetails,
+            message = e.message ?: "No se pudo iniciar la cámara.",
+            details = detailsWithoutSession,
         )
     }
 }
@@ -248,26 +264,36 @@ class StreamChannelHandler(
                 val info = engine.startPreview()
                 result.success(previewInfoMap(info))
             } catch (e: CameraException) {
-                failPreview(result, e)
+                failPreview(result, e, engine.lastFailureDiagnostics())
             } catch (e: TimeoutCancellationException) {
-                failPreview(result, e)
+                failPreview(result, e, engine.lastFailureDiagnostics())
             } catch (e: CancellationException) {
-                failPreview(result, e)
+                failPreview(result, e, engine.lastFailureDiagnostics())
             } catch (e: IllegalArgumentException) {
-                failPreview(result, e)
+                failPreview(result, e, engine.lastFailureDiagnostics())
             } catch (e: IllegalStateException) {
-                failPreview(result, e)
+                failPreview(result, e, engine.lastFailureDiagnostics())
             } catch (e: Exception) {
-                failPreview(result, e)
+                failPreview(result, e, engine.lastFailureDiagnostics())
             }
         }
     }
 
-    /** Registra el fallo de `startPreview` y lo devuelve con su código. */
-    private fun failPreview(result: MethodChannel.Result, e: Throwable) {
-        val mapped = mapStartPreviewError(e)
+    /**
+     * Registra el fallo de `startPreview` y lo devuelve con su código.
+     * Revisión 2: la reserva de diagnóstico del motor viaja al mapeo
+     * para que un fallo previo a la sesión muestre su etapa real en
+     * vez de la inventada «startPreview».
+     */
+    private fun failPreview(
+        result: MethodChannel.Result,
+        e: Throwable,
+        fallbackDetails: Map<String, Any?> = emptyMap(),
+    ) {
+        val mapped = mapStartPreviewError(e, fallbackDetails)
         Transmiti2Logger.e(
-            "etapa=startPreview ex=${e.javaClass.simpleName} " +
+            "etapa=${mapped.details["stage"]} " +
+                "ex=${e.javaClass.simpleName} " +
                 "msg=${e.message} codigo=${mapped.code}",
         )
         result.error(mapped.code, mapped.message, mapped.details)

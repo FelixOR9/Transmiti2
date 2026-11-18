@@ -167,6 +167,9 @@ class PreviewController extends ChangeNotifier with WidgetsBindingObserver {
     }
     text.writeln('Mensaje técnico: ${_errorMessage ?? '—'}');
     text.writeln(
+      'Clase de excepción: ${diag.exceptionClass ?? '—'}',
+    );
+    text.writeln(
       'Cámaras detectadas: ${diag.cameraCount?.toString() ?? '—'}',
     );
     text.writeln('Cámara seleccionada: ${diag.selectedCameraId ?? '—'}');

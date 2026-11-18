@@ -121,6 +121,46 @@ void main() {
       expect(preview.errorCode, StreamContract.cameraUnavailable);
     });
 
+    testWidgets(
+      'camera_unavailable genérico conserva mensaje, clase y etapa',
+      (WidgetTester tester) async {
+        // Revisión 2: un fallo previo a la sesión (crear el productor)
+        // ya no se muestra como «startPreview» sin datos: la tarjeta
+        // enseña la etapa real, el mensaje real y la clase.
+        await pumpController(tester);
+        service.startPreviewError = StreamContract.cameraUnavailable;
+        service.startPreviewErrorMessage =
+            'Servicio de cámara no disponible.';
+        service.startPreviewErrorDetails = <String, Object?>{
+          'stage': 'createProducer',
+          'cameraCount': null,
+          'selectedCameraId': null,
+          'selectedSize': null,
+          'selectedFps': null,
+          'exceptionClass': 'RuntimeException',
+        };
+
+        await preview.start();
+        await tester.pump();
+
+        expect(preview.state, PreviewState.unavailable);
+        expect(preview.errorCode, StreamContract.cameraUnavailable);
+        expect(
+          preview.errorMessage,
+          'Servicio de cámara no disponible.',
+        );
+        expect(preview.diagnostics?.stage, 'createProducer');
+        expect(preview.diagnostics?.lastErrorStage, 'createProducer');
+        expect(preview.diagnostics?.exceptionClass, 'RuntimeException');
+        final String? text = preview.diagnosticText;
+        expect(text, contains('Etapa alcanzada: createProducer'));
+        expect(text, contains('Clase de excepción: RuntimeException'));
+        expect(text, contains('Servicio de cámara no disponible.'));
+        expect(text, contains('Última etapa con error: createProducer'));
+        expect(text, contains('Cámaras detectadas: —'));
+      },
+    );
+
     testWidgets('detener cierra y es idempotente', (
       WidgetTester tester,
     ) async {

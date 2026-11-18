@@ -158,6 +158,12 @@ class CameraSession(
      * que `IllegalStateException` (superclase de `CancellationException`);
      * una cancelación que no es timeout se devuelve tal cual para que el
      * manejador la siga tratando como cancelación.
+     *
+     * Revisión 2: el resto de excepciones también sale con sus datos
+     * (etapa real, clase y mensaje). Antes se devolvían tal cual y el
+     * manejador las convertía en el genérico «No se pudo iniciar la
+     * cámara.» con la etapa inventada «startPreview», perdiendo el
+     * diagnóstico de la sesión aunque la sesión lo conociera.
      */
     private fun mapOpenFailure(e: Exception): Exception {
         val stage = lastStage
@@ -190,7 +196,18 @@ class CameraSession(
                     "la etapa $stage: ${e.message}",
                 diagnostics(stage, e),
             )
-            else -> e
+            // Revisión 2: cualquier otro tipo de excepción también sale
+            // con sus datos de diagnóstico (etapa real, clase, mensaje):
+            // antes se devolvía tal cual y el manejador la convertía en
+            // el genérico «No se pudo iniciar la cámara.» con la etapa
+            // inventada «startPreview». El código sigue siendo
+            // `camera_unavailable` (el mismo que asignaba el manejador)
+            // y la cancelación sigue sin envolverse (rama de arriba).
+            else -> CameraException(
+                StreamContract.CAMERA_UNAVAILABLE,
+                e.message ?: "No se pudo iniciar la cámara.",
+                diagnostics(stage, e),
+            )
         }
     }
 
@@ -204,29 +221,43 @@ class CameraSession(
         synchronized(lock) {
             currentConfig?.let { if (isOpen) return it }
         }
-        lastStage = "enumerate"
-        val cameraId = selectBackCamera()
-            ?: throw CameraException(
-                StreamContract.CAMERA_UNAVAILABLE,
-                "Este dispositivo no tiene cámara trasera.",
-                diagnostics("enumerate"),
-            )
-        lastSelectedCameraId = cameraId
-        lastStage = "characteristics"
-        val characteristics = try {
-            cameraManager.getCameraCharacteristics(cameraId)
-        } catch (e: CameraAccessException) {
-            throw mapCameraAccessException(e)
-                .withDetails(diagnostics("characteristics", e))
+        // Revisión 2: las etapas iniciales también pasan por
+        // `mapOpenFailure`. Antes no estaban envueltas: una excepción
+        // que no fuera `CameraAccessException` en la enumeración, en
+        // las características o en la selección de configuración
+        // salía sin datos de diagnóstico y el manejador la mostraba
+        // como «startPreview». Las `CameraException` que ya llevan
+        // `details` salen intactas (`mapOpenFailure` no las toca).
+        val cameraId: String
+        val characteristics: CameraCharacteristics
+        val config: PreviewConfig
+        try {
+            lastStage = "enumerate"
+            cameraId = selectBackCamera()
+                ?: throw CameraException(
+                    StreamContract.CAMERA_UNAVAILABLE,
+                    "Este dispositivo no tiene cámara trasera.",
+                    diagnostics("enumerate"),
+                )
+            lastSelectedCameraId = cameraId
+            lastStage = "characteristics"
+            characteristics = try {
+                cameraManager.getCameraCharacteristics(cameraId)
+            } catch (e: CameraAccessException) {
+                throw mapCameraAccessException(e)
+                    .withDetails(diagnostics("characteristics", e))
+            }
+            lastStage = "selectConfig"
+            config = selectConfig(cameraId, characteristics)
+                ?: throw CameraException(
+                    StreamContract.CAMERA_UNAVAILABLE,
+                    "Sin configuración de vista previa compatible.",
+                    diagnostics("selectConfig"),
+                )
+            lastConfig = config
+        } catch (e: Exception) {
+            throw mapOpenFailure(e)
         }
-        lastStage = "selectConfig"
-        val config = selectConfig(cameraId, characteristics)
-            ?: throw CameraException(
-                StreamContract.CAMERA_UNAVAILABLE,
-                "Sin configuración de vista previa compatible.",
-                diagnostics("selectConfig"),
-            )
-        lastConfig = config
         lastStage = "openDevice"
         val opened = try {
             openDevice(cameraId)

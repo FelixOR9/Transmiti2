@@ -9,6 +9,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -76,6 +77,7 @@ class StreamEngineImplTest {
         var openCalls = 0
         var closeCalls = 0
         var openError: CameraException? = null
+        var openThrowable: Throwable? = null
         var openGate: CompletableDeferred<Unit>? = null
         override var isOpen = false
             private set
@@ -85,6 +87,7 @@ class StreamEngineImplTest {
             openCalls++
             openGate?.await()
             openError?.let { throw it }
+            openThrowable?.let { throw it }
             isOpen = true
             return config
         }
@@ -109,14 +112,18 @@ class StreamEngineImplTest {
     ) {
         val handle = FakeHandle()
         var createCalls = 0
+        var createError: Throwable? = null
         val provider = SurfaceProducerProvider {
             createCalls++
+            createError?.let { throw it }
             handle
         }
         var session: FakeSession = FakeSession(testConfig)
         var factoryCalls = 0
+        var factoryError: Throwable? = null
         val factory: PreviewSessionFactory = {
             factoryCalls++
+            factoryError?.let { throw it }
             session
         }
         val events = mutableListOf<Map<String, Any?>>()
@@ -365,6 +372,90 @@ class StreamEngineImplTest {
         assertEquals(1, fixture.factoryCalls)
         assertEquals(1, fixture.session.openCalls)
     }
+
+    @Test
+    fun `fallo al crear el productor registra la etapa createProducer`() =
+        runBlocking {
+            // Revisión 2: un fallo previo a la sesión no tiene
+            // diagnóstico de sesión; el motor registra su propia etapa
+            // para que el manejador no invente «startPreview».
+            val fixture = Fixture()
+            fixture.createError =
+                RuntimeException("no se pudo crear el productor")
+            val engine = fixture.engine()
+
+            try {
+                engine.startPreview()
+                fail("Se esperaba RuntimeException")
+            } catch (e: RuntimeException) {
+                assertEquals("no se pudo crear el productor", e.message)
+            }
+            val diagnostics = engine.lastFailureDiagnostics()
+            assertEquals("createProducer", diagnostics["stage"])
+            assertEquals("RuntimeException", diagnostics["exceptionClass"])
+            assertNull(diagnostics["cameraCount"])
+            assertNull(diagnostics["selectedCameraId"])
+        }
+
+    @Test
+    fun `fallo al crear la sesion registra la etapa createSession`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.factoryError =
+                RuntimeException("no se pudo crear la sesión")
+            val engine = fixture.engine()
+
+            try {
+                engine.startPreview()
+                fail("Se esperaba RuntimeException")
+            } catch (e: RuntimeException) {
+                assertEquals("no se pudo crear la sesión", e.message)
+            }
+            val diagnostics = engine.lastFailureDiagnostics()
+            assertEquals("createSession", diagnostics["stage"])
+            assertEquals("RuntimeException", diagnostics["exceptionClass"])
+        }
+
+    @Test
+    fun `fallo en open con excepcion no CameraException registra la etapa session`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.session.openThrowable = RuntimeException("fallo en open")
+            val engine = fixture.engine()
+
+            try {
+                engine.startPreview()
+                fail("Se esperaba RuntimeException")
+            } catch (e: RuntimeException) {
+                assertEquals("fallo en open", e.message)
+            }
+            val diagnostics = engine.lastFailureDiagnostics()
+            assertEquals("session", diagnostics["stage"])
+            assertEquals("RuntimeException", diagnostics["exceptionClass"])
+            assertTrue(fixture.handle.released)
+        }
+
+    @Test
+    fun `un nuevo intento reinicia el diagnostico de reserva`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.createError = RuntimeException("primer fallo")
+            val engine = fixture.engine()
+
+            try {
+                engine.startPreview()
+                fail("Se esperaba RuntimeException")
+            } catch (_: RuntimeException) {
+            }
+            assertEquals(
+                "createProducer",
+                engine.lastFailureDiagnostics()["stage"],
+            )
+
+            fixture.createError = null
+            val info = engine.startPreview()
+            assertEquals(42L, info.textureId)
+        }
 
     @Test
     fun `la grabacion sigue sin estar disponible en 3_1_1`() {
