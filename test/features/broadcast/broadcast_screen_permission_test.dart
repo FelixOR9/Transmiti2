@@ -44,7 +44,10 @@ void main() {
       expect(find.text('VISTA PREVIA'), findsOneWidget);
       expect(find.textContaining('solo cuando tocas'), findsOneWidget);
       expect(find.text('TRANSMITIR'), findsOneWidget);
-      expect(find.text('GRABAR EN EL TELÉFONO'), findsOneWidget);
+      // Fase B, 3.1.2: el botón de grabar es real («GRABAR»,
+      // deshabilitado sin vista previa), no el de la Fase 3.2.
+      expect(find.text('GRABAR'), findsOneWidget);
+      expect(find.text('GRABAR EN EL TELÉFONO'), findsNothing);
     });
 
     testWidgets('conceder la cámara inicia la vista previa real', (

@@ -297,11 +297,17 @@ class RecordingController extends ChangeNotifier {
     if (_attachedObservers == 0) {
       unawaited(_eventsSubscription?.cancel());
       _eventsSubscription = null;
+      // Sin UI no hay nada que repintar: el temporizador se para
+      // (el tiempo se recalcula desde `_startedAtMs` al volver y la
+      // re-sincronización lo vuelve a arrancar si se sigue grabando).
+      _stopTimer();
     }
   }
 
   /// Consulta el estado al motor y restaura el estado de la UI si el
-  /// motor está grabando y esta UI no lo sabía. Nunca lanza.
+  /// motor está grabando y esta UI no lo sabía. Nunca lanza. El
+  /// temporizador se asegura mientras el motor graba (también cuando
+  /// la UI ya sabía que grababa y vuelve tras un `detach`).
   Future<void> _resync() async {
     RecordingStatusSnapshot snapshot;
     try {
@@ -320,9 +326,9 @@ class RecordingController extends ChangeNotifier {
       _startedAtMs = _nowMs() - snapshot.elapsedMs;
       _segmentStartedAtMs = _nowMs() - snapshot.segmentDurationMs;
       _state = native;
-      _startTimer();
       notifyListeners();
     }
+    _startTimer();
   }
 
   /// Clasifica los `.tmp.mp4` que quedaron de una muerte del proceso
