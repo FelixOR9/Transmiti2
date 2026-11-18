@@ -112,6 +112,25 @@ class StreamEngineImplTest {
             isOpen = false
         }
 
+        var closeSessionCalls = 0
+        var recreateCalls = 0
+        var recreateError: CameraException? = null
+
+        override fun closeSession() {
+            closeSessionCalls++
+            isOpen = false
+        }
+
+        override suspend fun recreateSession(
+            videoSurface: android.view.Surface?,
+            template: Int,
+        ): PreviewConfig {
+            recreateCalls++
+            recreateError?.let { throw it }
+            isOpen = true
+            return config
+        }
+
         fun fireDisconnected() {
             listener?.onDisconnected()
         }

@@ -51,6 +51,15 @@ object StreamContract {
     const val EVENT_PREVIEW_ERROR = "preview_error"
     const val EVENT_PREVIEW_SURFACE_LOST = "preview_surface_lost"
 
+    /**
+     * Eventos de grabación (Fase B, 3.1.2). Espejo en
+     * `lib/features/streaming/domain/stream_contract.dart`.
+     */
+    const val EVENT_RECORDING_STARTED = "recording_started"
+    const val EVENT_RECORDING_SEGMENT = "recording_segment"
+    const val EVENT_RECORDING_STOPPED = "recording_stopped"
+    const val EVENT_RECORDING_ERROR = "recording_error"
+
     // Códigos de error (nunca llevan la clave ni la URL dentro).
     const val NOT_AVAILABLE_IN_PHASE_3_0 = "not_available_in_phase_3_0"
 

@@ -63,6 +63,27 @@ interface PreviewSession {
     /** Cierra sesión y dispositivo. Idempotente y seguro desde cualquier hilo. */
     fun close()
 
+    /**
+     * Cierra solo la sesión de captura; el dispositivo y la
+     * configuración se conservan para recrearla después. Idempotente.
+     * (Fase B, 3.1.2: la grabación recrea la sesión sin reabrir la
+     * cámara.)
+     */
+    fun closeSession()
+
+    /**
+     * Reconstruye la sesión de captura con otra superficie de video y
+     * otra plantilla, sin reabrir el dispositivo (grabación 3.1.2: una
+     * sola sesión con dos superficies; al parar, vuelta a solo vista
+     * previa). Lanza `CameraException` si no hay dispositivo abierto.
+     * Si la recreación falla, intenta restaurar la sesión de solo
+     * vista previa; si tampoco se puede, cierra el dispositivo.
+     */
+    suspend fun recreateSession(
+        videoSurface: Surface?,
+        template: Int,
+    ): PreviewConfig
+
     val isOpen: Boolean
 
     var listener: PreviewSessionListener?
@@ -129,6 +150,17 @@ class CameraSession(
     private var device: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
     private var currentConfig: PreviewConfig? = null
+
+    /**
+     * Superficie de video y plantilla ACTUALES de la sesión (Fase B,
+     * 3.1.2): empiezan con los valores del constructor (solo vista
+     * previa) y `recreateSession` los cambia (superficie del encoder +
+     * `TEMPLATE_RECORD` al grabar, `null` + `TEMPLATE_PREVIEW` al
+     * parar). `open()` los restablece a los del constructor.
+     */
+    private var currentVideoSurface: Surface? = videoOutputSurface
+    private var currentTemplate: Int = captureTemplate
+    private var deviceCharacteristics: CameraCharacteristics? = null
 
     /**
      * Diagnóstico de la Fase A: última etapa alcanzada y datos de la
@@ -294,20 +326,22 @@ class CameraSession(
             // destino de la petición sea una de las superficies de la
             // sesión. (El productor puede recrear su superficie, pero
             // dentro de una sesión abierta siempre es la misma.)
-            lastStage = "createCaptureSession"
-            val session = createCaptureSession(opened, config, previewSurface)
-            lastStage = "startRepeating"
-            startRepeating(
+            // `open()` siempre arranca con los valores del constructor
+            // (solo vista previa), aunque una recreación anterior los
+            // hubiera cambiado.
+            currentVideoSurface = videoOutputSurface
+            currentTemplate = captureTemplate
+            val session = createSessionAndRepeat(
                 opened,
-                session,
-                characteristics,
                 config,
+                characteristics,
                 previewSurface,
             )
             synchronized(lock) {
                 device = opened
                 captureSession = session
                 currentConfig = config
+                deviceCharacteristics = characteristics
                 isOpen = true
             }
             return config
@@ -333,8 +367,127 @@ class CameraSession(
             captureSession = null
             device = null
             currentConfig = null
+            deviceCharacteristics = null
             isOpen = false
         }
+    }
+
+    override fun closeSession() {
+        synchronized(lock) {
+            try {
+                captureSession?.close()
+            } catch (_: Exception) {
+            }
+            captureSession = null
+            isOpen = false
+        }
+    }
+
+    override suspend fun recreateSession(
+        videoSurface: Surface?,
+        template: Int,
+    ): PreviewConfig {
+        val opened: CameraDevice
+        val config: PreviewConfig
+        val characteristics: CameraCharacteristics
+        synchronized(lock) {
+            opened = device ?: throw CameraException(
+                StreamContract.CAMERA_UNAVAILABLE,
+                "Sin dispositivo de cámara abierto para recrear la sesión.",
+                diagnostics("recreateSession"),
+            )
+            config = currentConfig ?: throw CameraException(
+                StreamContract.CAMERA_UNAVAILABLE,
+                "Sin configuración de cámara para recrear la sesión.",
+                diagnostics("recreateSession"),
+            )
+            characteristics = deviceCharacteristics ?: throw CameraException(
+                StreamContract.CAMERA_UNAVAILABLE,
+                "Sin características de cámara para recrear la sesión.",
+                diagnostics("recreateSession"),
+            )
+        }
+        // La superficie de vista previa es la misma del productor (no
+        // la destruye cerrar la sesión de captura); el tamaño ya está
+        // fijado por `open()`.
+        lastStage = "surface"
+        val previewSurface = surfaceHandle.surface() as? Surface
+            ?: throw CameraException(
+                StreamContract.CAMERA_UNAVAILABLE,
+                "Sin superficie de vista previa.",
+                diagnostics("surface"),
+            )
+        currentVideoSurface = videoSurface
+        currentTemplate = template
+        return try {
+            closeSession()
+            val session = createSessionAndRepeat(
+                opened,
+                config,
+                characteristics,
+                previewSurface,
+            )
+            synchronized(lock) {
+                captureSession = session
+                isOpen = true
+            }
+            config
+        } catch (e: Exception) {
+            // La recreación falló: la etapa que se informa es la del
+            // fallo original, no la del intento de restauración.
+            val failedStage = lastStage
+            // Rollback: restaurar la sesión de solo vista previa para
+            // no dejar la cámara bloqueada ni la vista previa muerta.
+            val restored = try {
+                currentVideoSurface = null
+                currentTemplate = CameraDevice.TEMPLATE_PREVIEW
+                closeSession()
+                val session = createSessionAndRepeat(
+                    opened,
+                    config,
+                    characteristics,
+                    previewSurface,
+                )
+                synchronized(lock) {
+                    captureSession = session
+                    isOpen = true
+                }
+                true
+            } catch (_: Exception) {
+                close()
+                false
+            }
+            Transmiti2Logger.e(
+                "recreateSession: fallo (${e.javaClass.simpleName}); " +
+                    "vista previa restaurada=$restored",
+            )
+            lastStage = failedStage
+            throw mapOpenFailure(e)
+        }
+    }
+
+    /**
+     * Crea la sesión de captura y arranca la repetición con la
+     * superficie de video y la plantilla ACTUALES. Lo usan `open()` y
+     * `recreateSession()` (misma creación, sin reabrir el dispositivo).
+     */
+    private suspend fun createSessionAndRepeat(
+        opened: CameraDevice,
+        config: PreviewConfig,
+        characteristics: CameraCharacteristics,
+        previewSurface: Surface,
+    ): CameraCaptureSession {
+        lastStage = "createCaptureSession"
+        val session = createCaptureSession(opened, config, previewSurface)
+        lastStage = "startRepeating"
+        startRepeating(
+            opened,
+            session,
+            characteristics,
+            config,
+            previewSurface,
+        )
+        return session
     }
 
     /**
@@ -549,7 +702,7 @@ class CameraSession(
     ): CameraCaptureSession {
         val surfaces = buildList {
             add(previewSurface)
-            videoOutputSurface?.let { add(it) }
+            currentVideoSurface?.let { add(it) }
         }
         Transmiti2Logger.d("createCaptureSession: surfaces=${surfaces.size}")
         return withTimeout(SESSION_TIMEOUT_MS) {
@@ -613,10 +766,10 @@ class CameraSession(
         previewSurface: Surface,
     ) {
         val builder = opened.createCaptureRequest(
-            captureTemplate,
+            currentTemplate,
         ).apply {
             addTarget(previewSurface)
-            videoOutputSurface?.let { addTarget(it) }
+            currentVideoSurface?.let { addTarget(it) }
             set(
                 CaptureRequest.CONTROL_AF_MODE,
                 afMode(characteristics),

@@ -88,6 +88,25 @@ interface VideoEncoderListener {
 }
 
 /**
+ * Puerto del encoder que usa `RecordingSession`: `VideoEncoder` lo
+ * implementa; en las unitarias se sustituye por un falso (un
+ * `MediaCodec` real no existe en JVM). La superficie y el formato son
+ * los del encoder real cuando existen.
+ */
+interface VideoEncoderPort {
+    val config: VideoEncoderConfig
+    val surface: Surface?
+    val outputFormat: MediaFormat?
+    var listener: VideoEncoderListener?
+    fun configureAndStart()
+    fun requestSyncFrame(): Boolean
+    fun signalEndOfInputStream()
+    fun stopDrain()
+    fun post(block: () -> Unit)
+    fun release()
+}
+
+/**
  * Codificador H.264 de producción (Fase B, 3.1.2; adopta
  * `SpikeVideoEncoder` del spike con `requestSyncFrame` y la
  * comprobación de capacidades): configuración desde las capacidades
@@ -104,7 +123,7 @@ interface VideoEncoderListener {
  *
  * `release()` es idempotente y seguro desde cualquier hilo.
  */
-class VideoEncoder(val config: VideoEncoderConfig) {
+class VideoEncoder(override val config: VideoEncoderConfig) : VideoEncoderPort {
     private val thread = HandlerThread("Transmiti2VideoEncoder").apply {
         start()
     }
@@ -115,10 +134,10 @@ class VideoEncoder(val config: VideoEncoderConfig) {
     private var codec: MediaCodec? = null
     private var inputSurface: Surface? = null
 
-    var listener: VideoEncoderListener? = null
+    override var listener: VideoEncoderListener? = null
 
     /** Superficie de entrada del encoder (tras `configureAndStart`). */
-    val surface: Surface? get() = inputSurface
+    override val surface: Surface? get() = inputSurface
 
     /**
      * Formato de salida real del encoder (con `csd-0`/`csd-1`),
@@ -126,7 +145,7 @@ class VideoEncoder(val config: VideoEncoderConfig) {
      * reutiliza para el `addTrack` de cada segmento nuevo.
      */
     @Volatile
-    var outputFormat: MediaFormat? = null
+    override var outputFormat: MediaFormat? = null
         private set
 
     /**
@@ -135,7 +154,7 @@ class VideoEncoder(val config: VideoEncoderConfig) {
      * lo traduce a `encoder_error`). El formato de salida real llega
      * por `onOutputFormatChanged`.
      */
-    fun configureAndStart() {
+    override fun configureAndStart() {
         check(!released) { "VideoEncoder ya liberado." }
         config.validate()
         val format = buildFormat(config)
@@ -224,7 +243,7 @@ class VideoEncoder(val config: VideoEncoderConfig) {
      * la rotación espera al keyframe natural (≤ 2 s) y, si no llega,
      * se fuerza (el segmento resultante se clasifica después).
      */
-    fun requestSyncFrame(): Boolean {
+    override fun requestSyncFrame(): Boolean {
         val current = codec ?: return false
         return try {
             current.setParameters(
@@ -242,7 +261,7 @@ class VideoEncoder(val config: VideoEncoderConfig) {
     }
 
     /** Pide el fin de la entrada: el drenado termina con EOS. */
-    fun signalEndOfInputStream() {
+    override fun signalEndOfInputStream() {
         codec?.signalEndOfInputStream()
     }
 
@@ -256,7 +275,7 @@ class VideoEncoder(val config: VideoEncoderConfig) {
      * hilo del encoder y el `release()` del muxer, publicado en ese
      * hilo, nunca llegaría a ejecutarse.
      */
-    fun stopDrain() {
+    override fun stopDrain() {
         try {
             codec?.stop()
         } catch (_: Exception) {
@@ -264,12 +283,12 @@ class VideoEncoder(val config: VideoEncoderConfig) {
     }
 
     /** Ejecuta `block` en el hilo del encoder (p. ej. `stop()` del muxer). */
-    fun post(block: () -> Unit) {
+    override fun post(block: () -> Unit) {
         handler.post { block() }
     }
 
     /** Detiene y libera el codec, la superficie y el hilo. Idempotente. */
-    fun release() {
+    override fun release() {
         if (released) return
         released = true
         try {
