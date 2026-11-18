@@ -80,12 +80,17 @@ enum class StreamState {
  * `startRecording` y `stopRecording` lanzan
  * `UnsupportedOperationException` y el manejador sigue devolviendo
  * `not_available_in_phase_3_0` para ellas.
+ *
+ * Fase B, 3.1.2: `startRecording` y `stopRecording` son reales
+ * (suspenden: el inicio espera el formato del encoder y la parada
+ * espera la verificación del último segmento). `startStream` sigue
+ * lanzando `UnsupportedOperationException` (Fase 3.2).
  */
 interface StreamEngine {
     suspend fun startPreview(): PreviewInfo
     suspend fun stopPreview()
     fun startStream(endpoint: RtmpEndpoint)
-    fun startRecording(options: RecordingOptions): String
-    fun stopRecording(): RecordingInfo
+    suspend fun startRecording(options: RecordingOptions): String
+    suspend fun stopRecording(): RecordingInfo
     suspend fun stopAll()
 }

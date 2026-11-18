@@ -1,12 +1,18 @@
 package com.transmiti2.transmiti2
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.hardware.camera2.CameraManager
+import android.os.Build
+import android.os.Bundle
 import androidx.activity.result.contract.ActivityResultContracts
 import com.transmiti2.transmiti2.streaming.PermissionLauncher
 import com.transmiti2.transmiti2.streaming.PermissionManager
 import com.transmiti2.transmiti2.streaming.StreamChannelHandler
 import com.transmiti2.transmiti2.streaming.StreamContract
+import com.transmiti2.transmiti2.streaming.StreamForegroundService
 import com.transmiti2.transmiti2.streaming.spike.MuxerSpikeChannel
 import com.transmiti2.transmiti2.streaming.spike.MuxerSpikeRunner
 import io.flutter.embedding.android.FlutterFragmentActivity
@@ -22,6 +28,24 @@ class MainActivity : FlutterFragmentActivity() {
     private val streamingScope = CoroutineScope(SupervisorJob())
     private var streamingChannel: MethodChannel? = null
     private var eventSink: EventChannel.EventSink? = null
+
+    /** Manejador del canal de streaming (para la parada desde la notificación). */
+    private var streamHandler: StreamChannelHandler? = null
+
+    /**
+     * Receptor de la parada desde la notificación (Fase B, 3.1.2, plan
+     * §9.4): el servicio envía `ACTION_STOP_RECORDING` y aquí se
+     * traduce en `engine.stopRecording()` (mismo camino que el botón
+     * de la UI). No exportado: solo el propio servicio puede enviarlo.
+     * Si la Activity está destruida, el broadcast no llega y el
+     * servicio se autodestruye por su plazo diferido (60 s).
+     */
+    private val stopRecordingReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            streamHandler?.stopRecordingFromService()
+        }
+    }
+    private var stopReceiverRegistered = false
     // SPIKE 3.1.2 — TEMPORAL: canal propio del spike del muxer; se
     // elimina antes de cerrar 3.1.2.
     private var spikeChannel: MethodChannel? = null
@@ -44,6 +68,25 @@ class MainActivity : FlutterFragmentActivity() {
     private val permissionLauncher = PermissionLauncher { permissions, onResult ->
         pendingPermissionCallback = onResult
         permissionResultLauncher.launch(permissions)
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        // El motor ya está configurado (configureFlutterEngine corre
+        // dentro de super.onCreate); el receptor solo reenvía al
+        // manejador cuando existe.
+        val filter = IntentFilter(StreamForegroundService.ACTION_STOP_RECORDING)
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(
+                stopRecordingReceiver,
+                filter,
+                Context.RECEIVER_NOT_EXPORTED,
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(stopRecordingReceiver, filter)
+        }
+        stopReceiverRegistered = true
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -74,7 +117,7 @@ class MainActivity : FlutterFragmentActivity() {
                 cameraManager =
                     getSystemService(Context.CAMERA_SERVICE) as CameraManager,
                 onEvent = { event -> eventSink?.success(event) },
-            ),
+            ).also { streamHandler = it },
         )
         streamingChannel = channel
         // SPIKE 3.1.2 — TEMPORAL: canal propio del spike del muxer
@@ -98,6 +141,14 @@ class MainActivity : FlutterFragmentActivity() {
     }
 
     override fun onDestroy() {
+        if (stopReceiverRegistered) {
+            try {
+                unregisterReceiver(stopRecordingReceiver)
+            } catch (_: Exception) {
+            }
+            stopReceiverRegistered = false
+        }
+        streamHandler = null
         streamingChannel?.setMethodCallHandler(null)
         spikeChannel?.setMethodCallHandler(null)
         streamingScope.cancel()

@@ -594,21 +594,22 @@ class StreamEngineImplTest {
         }
 
     @Test
-    fun `la grabacion sigue sin estar disponible en 3_1_1`() {
-        val fixture = Fixture()
-        val engine = fixture.engine()
+    fun `sin sesion de grabacion startRecording devuelve camera_unavailable y stopRecording es idempotente`() =
+        runBlocking {
+            val fixture = Fixture()
+            val engine = fixture.engine()
 
-        try {
-            engine.startRecording(RecordingOptions())
-            fail("Se esperaba UnsupportedOperationException")
-        } catch (_: UnsupportedOperationException) {
-            // Esperado.
+            try {
+                engine.startRecording(RecordingOptions())
+                fail("Se esperaba CameraException")
+            } catch (e: CameraException) {
+                assertEquals(StreamContract.CAMERA_UNAVAILABLE, e.code)
+            }
+            // Sin sesión no hay nada que parar: resultado vacío, sin
+            // fallo (plan §6.2: `stopRecording` desde `IDLE` es
+            // idempotente).
+            val info = engine.stopRecording()
+            assertEquals("", info.recordingId)
+            assertEquals("idle", info.status)
         }
-        try {
-            engine.stopRecording()
-            fail("Se esperaba UnsupportedOperationException")
-        } catch (_: UnsupportedOperationException) {
-            // Esperado.
-        }
-    }
 }

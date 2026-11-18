@@ -1,10 +1,19 @@
 package com.transmiti2.transmiti2.streaming
 
 import android.content.Context
+import android.hardware.camera2.CameraManager
 import android.os.Build
 import android.view.Display
 import android.view.Surface
 import android.view.WindowManager
+import com.transmiti2.transmiti2.streaming.recording.DefaultSegmentVerifier
+import com.transmiti2.transmiti2.streaming.recording.InterruptedSegmentInfo
+import com.transmiti2.transmiti2.streaming.recording.RecordingException
+import com.transmiti2.transmiti2.streaming.recording.RecordingFileStore
+import com.transmiti2.transmiti2.streaming.recording.RecordingResult
+import com.transmiti2.transmiti2.streaming.recording.RecordingSession
+import com.transmiti2.transmiti2.streaming.recording.RecordingStatusSnapshot
+import java.io.File
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -70,10 +79,19 @@ typealias PreviewSessionFactory = (SurfaceProducerHandle) -> PreviewSession
  *
  * La cámara nunca se abre sin el permiso concedido (se comprueba antes
  * de crear nada) y nunca se mantiene abierta innecesariamente: al parar
- * se cierran sesión y dispositivo y se libera el productor. La
- * grabación no existe en 3.1.1: `startStream`, `startRecording` y
- * `stopRecording` lanzan `UnsupportedOperationException` (el manejador
- * devuelve `not_available_in_phase_3_0` para ellas).
+ * se cierran sesión y dispositivo y se libera el productor.
+ *
+ * Fase B, 3.1.2: `startRecording` y `stopRecording` son reales. La
+ * grabación exige vista previa `ACTIVE` (la cámara ya está abierta y la
+ * configuración elegida es la de la vista previa) y arranca el FGS
+ * (tipo `camera`, sin audio) ANTES de la sesión (plan §9.2: protege el
+ * proceso durante el arranque pesado); si la sesión falla, el servicio
+ * se detiene. `stopPreview`, `onSurfaceCleanup` y la desconexión o el
+ * error de cámara detienen primero la grabación limpiamente (plan
+ * §6.4) y después aplican la lógica de vista previa. `startRecording`
+ * y `stopRecording` se serializan con `recordingMutex`; el orden de
+ * bloqueo es siempre `recordingMutex` antes que el mutex del motor
+ * (nunca al revés), para no bloquearse entre sí.
  */
 class StreamEngineImpl(
     private val cameraPermissionGranted: () -> Boolean,
@@ -83,6 +101,28 @@ class StreamEngineImpl(
     private val scope: CoroutineScope,
     private val mainDispatcher: CoroutineDispatcher = Dispatchers.Main,
     private val onEvent: ((Map<String, Any?>) -> Unit)? = null,
+    /**
+     * `Context` de la app: solo se usa para construir la sesión de
+     * grabación por defecto (`RecordingFileStore` en
+     * `<documents>/recordings/` y `DefaultSegmentVerifier`). Sin él
+     * (pruebas sin Android) no hay sesión y `startRecording` devuelve
+     * `camera_unavailable`.
+     */
+    private val context: Context? = null,
+    /** Para la comprobación de capacidades del encoder (puede ser `null` en pruebas). */
+    private val cameraManager: CameraManager? = null,
+    /**
+     * Fábrica de la sesión de grabación (costura de pruebas): recibe
+     * el envoltorio de eventos (no suspendido; el motor lo emite en el
+     * hilo principal, lección de la Fase B de 3.1.1) y devuelve la
+     * sesión o `null`. Sin fábrica se construye la real con el
+     * `context`; sin `context` ni fábrica no hay sesión.
+     */
+    private val recordingSessionFactory: (
+        (String, Map<String, Any?>) -> Unit,
+    ) -> RecordingSession? = { null },
+    /** Control del FGS (`null` en pruebas: sin servicio). */
+    private val foregroundService: ForegroundServiceControl? = null,
 ) : StreamEngine {
 
     private enum class State {
@@ -93,11 +133,49 @@ class StreamEngineImpl(
     }
 
     private val mutex = Mutex()
+
+    /**
+     * Serializa `startRecording` / `stopRecording` (y las paradas
+     * implícitas desde `stopPreview`, la limpieza de superficie y los
+     * errores de cámara). Siempre se toma ANTES que el mutex del motor.
+     */
+    private val recordingMutex = Mutex()
     private var state = State.IDLE
     private var handle: SurfaceProducerHandle? = null
     private var session: PreviewSession? = null
     private var info: PreviewInfo? = null
     private var pendingStart: Deferred<PreviewInfo>? = null
+
+    /**
+     * Configuración de vista previa activa y rotación para mostrarla
+     * derecha: la grabación usa exactamente la misma configuración
+     * (plan §3.1, "misma configuración que la vista previa activa").
+     * Se fijan al abrir la sesión y se limpian al cerrarla.
+     */
+    private var previewConfig: PreviewConfig? = null
+    private var rotationDegrees: Int = 90
+
+    /**
+     * Sesión de grabación (perezosa: se construye al primer uso, no al
+     * crear el motor). Los eventos de la sesión salen por el envoltorio
+     * no suspendido: el motor los emite en el hilo principal.
+     */
+    private val recordingSession: RecordingSession? by lazy {
+        val emit: (String, Map<String, Any?>) -> Unit = { type, payload ->
+            scope.launch { emitEvent(type, payload) }
+        }
+        recordingSessionFactory(emit)
+            ?: context?.let { ctx ->
+                RecordingSession(
+                    scope = scope,
+                    fileStore = RecordingFileStore(
+                        File(ctx.filesDir, "recordings"),
+                    ),
+                    verifier = DefaultSegmentVerifier(ctx, mainDispatcher),
+                    emitEvent = emit,
+                )
+            }
+    }
 
     /**
      * Etapa del motor antes de que exista sesión (revisión 2 de la
@@ -295,11 +373,18 @@ class StreamEngineImpl(
         mutex.withLock {
             handle = created
             session = createdSession
+            previewConfig = config
+            rotationDegrees = rotation
         }
         return result
     }
 
     override suspend fun stopPreview() {
+        // Grabación activa + `stopPreview` (plan §6.4): primero se
+        // detiene la grabación limpiamente y después la vista previa.
+        // Se hace ANTES de tomar el mutex del motor (orden de bloqueo:
+        // `recordingMutex` antes que el mutex del motor).
+        stopRecordingIfActive()
         // Recursos capturados bajo el mutex; el cierre se hace fuera de
         // él para no bloquear otras transiciones de estado.
         val (wasActive, toClose, toRelease) = mutex.withLock {
@@ -313,6 +398,7 @@ class StreamEngineImpl(
             session = null
             handle = null
             info = null
+            previewConfig = null
             state = State.IDLE
             Triple(wasActive, toClose, toRelease)
         }
@@ -336,30 +422,246 @@ class StreamEngineImpl(
         )
     }
 
-    override fun startRecording(options: RecordingOptions): String {
-        throw UnsupportedOperationException(
-            "La grabación llega en la subetapa 3.1.2.",
-        )
+    /**
+     * Inicia la grabación (Fase B, 3.1.2). Exige vista previa `ACTIVE`
+     * (plan §6.2) y el permiso de cámara; arranca el FGS (tipo
+     * `camera`, sin audio) ANTES de la sesión (plan §9.2) y devuelve el
+     * `recordingId`. Si la sesión falla, el servicio se detiene y se
+     * propaga el error real (`RecordingException` con su código).
+     * Una solicitud duplicada la rechaza la propia sesión con
+     * `recording_state_error` (solo desde `IDLE`).
+     */
+    override suspend fun startRecording(options: RecordingOptions): String {
+        return recordingMutex.withLock {
+            val activeState: State
+            val currentSession: PreviewSession?
+            val currentConfig: PreviewConfig?
+            val currentRotation: Int
+            mutex.withLock {
+                activeState = state
+                currentSession = session
+                currentConfig = previewConfig
+                currentRotation = rotationDegrees
+            }
+            if (activeState != State.ACTIVE ||
+                currentSession == null ||
+                currentConfig == null
+            ) {
+                throw CameraException(
+                    StreamContract.CAMERA_UNAVAILABLE,
+                    "Inicia la vista previa antes de grabar.",
+                )
+            }
+            if (!cameraPermissionGranted()) {
+                throw CameraException(
+                    StreamContract.PERMISSION_DENIED,
+                    "Permiso de cámara no concedido.",
+                )
+            }
+            val recording = recordingSession ?: throw CameraException(
+                StreamContract.CAMERA_UNAVAILABLE,
+                "Grabación no disponible en este dispositivo.",
+            )
+            // Solicitud duplicada (plan §6.2): si ya hay una grabación
+            // en curso se rechaza ANTES de tocar el FGS. Sin esta
+            // guarda, el `catch` de abajo detendría el servicio de la
+            // grabación activa al fallar el segundo inicio.
+            val currentRecordingState = recording.statusSnapshot().state
+            if (currentRecordingState != "idle" &&
+                currentRecordingState != "error"
+            ) {
+                throw RecordingException.stateError(
+                    "Ya hay una grabación en curso ($currentRecordingState).",
+                    mapOf(
+                        "stage" to "startRecording",
+                        "state" to currentRecordingState,
+                        "recordingId" to recording.statusSnapshot().recordingId,
+                    ),
+                )
+            }
+            val fgs = foregroundService
+            if (fgs != null && !fgs.startRecordingService()) {
+                throw CameraException(
+                    StreamContract.PERMISSION_DENIED,
+                    "No se pudo iniciar el servicio en primer plano " +
+                        "(permiso de cámara).",
+                )
+            }
+            try {
+                val started = recording.start(
+                    previewSession = currentSession,
+                    previewConfig = currentConfig,
+                    rotationDegrees = currentRotation,
+                    matchId = options.matchId?.toString(),
+                    cameraManager = cameraManager,
+                )
+                if (fgs != null) {
+                    emitEvent(
+                        StreamContract.EVENT_SERVICE_STARTED,
+                        mapOf("recordingId" to started.recordingId),
+                    )
+                }
+                started.recordingId
+            } catch (e: Exception) {
+                // La sesión falló con el FGS ya arrancado: se detiene el
+                // servicio para no dejarlo huérfano (el evento
+                // `recording_error` ya lo emitió la sesión).
+                if (fgs != null) {
+                    try {
+                        fgs.stopRecordingService()
+                    } catch (_: Exception) {
+                    }
+                }
+                throw e
+            }
+        }
     }
 
-    override fun stopRecording(): RecordingInfo {
-        throw UnsupportedOperationException(
-            "La grabación llega en la subetapa 3.1.2.",
+    /**
+     * Detiene la grabación (Fase B, 3.1.2). Idempotente desde `IDLE`
+     * (la sesión devuelve el resultado vacío, `status = "idle"`).
+     * Detiene el FGS al terminar (plan §9.2, paso 5) y emite
+     * `service_stopped` cuando hubo grabación. `filePath` es el primer
+     * segmento (la ruta final fusionada llega en 3.1.4; los segmentos
+     * se identifican por nombre, plan §8.1).
+     */
+    override suspend fun stopRecording(): RecordingInfo {
+        val recording = recordingSession
+        val result = if (recording == null) {
+            RecordingResult.empty()
+        } else {
+            try {
+                recordingMutex.withLock { recording.stop() }
+            } finally {
+                foregroundService?.let { fgs ->
+                    try {
+                        fgs.stopRecordingService()
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+        }
+        if (recording != null && result.status != "idle") {
+            emitEvent(
+                StreamContract.EVENT_SERVICE_STOPPED,
+                mapOf("recordingId" to result.recordingId),
+            )
+        }
+        return RecordingInfo(
+            recordingId = result.recordingId,
+            filePath = result.segments.firstOrNull()?.filePath ?: "",
+            durationMs = result.totalDurationMs,
+            sizeBytes = result.totalSizeBytes,
+            status = result.status,
         )
     }
 
     /**
+     * Instantánea del estado de grabación para `getRecordingStatus`
+     * (re-sincronizar la UI al volver a la pantalla). Sin sesión, el
+     * estado es `idle`.
+     */
+    fun recordingStatus(): RecordingStatusSnapshot {
+        val recording = recordingSession ?: return RecordingStatusSnapshot(
+            state = "idle",
+            recordingId = null,
+            elapsedMs = 0,
+            segmentIndex = 0,
+            segmentDurationMs = 0,
+            width = null,
+            height = null,
+            fps = null,
+            errorCode = null,
+        )
+        return recording.statusSnapshot()
+    }
+
+    /** Mapa de `recordingStatus()` para el canal de métodos. */
+    fun recordingStatusMap(): Map<String, Any?> {
+        val snapshot = recordingStatus()
+        return mapOf(
+            "state" to snapshot.state,
+            "recordingId" to snapshot.recordingId,
+            "elapsedMs" to snapshot.elapsedMs,
+            "segmentIndex" to snapshot.segmentIndex,
+            "segmentDurationMs" to snapshot.segmentDurationMs,
+            "width" to snapshot.width,
+            "height" to snapshot.height,
+            "fps" to snapshot.fps,
+            "errorCode" to snapshot.errorCode,
+        )
+    }
+
+    /**
+     * Clasifica los `.tmp.mp4` que quedaron de una muerte del proceso
+     * (plan §7.3). Nunca borra ni modifica nada; devuelve la lista
+     * clasificada para que Dart actualice las filas de `recordings`.
+     */
+    suspend fun recoverInterruptedRecordings(): List<InterruptedSegmentInfo> {
+        return recordingSession?.recoverInterrupted() ?: emptyList()
+    }
+
+    /** Mapa de un segmento recuperado para el canal de métodos. */
+    fun recoveredSegmentMap(segment: InterruptedSegmentInfo): Map<String, Any?> {
+        return mapOf(
+            "recordingId" to segment.recordingId,
+            "segmentIndex" to segment.index,
+            "fileName" to segment.fileName,
+            "filePath" to segment.filePath,
+            "status" to segment.status.name.lowercase(),
+            "durationMs" to segment.durationMs,
+            "sizeBytes" to segment.sizeBytes,
+            "reason" to segment.reason,
+        )
+    }
+
+    /**
+     * `true` cuando el FGS está disponible para grabar (hay sesión de
+     * grabación y control del servicio). Es lo que devuelve
+     * `getStatus().foregroundServiceAvailable` desde 3.1.2.
+     */
+    fun foregroundServiceAvailable(): Boolean {
+        return recordingSession != null && foregroundService != null
+    }
+
+    /**
+     * Detiene la grabación si hay una en curso (idempotente desde
+     * `IDLE` o `ERROR`) y detiene el FGS. Nunca lanza: una parada de
+     * vista previa o un error de cámara no deben fallar porque la
+     * parada de la grabación falle. Con `errorCode`, la parada se
+     * registra como error (desconexión de cámara, plan §6.4).
+     */
+    private suspend fun stopRecordingIfActive(errorCode: String? = null) {
+        val recording = recordingSession ?: return
+        try {
+            recordingMutex.withLock { recording.stop(errorCode) }
+        } catch (_: Exception) {
+        } finally {
+            foregroundService?.let { fgs ->
+                try {
+                    fgs.stopRecordingService()
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    /**
      * La superficie se limpió (por ejemplo, al ir a segundo plano con
-     * memoria baja): se cierra solo la sesión de captura; el productor
-     * y su textura se conservan para la recuperación.
+     * memoria baja): con grabación activa se detiene primero la
+     * grabación limpiamente (plan §6.4: nunca se cierra la sesión a
+     * mitad de un segmento) y después se aplica la recuperación normal
+     * de vista previa. Sin grabación, el comportamiento no cambia.
      */
     private suspend fun handleSurfaceCleanup() {
+        stopRecordingIfActive()
         val (wasActive, toClose) = mutex.withLock {
             if (state != State.ACTIVE) {
                 Pair(false, null)
             } else {
                 val toClose = session
                 session = null
+                previewConfig = null
                 state = State.RECOVERING
                 Pair(true, toClose)
             }
@@ -395,6 +697,7 @@ class StreamEngineImpl(
             mutex.withLock {
                 state = State.IDLE
                 info = null
+                previewConfig = null
                 handle = null
             }
             releaseHandle(currentHandle)
@@ -419,6 +722,8 @@ class StreamEngineImpl(
             mutex.withLock {
                 session = newSession
                 info = result
+                previewConfig = config
+                rotationDegrees = rotation
                 state = State.ACTIVE
             }
             emitEvent(
@@ -438,6 +743,7 @@ class StreamEngineImpl(
                 state = State.IDLE
                 info = null
                 session = null
+                previewConfig = null
                 handle = null
             }
             releaseHandle(currentHandle)
@@ -450,8 +756,14 @@ class StreamEngineImpl(
         }
     }
 
-    /** Desconexión o error de cámara: se libera todo y se avisa. */
+    /**
+     * Desconexión o error de cámara: con grabación activa se detiene
+     * primero la grabación con el código de error (plan §6.4: se
+     * finaliza el segmento en curso si es posible y se conservan los
+     * cerrados) y después se libera todo y se avisa.
+     */
     private suspend fun teardownAfterError(code: String) {
+        stopRecordingIfActive(errorCode = code)
         val wasActive = mutex.withLock {
             val wasActive = state == State.ACTIVE ||
                 state == State.STARTING ||
@@ -461,6 +773,7 @@ class StreamEngineImpl(
             session = null
             handle = null
             info = null
+            previewConfig = null
             pendingStart?.cancel()
             pendingStart = null
             state = State.IDLE
@@ -485,6 +798,7 @@ class StreamEngineImpl(
             val toRelease = handle
             session = null
             handle = null
+            previewConfig = null
             Pair(toClose, toRelease)
         }
         try {

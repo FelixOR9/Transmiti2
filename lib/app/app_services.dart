@@ -13,6 +13,7 @@ import 'package:transmiti2/features/match/domain/sponsor.dart';
 import 'package:transmiti2/features/match/domain/team.dart';
 import 'package:transmiti2/features/streaming/application/streaming_controller.dart';
 import 'package:transmiti2/features/streaming/application/streaming_service.dart';
+import 'package:transmiti2/features/streaming/data/recording_repository.dart';
 import 'package:transmiti2/features/streaming/data/stream_destination_repository.dart';
 
 /// Servicios compartidos de la app: almacenamiento y partido actual.
@@ -98,6 +99,10 @@ class AppServices {
     await session.load();
     final StreamingController streaming = StreamingController(
       destinations: SqliteStreamDestinationRepository(db),
+      recordings: SqliteRecordingRepository(
+        db,
+        recordingsDirPath: recordings.path,
+      ),
       service: MethodChannelStreamingService(),
     );
     return AppServices(

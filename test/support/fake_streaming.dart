@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:transmiti2/features/streaming/application/streaming_service.dart';
+import 'package:transmiti2/features/streaming/data/recording_repository.dart';
 import 'package:transmiti2/features/streaming/data/stream_destination_repository.dart';
 import 'package:transmiti2/features/streaming/domain/permission_state.dart';
 import 'package:transmiti2/features/streaming/domain/stream_contract.dart';
@@ -46,6 +47,25 @@ class FakeStreamingService implements StreamingService {
   int startPreviewCalls = 0;
   int stopPreviewCalls = 0;
   int stopAllCalls = 0;
+
+  /// Grabación (Fase B, 3.1.2): `startRecording` devuelve
+  /// `recordingId` y cuenta las llamadas, salvo que
+  /// `startRecordingError` fije un código de error para lanzar.
+  /// `getRecordingStatus` devuelve `recordingStatus` (idle por
+  /// defecto) y `recoverInterruptedRecordings` devuelve
+  /// `recoveredSegments`.
+  String recordingId = 'rec_20261118_120000_ab12';
+  String? startRecordingError;
+  String? startRecordingErrorMessage;
+  Map<String, Object?>? startRecordingErrorDetails;
+  String? stopRecordingError;
+  int startRecordingCalls = 0;
+  int stopRecordingCalls = 0;
+  RecordingOptions? lastRecordingOptions;
+  RecordingStatusSnapshot recordingStatus =
+      RecordingStatusSnapshot.idle();
+  List<RecoveredSegmentInfo> recoveredSegments =
+      const <RecoveredSegmentInfo>[];
 
   final StreamController<Map<String, Object?>> _eventsController =
       StreamController<Map<String, Object?>>.broadcast();
@@ -143,12 +163,43 @@ class FakeStreamingService implements StreamingService {
   Future<String> startRecording({
     RecordingOptions options = const RecordingOptions(),
   }) async {
-    throw const StreamingException(StreamContract.notAvailableInPhase30);
+    startRecordingCalls++;
+    lastRecordingOptions = options;
+    final String? error = startRecordingError;
+    if (error != null) {
+      throw StreamingException(
+        error,
+        startRecordingErrorMessage,
+        startRecordingErrorDetails,
+      );
+    }
+    return recordingId;
   }
 
   @override
   Future<RecordingInfo> stopRecording() async {
-    throw const StreamingException(StreamContract.notAvailableInPhase30);
+    stopRecordingCalls++;
+    final String? error = stopRecordingError;
+    if (error != null) {
+      throw StreamingException(error);
+    }
+    return RecordingInfo(
+      recordingId: recordingId,
+      filePath: '/docs/recordings/${recordingId}_seg000.mp4',
+      durationMs: 12000,
+      sizeBytes: 3750000,
+      status: 'ready',
+    );
+  }
+
+  @override
+  Future<RecordingStatusSnapshot> getRecordingStatus() async {
+    return recordingStatus;
+  }
+
+  @override
+  Future<List<RecoveredSegmentInfo>> recoverInterruptedRecordings() async {
+    return List<RecoveredSegmentInfo>.unmodifiable(recoveredSegments);
   }
 
   @override
@@ -246,5 +297,85 @@ class InMemoryStreamDestinationRepository
   @override
   Future<void> delete(int id) async {
     _destinations.removeWhere((d) => d.id == id);
+  }
+}
+
+/// Repositorio de grabaciones en memoria, solo para pruebas.
+class InMemoryRecordingRepository implements RecordingRepository {
+  final List<RecordingRow> _rows = <RecordingRow>[];
+  int _nextId = 1;
+
+  List<RecordingRow> get rows => List<RecordingRow>.unmodifiable(_rows);
+
+  @override
+  Future<RecordingRow> insertRecording({
+    required String recordingId,
+    int? matchId,
+    required String resolution,
+    required int fps,
+    required int videoBitrateBps,
+    required int nowMs,
+  }) async {
+    final String fileName = '${recordingId}_final.mp4';
+    final RecordingRow created = RecordingRow(
+      id: _nextId++,
+      matchId: matchId,
+      filePath: '/docs/recordings/$fileName',
+      fileName: fileName,
+      resolution: resolution,
+      fps: fps,
+      videoBitrateBps: videoBitrateBps,
+      status: 'recording',
+      createdAtMs: nowMs,
+      updatedAtMs: nowMs,
+    );
+    _rows.add(created);
+    return created;
+  }
+
+  @override
+  Future<void> updateOnStop({
+    required String recordingId,
+    required String status,
+    int? durationMs,
+    int? sizeBytes,
+    required int nowMs,
+  }) async {
+    if (!recordingRowStatuses.contains(status)) {
+      throw ArgumentError('Estado de grabación no admitido: $status');
+    }
+    final int index = _rows.indexWhere(
+      (r) => r.fileName == '${recordingId}_final.mp4',
+    );
+    if (index >= 0) {
+      _rows[index] = _rows[index].copyWith(
+        durationMs: durationMs,
+        sizeBytes: sizeBytes,
+        status: status,
+        updatedAtMs: nowMs,
+      );
+    }
+  }
+
+  @override
+  Future<List<RecordingRow>> interrupted() async {
+    return _rows
+        .where((r) => r.status == 'recording' || r.status == 'finalizing')
+        .toList();
+  }
+
+  @override
+  Future<RecordingRow?> byRecordingId(String recordingId) async {
+    return byFileName('${recordingId}_final.mp4');
+  }
+
+  @override
+  Future<RecordingRow?> byFileName(String fileName) async {
+    for (final RecordingRow row in _rows) {
+      if (row.fileName == fileName) {
+        return row;
+      }
+    }
+    return null;
   }
 }

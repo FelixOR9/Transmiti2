@@ -8,6 +8,7 @@ import android.hardware.camera2.CameraManager
 import android.net.Uri
 import android.provider.Settings
 import androidx.core.content.ContextCompat
+import com.transmiti2.transmiti2.streaming.recording.RecordingException
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.view.TextureRegistry
@@ -123,6 +124,12 @@ internal fun mapStartPreviewError(
  * fallos (`camera_timeout`, `camera_config_error`,
  * `camera_state_error`, `camera_disabled_by_system`) y devuelve sus
  * `details` a Dart; solo instrumentación, sin corrección funcional.
+ *
+ * Fase B, 3.1.2: `startRecording`, `stopRecording`,
+ * `getRecordingStatus` y `recoverInterruptedRecordings` son reales
+ * (grabación local sin audio, FGS tipo `camera`); `startStream` sigue
+ * devolviendo `not_available_in_phase_3_0` (Fase 3.2). El audio se
+ * rechaza con `recording_state_error`.
  */
 class StreamChannelHandler(
     private val context: Context,
@@ -158,6 +165,12 @@ class StreamChannelHandler(
             displayRotationDegrees = { displayRotationDegrees(context) },
             scope = scope,
             onEvent = onEvent,
+            // Fase B, 3.1.2: la grabación se construye con el contexto
+            // de la app (almacenamiento y verificación) y el control
+            // real del servicio en primer plano.
+            context = context,
+            cameraManager = manager,
+            foregroundService = RealForegroundServiceControl(context),
         )
     }
 
@@ -180,7 +193,10 @@ class StreamChannelHandler(
 
     private fun statusMap(): Map<String, Boolean> {
         return mapOf(
-            "foregroundServiceAvailable" to false,
+            // Fase B, 3.1.2: el FGS está disponible cuando el motor
+            // tiene sesión de grabación y control del servicio.
+            "foregroundServiceAvailable" to
+                (previewEngine?.foregroundServiceAvailable() ?: false),
             "cameraGranted" to isGranted(Manifest.permission.CAMERA),
             "microphoneGranted" to isGranted(Manifest.permission.RECORD_AUDIO),
             // Desde la 3.1.1 hay vista previa real cuando el motor existe.
@@ -218,14 +234,17 @@ class StreamChannelHandler(
             StreamContract.START_PREVIEW -> startPreview(result)
             StreamContract.STOP_PREVIEW -> stopPreview(result)
             StreamContract.STOP_ALL -> stopAll(result)
-            StreamContract.START_STREAM,
-            StreamContract.START_RECORDING,
-            StreamContract.STOP_RECORDING,
-            -> result.error(
-                StreamContract.NOT_AVAILABLE_IN_PHASE_3_0,
-                "Función no disponible en la Fase 3.0.",
-                null,
-            )
+            StreamContract.START_RECORDING -> startRecording(call, result)
+            StreamContract.STOP_RECORDING -> stopRecording(result)
+            StreamContract.GET_RECORDING_STATUS -> getRecordingStatus(result)
+            StreamContract.RECOVER_INTERRUPTED_RECORDINGS ->
+                recoverInterruptedRecordings(result)
+            StreamContract.START_STREAM ->
+                result.error(
+                    StreamContract.NOT_AVAILABLE_IN_PHASE_3_0,
+                    "Función no disponible en la Fase 3.0.",
+                    null,
+                )
             else -> result.notImplemented()
         }
     }
@@ -336,6 +355,190 @@ class StreamChannelHandler(
             } catch (_: Exception) {
             }
             result.success(null)
+        }
+    }
+
+    /**
+     * Inicia la grabación y devuelve el `recordingId` (Fase B, 3.1.2).
+     * El audio está fuera de alcance: `audioEnabled = true` se rechaza
+     * con `recording_state_error` (plan §10.2: forzado a `false`).
+     * El error nativo viaja con su código, su mensaje y sus `details`
+     * (etapa, segmento, archivo) como los errores de vista previa de
+     * la Fase A.
+     */
+    private fun startRecording(call: MethodCall, result: MethodChannel.Result) {
+        val engine = previewEngine
+        if (engine == null) {
+            result.error(
+                StreamContract.CAMERA_UNAVAILABLE,
+                "Grabación no disponible en este dispositivo.",
+                null,
+            )
+            return
+        }
+        val audioEnabled = call.argument<Boolean>("audioEnabled") ?: false
+        if (audioEnabled) {
+            result.error(
+                StreamContract.RECORDING_STATE_ERROR,
+                "El audio no está disponible en la subetapa 3.1.2.",
+                null,
+            )
+            return
+        }
+        val options = RecordingOptions(
+            matchId = (call.argument<Any>("matchId") as? Number)?.toLong(),
+            resolution = call.argument<String>("resolution") ?: "720p",
+            fps = (call.argument<Any>("fps") as? Number)?.toInt() ?: 30,
+            videoBitrateBps =
+                (call.argument<Any>("videoBitrateBps") as? Number)?.toInt()
+                    ?: 2_500_000,
+            audioEnabled = false,
+        )
+        scope.launch {
+            try {
+                result.success(engine.startRecording(options))
+            } catch (e: Exception) {
+                failRecording(result, e)
+            }
+        }
+    }
+
+    /**
+     * Detiene la grabación y devuelve `{recordingId, filePath,
+     * durationMs, sizeBytes, status}` (Fase B, 3.1.2). Idempotente
+     * desde `IDLE` (devuelve el resultado vacío, `status = "idle"`).
+     */
+    private fun stopRecording(result: MethodChannel.Result) {
+        val engine = previewEngine
+        if (engine == null) {
+            result.error(
+                StreamContract.CAMERA_UNAVAILABLE,
+                "Grabación no disponible en este dispositivo.",
+                null,
+            )
+            return
+        }
+        scope.launch {
+            try {
+                result.success(recordingInfoMap(engine.stopRecording()))
+            } catch (e: Exception) {
+                failRecording(result, e)
+            }
+        }
+    }
+
+    private fun recordingInfoMap(info: RecordingInfo): Map<String, Any> {
+        return mapOf(
+            "recordingId" to info.recordingId,
+            "filePath" to info.filePath,
+            "durationMs" to info.durationMs,
+            "sizeBytes" to info.sizeBytes,
+            "status" to info.status,
+        )
+    }
+
+    /**
+     * Estado actual de la grabación (Fase B, 3.1.2): la UI lo consulta
+     * al volver a la pantalla para re-sincronizarse con el motor (la
+     * grabación continúa por el FGS aunque la UI se haya ido).
+     */
+    private fun getRecordingStatus(result: MethodChannel.Result) {
+        val engine = previewEngine
+        if (engine == null) {
+            result.success(
+                mapOf<String, Any?>(
+                    "state" to "idle",
+                    "recordingId" to null,
+                    "elapsedMs" to 0,
+                    "segmentIndex" to 0,
+                    "segmentDurationMs" to 0,
+                    "width" to null,
+                    "height" to null,
+                    "fps" to null,
+                    "errorCode" to null,
+                ),
+            )
+            return
+        }
+        scope.launch {
+            result.success(engine.recordingStatusMap())
+        }
+    }
+
+    /**
+     * Clasifica los `.tmp.mp4` que quedaron de una muerte del proceso
+     * (Fase B, 3.1.2, plan §7.3). Nunca borra ni modifica nada; Dart
+     * actualiza las filas de `recordings` con la clasificación.
+     */
+    private fun recoverInterruptedRecordings(result: MethodChannel.Result) {
+        val engine = previewEngine
+        if (engine == null) {
+            result.success(mapOf<String, Any?>("recovered" to emptyList<Any>()))
+            return
+        }
+        scope.launch {
+            try {
+                val recovered = engine.recoverInterruptedRecordings()
+                result.success(
+                    mapOf<String, Any?>(
+                        "recovered" to recovered.map {
+                            engine.recoveredSegmentMap(it)
+                        },
+                    ),
+                )
+            } catch (e: Exception) {
+                failRecording(result, e)
+            }
+        }
+    }
+
+    /**
+     * Parada de la grabación desde la notificación (plan §9.4): la
+     * acción "Detener" llega por broadcast a `MainActivity` y termina
+     * aquí. Mismo camino que el botón de la UI; nunca lanza.
+     */
+    fun stopRecordingFromService() {
+        scope.launch {
+            try {
+                previewEngine?.stopRecording()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    /**
+     * Registra el fallo de `startRecording` / `stopRecording` y lo
+     * devuelve con su código. `RecordingException` y `CameraException`
+     * ya traen su código, su mensaje y sus `details`; lo desconocido
+     * es `recording_state_error` (nunca se inventa un código).
+     */
+    private fun failRecording(result: MethodChannel.Result, e: Throwable) {
+        when (e) {
+            is RecordingException -> {
+                Transmiti2Logger.e(
+                    "etapa=${e.details["stage"]} ex=${e.javaClass.simpleName} " +
+                        "msg=${e.message} codigo=${e.code}",
+                )
+                result.error(e.code, e.message, e.details)
+            }
+            is CameraException -> {
+                Transmiti2Logger.e(
+                    "ex=${e.javaClass.simpleName} msg=${e.message} " +
+                        "codigo=${e.code}",
+                )
+                result.error(e.code, e.message, e.details)
+            }
+            else -> {
+                Transmiti2Logger.e(
+                    "ex=${e.javaClass.simpleName} msg=${e.message} " +
+                        "codigo=${StreamContract.RECORDING_STATE_ERROR}",
+                )
+                result.error(
+                    StreamContract.RECORDING_STATE_ERROR,
+                    e.message ?: "No se pudo grabar.",
+                    null,
+                )
+            }
         }
     }
 

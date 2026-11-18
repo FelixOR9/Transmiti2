@@ -11,11 +11,47 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.transmiti2.transmiti2.MainActivity
+
+/**
+ * Control del servicio en primer plano, detrás de una interfaz para
+ * poder sustituirlo en las pruebas del motor (el servicio real necesita
+ * un `Context` y un `startForegroundService()` que no existen en JVM).
+ *
+ * - `startRecordingService()`: pre-comprobación de permisos y arranque
+ *   del servicio con el escenario `WITHOUT_AUDIO`; `false` si falta
+ *   algún permiso (el llamador devuelve `permission_denied` y no
+ *   graba nada).
+ * - `stopRecordingService()`: detiene el servicio (inofensivo si no
+ *   está corriendo).
+ */
+interface ForegroundServiceControl {
+    fun startRecordingService(): Boolean
+    fun stopRecordingService()
+}
+
+/** Control real del servicio (producción): delega en el compañero. */
+class RealForegroundServiceControl(
+    private val context: Context,
+) : ForegroundServiceControl {
+    override fun startRecordingService(): Boolean {
+        return StreamForegroundService.start(
+            context,
+            RecordingScenario.WITHOUT_AUDIO,
+        )
+    }
+
+    override fun stopRecordingService() {
+        StreamForegroundService.stop(context)
+    }
+}
 
 /**
  * Escenario de grabación del servicio en primer plano.
@@ -92,11 +128,22 @@ object ForegroundServicePrecheck {
  * de `onStartCommand()`, con la notificación ya construida. No se hace
  * I/O, red ni se leen secretos antes.
  *
- * Todavía no hay sesión de grabación: si el servicio arranca en 3.1.0
- * se detiene a sí mismo tras promoverse a primer plano. En 3.1.2 aquí
- * arranca la captura y el servicio sigue vivo hasta que la grabación
- * para. El arranque real de una grabación mediante el servicio NO está
- * validado en 3.1.0.
+ * Fase B, 3.1.2: arranque real con una grabación. El servicio deja de
+ * autodestruirse: vive hasta que la grabación para (el motor lo detiene
+ * con `stop()` al terminar `stopRecording`) o hasta que el usuario toca
+ * "Detener" en la notificación. Al arrancar se adquiere el wake lock
+ * parcial (la grabación continúa con la pantalla apagada) y la
+ * notificación muestra el tiempo transcurrido, actualizado cada
+ * segundo. La acción "Detener" NO posee el motor (vive en
+ * `MainActivity`): envía el broadcast `ACTION_STOP_RECORDING`, que la
+ * Activity traduce en `engine.stopRecording()` (el mismo camino que el
+ * botón de la UI), y programa una autodestrucción diferida (60 s) por
+ * si el broadcast no llega (Activity destruida): en ese caso la
+ * grabación queda interrumpida pero clasificada al reabrir (§7.2 del
+ * plan); nunca se pierde un segmento ya cerrado. El plazo de 60 s es
+ * mayor que el timeout de verificación de un segmento (30 s), así que
+ * una parada normal (que detiene el servicio desde el motor) nunca lo
+ * alcanza.
  *
  * Sin límite de tiempo: el límite de 6 h de Android 15 aplica solo a
  * `dataSync` y `mediaProcessing`; `camera` y `microphone` no lo tienen.
@@ -104,6 +151,25 @@ object ForegroundServicePrecheck {
 class StreamForegroundService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
+
+    /**
+     * Inicio de la grabación en curso (reloj monótono) para el tiempo
+     * transcurrido de la notificación; 0 si no hay grabación.
+     */
+    private var recordingStartElapsedMs: Long = 0
+
+    /** Actualización del tiempo de la notificación, cada segundo. */
+    private val tickerHandler = Handler(Looper.getMainLooper())
+    private val ticker = object : Runnable {
+        override fun run() {
+            if (recordingStartElapsedMs == 0L) return
+            updateNotification()
+            tickerHandler.postDelayed(this, TICKER_INTERVAL_MS)
+        }
+    }
+
+    /** Autodestrucción diferida tras la acción "Detener" (ver arriba). */
+    private val delayedStop = Runnable { stopSelf() }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -124,18 +190,37 @@ class StreamForegroundService : Service() {
             startForeground(NOTIFICATION_ID, notification, type)
         }
         if (intent?.action == ACTION_STOP) {
-            stopSelf()
+            // La parada la hace el motor (mismo camino que el botón de
+            // la UI): se avisa por broadcast y se programa la
+            // autodestrucción diferida por si nadie escucha.
+            sendBroadcast(Intent(ACTION_STOP_RECORDING))
+            tickerHandler.postDelayed(delayedStop, DELAYED_STOP_MS)
             return START_NOT_STICKY
         }
-        // 3.1.0: sin sesión de grabación todavía; el servicio se detiene.
-        // En 3.1.2 aquí arranca la captura.
-        stopSelf()
+        // Arranque real de una grabación (3.1.2): el servicio vive
+        // hasta que la grabación para; wake lock y ticker en marcha.
+        if (recordingStartElapsedMs == 0L) {
+            recordingStartElapsedMs = SystemClock.elapsedRealtime()
+        }
+        acquireWakeLock()
+        tickerHandler.postDelayed(ticker, TICKER_INTERVAL_MS)
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
+        tickerHandler.removeCallbacks(ticker)
+        tickerHandler.removeCallbacks(delayedStop)
+        recordingStartElapsedMs = 0
         releaseWakeLock()
         super.onDestroy()
+    }
+
+    /** Refresca la notificación con el tiempo transcurrido actual. */
+    private fun updateNotification() {
+        val scenario = RecordingScenario.WITHOUT_AUDIO
+        val notification = buildNotification(scenario)
+        val manager = getSystemService(NotificationManager::class.java)
+        manager?.notify(NOTIFICATION_ID, notification)
     }
 
     private fun buildNotification(scenario: RecordingScenario): Notification {
@@ -157,9 +242,21 @@ class StreamForegroundService : Service() {
             RecordingScenario.WITH_AUDIO -> "Grabando partido (con audio)"
             RecordingScenario.WITHOUT_AUDIO -> "Grabando partido (sin audio)"
         }
+        // Tiempo transcurrido (plan §9.3): mientras hay grabación en
+        // curso se muestra `mm:ss`; antes de arrancar, el texto fijo.
+        val contentText = if (recordingStartElapsedMs == 0L) {
+            "TRANSMITI2"
+        } else {
+            val elapsedMs =
+                SystemClock.elapsedRealtime() - recordingStartElapsedMs
+            val totalSeconds = (elapsedMs / 1000).toInt()
+            val minutes = totalSeconds / 60
+            val seconds = totalSeconds % 60
+            "TRANSMITI2 · %02d:%02d".format(minutes, seconds)
+        }
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
-            .setContentText("TRANSMITI2")
+            .setContentText(contentText)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentIntent(openApp)
             .addAction(android.R.drawable.ic_media_pause, "Detener", stop)
@@ -185,11 +282,10 @@ class StreamForegroundService : Service() {
     }
 
     /**
-     * Adquiere el wake lock parcial durante la grabación (lo usa 3.1.2).
-     * La grabación continúa con la pantalla apagada (teléfono en trípode
-     * durante el partido). Sin usar en 3.1.0.
+     * Adquiere el wake lock parcial durante la grabación (3.1.2). La
+     * grabación continúa con la pantalla apagada (teléfono en trípode
+     * durante el partido).
      */
-    @Suppress("unused")
     private fun acquireWakeLock() {
         if (wakeLock?.isHeld == true) return
         val power = getSystemService(POWER_SERVICE) as PowerManager
@@ -199,8 +295,7 @@ class StreamForegroundService : Service() {
         ).apply { acquire() }
     }
 
-    /** Libera el wake lock al parar la grabación (lo usa 3.1.2). */
-    @Suppress("unused")
+    /** Libera el wake lock al parar la grabación (3.1.2). */
     private fun releaseWakeLock() {
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
@@ -211,6 +306,27 @@ class StreamForegroundService : Service() {
         const val NOTIFICATION_ID = 1
         const val EXTRA_SCENARIO = "scenario"
         const val ACTION_STOP = "com.transmiti2.transmiti2.streaming.STOP"
+
+        /**
+         * Broadcast que el servicio envía al tocar "Detener" en la
+         * notificación (plan §9.4): el servicio no posee el motor, así
+         * que `MainActivity` lo escucha y lo traduce en
+         * `engine.stopRecording()`. Broadcast normal (no ordenado) con
+         * receptor no exportado en la Activity.
+         */
+        const val ACTION_STOP_RECORDING =
+            "com.transmiti2.transmiti2.streaming.STOP_RECORDING"
+
+        /** Intervalo de actualización del tiempo de la notificación. */
+        const val TICKER_INTERVAL_MS = 1000L
+
+        /**
+         * Autodestrucción diferida tras la acción "Detener", por si el
+         * broadcast no llega (Activity destruida). Mayor que el timeout
+         * de verificación de un segmento (30 s), así que una parada
+         * normal nunca lo alcanza.
+         */
+        const val DELAYED_STOP_MS = 60_000L
 
         /**
          * Arranca el servicio solo si la pre-comprobación pasa. Devuelve
@@ -236,6 +352,17 @@ class StreamForegroundService : Service() {
                 .putExtra(EXTRA_SCENARIO, scenario.wireName)
             ContextCompat.startForegroundService(context, intent)
             return true
+        }
+
+        /**
+         * Detiene el servicio (3.1.2: lo llama el motor al terminar
+         * `stopRecording`). Inofensivo si el servicio no está
+         * corriendo.
+         */
+        fun stop(context: Context) {
+            context.stopService(
+                Intent(context, StreamForegroundService::class.java),
+            )
         }
     }
 }

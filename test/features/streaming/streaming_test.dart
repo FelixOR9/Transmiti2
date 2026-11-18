@@ -40,6 +40,7 @@ void main() {
       final FakeStreamingService service = FakeStreamingService();
       final StreamingController controller = StreamingController(
         destinations: InMemoryStreamDestinationRepository(),
+        recordings: InMemoryRecordingRepository(),
         service: service,
         nowMs: () => 1000,
       );
@@ -58,6 +59,7 @@ void main() {
     test('si falla el almacén seguro, no queda destino huérfano', () async {
       final StreamingController controller = StreamingController(
         destinations: InMemoryStreamDestinationRepository(),
+        recordings: InMemoryRecordingRepository(),
         service: _FailingKeyService(),
         nowMs: () => 1000,
       );
@@ -75,6 +77,7 @@ void main() {
     test('la clave vacía no crea destino', () async {
       final StreamingController controller = StreamingController(
         destinations: InMemoryStreamDestinationRepository(),
+        recordings: InMemoryRecordingRepository(),
         service: FakeStreamingService(),
         nowMs: () => 1000,
       );
@@ -92,6 +95,7 @@ void main() {
     test('la URL sin RTMPS no crea destino', () async {
       final StreamingController controller = StreamingController(
         destinations: InMemoryStreamDestinationRepository(),
+        recordings: InMemoryRecordingRepository(),
         service: FakeStreamingService(),
         nowMs: () => 1000,
       );
@@ -110,6 +114,7 @@ void main() {
       final FakeStreamingService service = FakeStreamingService();
       final StreamingController controller = StreamingController(
         destinations: InMemoryStreamDestinationRepository(),
+        recordings: InMemoryRecordingRepository(),
         service: service,
         nowMs: () => 1000,
       );
@@ -126,6 +131,7 @@ void main() {
     test('solo un destino puede estar activo', () async {
       final StreamingController controller = StreamingController(
         destinations: InMemoryStreamDestinationRepository(),
+        recordings: InMemoryRecordingRepository(),
         service: FakeStreamingService(),
         nowMs: () => 1000,
       );
@@ -155,7 +161,7 @@ void main() {
       expect(streamKeyAad(1), isNot(streamKeyAad(2)));
     });
 
-    test('el servicio falso ofrece vista previa en la 3.1.1, sin grabar', () async {
+    test('el servicio falso ofrece vista previa y grabación en la 3.1.2', () async {
       final FakeStreamingService service = FakeStreamingService();
       final StreamStatus status = await service.getStatus();
       expect(status.foregroundServiceAvailable, isFalse);
@@ -171,10 +177,19 @@ void main() {
         service.startStream(),
         throwsA(isA<StreamingException>()),
       );
-      await expectLater(
-        service.startRecording(),
-        throwsA(isA<StreamingException>()),
-      );
+      // Fase B, 3.1.2: la grabación es real (la transmisión sigue
+      // sin estarlo hasta la Fase 3.2).
+      final String recordingId = await service.startRecording();
+      expect(recordingId, 'rec_20261118_120000_ab12');
+      expect(service.startRecordingCalls, 1);
+      final RecordingInfo info = await service.stopRecording();
+      expect(info.recordingId, 'rec_20261118_120000_ab12');
+      expect(info.status, 'ready');
+      expect(service.stopRecordingCalls, 1);
+      final RecordingStatusSnapshot snapshot =
+          await service.getRecordingStatus();
+      expect(snapshot.state, 'idle');
+      expect(await service.recoverInterruptedRecordings(), isEmpty);
     });
   });
 }

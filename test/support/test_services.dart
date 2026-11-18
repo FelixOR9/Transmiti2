@@ -42,6 +42,7 @@ AppServices createTestServices({
     ),
     streaming: StreamingController(
       destinations: InMemoryStreamDestinationRepository(),
+      recordings: InMemoryRecordingRepository(),
       service: streamingService ?? FakeStreamingService(),
       nowMs: nowMs,
     ),

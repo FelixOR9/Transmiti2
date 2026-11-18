@@ -113,6 +113,13 @@ class PreviewDiagnostics {
 ///   recalcular la rotación con la que se muestra la imagen.
 /// - Al salir de la pantalla la cámara se cierra (`stop()` en `dispose`).
 ///
+/// Fase B, 3.1.2: con una grabación activa (`isRecordingActive`) nada
+/// de lo anterior para ni reinicia la vista previa (plan §6.4): el FGS
+/// + wake lock mantienen la grabación, la orientación quedó fijada al
+/// iniciar y la vista previa rota solo en presentación (`RotatedBox`).
+/// La parada manual tampoco detiene la vista previa mientras se graba
+/// (primero hay que detener la grabación).
+///
 /// Los eventos del motor (`preview_error`, `preview_surface_lost`,
 /// `preview_started`) llegan por el canal de eventos del servicio; un
 /// error cierra el estado a `error` y la pérdida de superficie a
@@ -121,11 +128,18 @@ class PreviewController extends ChangeNotifier with WidgetsBindingObserver {
   PreviewController({
     required StreamingService service,
     required PermissionController permissions,
+    bool Function()? isRecordingActive,
   }) : _service = service,
-       _permissions = permissions;
+       _permissions = permissions,
+       _isRecordingActive = isRecordingActive ?? (() => false);
 
   final StreamingService _service;
   final PermissionController _permissions;
+
+  /// `true` mientras hay una grabación en curso (la vista previa no se
+  /// para ni se reinicia; la fija `StreamingController` con el estado
+  /// del `RecordingController`).
+  final bool Function() _isRecordingActive;
 
   PreviewState _state = PreviewState.closed;
   PreviewState get state => _state;
@@ -230,6 +244,11 @@ class PreviewController extends ChangeNotifier with WidgetsBindingObserver {
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden ||
         state == AppLifecycleState.detached) {
+      // Fase B, 3.1.2: con grabación activa no se para la vista previa
+      // (el FGS + wake lock mantienen la grabación; plan §6.4).
+      if (_isRecordingActive()) {
+        return;
+      }
       if (_state == PreviewState.active ||
           _state == PreviewState.preparing ||
           _state == PreviewState.recovering) {
@@ -251,6 +270,11 @@ class PreviewController extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
     _lastLandscape = landscape;
+    // Fase B, 3.1.2: con grabación activa no se reinicia (la
+    // orientación quedó fijada al iniciar; plan §6.4).
+    if (_isRecordingActive()) {
+      return;
+    }
     if (_state == PreviewState.active) {
       unawaited(_restart());
     }
@@ -313,7 +337,14 @@ class PreviewController extends ChangeNotifier with WidgetsBindingObserver {
   /// vista previa no falla ni llama al motor. Con `restoreOnResume`, al
   /// volver a primer plano se restaura sola (para la parada por ir a
   /// segundo plano); la parada manual del usuario no se restaura.
+  /// Con grabación activa no se para (primero hay que detener la
+  /// grabación; plan §6.4).
   Future<void> stop({bool restoreOnResume = false}) async {
+    // Con grabación activa no se para: es un no-op completo (ni se
+    // invalida un inicio en curso ni se toca el estado).
+    if (_isRecordingActive()) {
+      return;
+    }
     _generation++;
     _wasActiveBeforeBackground = restoreOnResume;
     if (_state == PreviewState.closed) {

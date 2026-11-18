@@ -33,6 +33,18 @@ object StreamContract {
     const val STOP_RECORDING = "stopRecording"
     const val STOP_ALL = "stopAll"
 
+    /**
+     * Estado de la grabación y recuperación de interrupciones (Fase B,
+     * 3.1.2, componente 3): `getRecordingStatus` devuelve la
+     * instantánea del estado (`RecordingStatusSnapshot`) para
+     * re-sincronizar la UI al volver a la pantalla;
+     * `recoverInterruptedRecordings` clasifica los `.tmp.mp4` que
+     * quedaron de una muerte del proceso y devuelve la lista
+     * clasificada (nunca borra ni modifica nada).
+     */
+    const val GET_RECORDING_STATUS = "getRecordingStatus"
+    const val RECOVER_INTERRUPTED_RECORDINGS = "recoverInterruptedRecordings"
+
     // Eventos del canal de eventos.
     const val EVENT_PERMISSION_RESULT = "permission_result"
     const val EVENT_PERMISSION_CHANGED = "permission_changed"

@@ -217,8 +217,13 @@ data class InterruptedSegmentInfo(
  * No depende de `Context`: el motor construye `fileStore` (con
  * `<documents>/recordings/`) y `verifier` (con el `Context` de la app
  * para ExoPlayer) y los inyecta.
+ *
+ * La clase y su API pública son `open` (costura de pruebas): los tests
+ * del motor sustituyen la sesión por una falsa que registra llamadas
+ * sin codificador ni cámara; la lógica real se prueba en
+ * `RecordingSessionTest`.
  */
-class RecordingSession(
+open class RecordingSession(
     private val scope: CoroutineScope,
     private val fileStore: RecordingFileStore,
     private val verifier: SegmentVerifier,
@@ -327,7 +332,7 @@ class RecordingSession(
     fun currentState(): RecordingState = state
 
     /** Instantánea del estado para `getRecordingStatus`. */
-    fun statusSnapshot(): RecordingStatusSnapshot {
+    open fun statusSnapshot(): RecordingStatusSnapshot {
         val firstPts = segmentFirstPtsUs
         val lastPts = segmentLastPtsUs
         val segmentDurationMs =
@@ -363,7 +368,7 @@ class RecordingSession(
      * anterior y empieza de nuevo); un duplicado se rechaza con
      * `recording_state_error`.
      */
-    suspend fun start(
+    open suspend fun start(
         previewSession: PreviewSession,
         previewConfig: PreviewConfig,
         rotationDegrees: Int,
@@ -1077,7 +1082,7 @@ class RecordingSession(
      * normal; en un error (encoder, muxer, almacenamiento, cámara)
      * lleva el código real y el estado queda `ERROR`.
      */
-    suspend fun stop(errorCode: String? = null): RecordingResult {
+    open suspend fun stop(errorCode: String? = null): RecordingResult {
         val existing = sessionMutex.withLock { stopResult }
         if (existing != null) return existing.await()
         val deferred = CompletableDeferred<RecordingResult>()
@@ -1261,7 +1266,7 @@ class RecordingSession(
      * es por legibilidad). No borra nada; no fusiona (la fusión no se
      * demostró en el spike).
      */
-    suspend fun recoverInterrupted(): List<InterruptedSegmentInfo> {
+    open suspend fun recoverInterrupted(): List<InterruptedSegmentInfo> {
         val staging = fileStore.listStagingFiles()
         val result = mutableListOf<InterruptedSegmentInfo>()
         for (file in staging) {
@@ -1302,7 +1307,7 @@ class RecordingSession(
     }
 
     /** Libera encoder y muxer (cierre del motor). Idempotente. */
-    suspend fun release() {
+    open suspend fun release() {
         if (state == RecordingState.RECORDING ||
             state == RecordingState.ROTATING_SEGMENT ||
             state == RecordingState.STARTING

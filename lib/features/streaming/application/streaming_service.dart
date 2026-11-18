@@ -70,6 +70,15 @@ abstract class StreamingService {
     RecordingOptions options = const RecordingOptions(),
   });
   Future<RecordingInfo> stopRecording();
+
+  /// Estado actual de la grabación (Fase B, 3.1.2): la UI lo consulta
+  /// al volver a la pantalla para re-sincronizarse con el motor (la
+  /// grabación continúa por el FGS aunque la UI se haya ido).
+  Future<RecordingStatusSnapshot> getRecordingStatus();
+
+  /// Clasifica los `.tmp.mp4` que quedaron de una muerte del proceso
+  /// (Fase B, 3.1.2). Nunca borra ni modifica nada.
+  Future<List<RecoveredSegmentInfo>> recoverInterruptedRecordings();
   Future<void> stopAll();
 }
 
@@ -267,6 +276,44 @@ class MethodChannelStreamingService implements StreamingService {
         );
       }
       return RecordingInfo.fromMap(result);
+    } on PlatformException catch (e) {
+      throw _fromPlatform(e);
+    }
+  }
+
+  @override
+  Future<RecordingStatusSnapshot> getRecordingStatus() async {
+    try {
+      final Map<Object?, Object?>? result = await _channel
+          .invokeMapMethod<String, Object?>(
+            StreamContract.getRecordingStatus,
+          );
+      if (result == null) {
+        return RecordingStatusSnapshot.idle();
+      }
+      return RecordingStatusSnapshot.fromMap(result);
+    } on PlatformException catch (e) {
+      throw _fromPlatform(e);
+    }
+  }
+
+  @override
+  Future<List<RecoveredSegmentInfo>> recoverInterruptedRecordings() async {
+    try {
+      final Map<Object?, Object?>? result = await _channel
+          .invokeMapMethod<String, Object?>(
+            StreamContract.recoverInterruptedRecordings,
+          );
+      if (result == null) {
+        return const <RecoveredSegmentInfo>[];
+      }
+      final List<Object?> raw =
+          (result['recovered'] as List?)?.cast<Object?>() ??
+          <Object?>[];
+      return raw
+          .whereType<Map<Object?, Object?>>()
+          .map(RecoveredSegmentInfo.fromMap)
+          .toList();
     } on PlatformException catch (e) {
       throw _fromPlatform(e);
     }

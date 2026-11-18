@@ -139,4 +139,110 @@ void main() {
       expect(info.status, 'ready');
     });
   });
+
+  group('Modelos de grabación (Fase B, 3.1.2)', () {
+    test('RecordingStartedInfo se construye desde el mapa', () {
+      final RecordingStartedInfo info =
+          RecordingStartedInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'width': 1280,
+            'height': 720,
+            'fps': 30,
+            'bitrateBps': 2500000,
+            'profile': 66,
+            'encoderName': 'c2.qti.avc.encoder',
+            'rotationDegrees': 90,
+            'cbrSupported': true,
+          });
+      expect(info.recordingId, 'rec-1');
+      expect(info.bitrateBps, 2500000);
+      expect(info.encoderName, 'c2.qti.avc.encoder');
+      expect(info.rotationDegrees, 90);
+    });
+
+    test('RecordingSegmentInfo se construye desde el mapa', () {
+      final RecordingSegmentInfo segment =
+          RecordingSegmentInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'segmentIndex': 2,
+            'fileName': 'rec-1_seg002.mp4',
+            'filePath': '/docs/rec-1_seg002.mp4',
+            'status': 'ready',
+            'durationMs': 60000,
+            'sizeBytes': 18750000,
+            'closedCleanly': true,
+          });
+      expect(segment.index, 2);
+      expect(segment.fileName, 'rec-1_seg002.mp4');
+      expect(segment.status, 'ready');
+      expect(segment.closedCleanly, isTrue);
+    });
+
+    test('RecordingStoppedInfo se construye desde el mapa', () {
+      final RecordingStoppedInfo stopped =
+          RecordingStoppedInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'segments': <Map<Object?, Object?>>[
+              <Object?, Object?>{
+                'recordingId': 'rec-1',
+                'segmentIndex': 0,
+                'fileName': 'rec-1_seg000.mp4',
+                'filePath': '/docs/rec-1_seg000.mp4',
+                'status': 'ready',
+                'durationMs': 60000,
+                'sizeBytes': 18750000,
+              },
+            ],
+            'segmentCount': 1,
+            'totalDurationMs': 60000,
+            'totalSizeBytes': 18750000,
+            'status': 'ready',
+          });
+      expect(stopped.segmentCount, 1);
+      expect(stopped.totalDurationMs, 60000);
+      expect(stopped.filePath, '/docs/rec-1_seg000.mp4');
+    });
+
+    test('RecordingStatusSnapshot se construye desde el mapa', () {
+      final RecordingStatusSnapshot snapshot =
+          RecordingStatusSnapshot.fromMap(<Object?, Object?>{
+            'state': 'recording',
+            'recordingId': 'rec-1',
+            'elapsedMs': 30000,
+            'segmentIndex': 1,
+            'segmentDurationMs': 5000,
+            'width': 1280,
+            'height': 720,
+            'fps': 30,
+          });
+      expect(snapshot.state, 'recording');
+      expect(snapshot.elapsedMs, 30000);
+      expect(snapshot.segmentIndex, 1);
+      expect(RecordingStatusSnapshot.idle().state, 'idle');
+    });
+
+    test('RecoveredSegmentInfo distingue utilizable de corrupto', () {
+      const RecoveredSegmentInfo partial = RecoveredSegmentInfo(
+        recordingId: 'rec-1',
+        index: 0,
+        fileName: 'rec-1_seg000.tmp.mp4',
+        filePath: '/docs/rec-1_seg000.tmp.mp4',
+        status: 'partial',
+        durationMs: 4400,
+        sizeBytes: 1600000,
+      );
+      const RecoveredSegmentInfo corrupt = RecoveredSegmentInfo(
+        recordingId: 'rec-1',
+        index: 1,
+        fileName: 'rec-1_seg001.tmp.mp4',
+        filePath: '/docs/rec-1_seg001.tmp.mp4',
+        status: 'corrupt',
+        sizeBytes: 0,
+        reason: 'sin_moov',
+      );
+      expect(partial.usable, isTrue);
+      expect(corrupt.usable, isFalse);
+      expect(corrupt.reason, 'sin_moov');
+    });
+  });
 }

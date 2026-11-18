@@ -58,6 +58,15 @@ abstract final class StreamContract {
   static const String stopRecording = 'stopRecording';
   static const String stopAll = 'stopAll';
 
+  /// Estado de la grabación y recuperación de interrupciones (Fase B,
+  /// 3.1.2, componente 3). `getRecordingStatus` devuelve la instantánea
+  /// del estado para re-sincronizar la UI al volver a la pantalla;
+  /// `recoverInterruptedRecordings` clasifica los `.tmp.mp4` que
+  /// quedaron de una muerte del proceso (nunca borra ni modifica nada).
+  static const String getRecordingStatus = 'getRecordingStatus';
+  static const String recoverInterruptedRecordings =
+      'recoverInterruptedRecordings';
+
   // Eventos del canal de eventos.
   /// Se emite tras cada solicitud de permisos, una vez por permiso.
   static const String eventPermissionResult = 'permission_result';
@@ -86,6 +95,28 @@ abstract final class StreamContract {
   static const String eventPreviewStopped = 'preview_stopped';
   static const String eventPreviewError = 'preview_error';
   static const String eventPreviewSurfaceLost = 'preview_surface_lost';
+
+  /// Eventos de grabación (Fase B, 3.1.2, componente 3).
+  ///
+  /// `recording_started` lleva `recordingId`, `matchId`, `width`,
+  /// `height`, `fps`, `bitrateBps` (ojo: el plan lo llama
+  /// `videoBitrateBps`, el cable real es `bitrateBps`), `profile`,
+  /// `bitrateMode`, `encoderName`, `rotationDegrees`,
+  /// `lowStorageWarning` y `cbrSupported`. `recording_segment` lleva
+  /// `recordingId`, `segmentIndex`, `fileName`, `filePath`, `status`
+  /// (`ready`/`partial`/`corrupt`), `durationMs`, `sizeBytes` y los
+  /// detalles de verificación. `recording_stopped` lleva `recordingId`,
+  /// `segments` (la lista de segmentos verificados), `segmentCount`,
+  /// `totalDurationMs`, `totalSizeBytes`, `status` (`ready`/`partial`/
+  /// `corrupt`/`idle`), `errorCode` y `previewRestoreError` (el plan
+  /// lo resume como `filePath`/`durationMs`/`sizeBytes`; el cable real
+  /// es este). `recording_error` lleva `code`, `message`, `details` y,
+  /// al detener con error, también el resultado (`recordingId`,
+  /// `segments`, `status`...).
+  static const String eventRecordingStarted = 'recording_started';
+  static const String eventRecordingSegment = 'recording_segment';
+  static const String eventRecordingStopped = 'recording_stopped';
+  static const String eventRecordingError = 'recording_error';
 
   // Códigos de error (nunca llevan la clave ni la URL dentro).
   static const String notAvailableInPhase30 = 'not_available_in_phase_3_0';
@@ -122,6 +153,11 @@ abstract final class StreamContract {
   static const String thermalShutdown = 'thermal_shutdown';
   static const String permissionDenied = 'permission_denied';
   static const String recordingNotFound = 'recording_not_found';
+
+  /// Error de grabación: transición ilegal o duplicada (p. ej. un
+  /// segundo `startRecording` con una grabación en curso), o fallo
+  /// genérico de grabación sin código más específico.
+  static const String recordingStateError = 'recording_state_error';
 }
 
 /// Estado del motor de transmisión que devuelve `getStatus`.
@@ -268,6 +304,247 @@ class RecordingInfo {
       durationMs: (map['durationMs'] as num?)?.toInt() ?? 0,
       sizeBytes: (map['sizeBytes'] as num?)?.toInt() ?? 0,
       status: map['status'] as String? ?? '',
+    );
+  }
+}
+
+/// Información de una grabación recién iniciada (evento
+/// `recording_started`, Fase B, 3.1.2).
+class RecordingStartedInfo {
+  const RecordingStartedInfo({
+    required this.recordingId,
+    this.matchId,
+    required this.width,
+    required this.height,
+    required this.fps,
+    required this.bitrateBps,
+    this.profile,
+    this.bitrateMode,
+    this.encoderName,
+    this.rotationDegrees = 90,
+    this.lowStorageWarning = false,
+    this.cbrSupported = true,
+  });
+
+  final String recordingId;
+  final String? matchId;
+  final int width;
+  final int height;
+  final int fps;
+
+  /// Bitrate real en bps (el cable lo llama `bitrateBps`).
+  final int bitrateBps;
+  final int? profile;
+  final int? bitrateMode;
+  final String? encoderName;
+  final int rotationDegrees;
+  final bool lowStorageWarning;
+  final bool cbrSupported;
+
+  factory RecordingStartedInfo.fromMap(Map<Object?, Object?> map) {
+    return RecordingStartedInfo(
+      recordingId: map['recordingId'] as String? ?? '',
+      matchId: map['matchId'] as String?,
+      width: (map['width'] as num?)?.toInt() ?? 0,
+      height: (map['height'] as num?)?.toInt() ?? 0,
+      fps: (map['fps'] as num?)?.toInt() ?? 30,
+      bitrateBps: (map['bitrateBps'] as num?)?.toInt() ?? 0,
+      profile: (map['profile'] as num?)?.toInt(),
+      bitrateMode: (map['bitrateMode'] as num?)?.toInt(),
+      encoderName: map['encoderName'] as String?,
+      rotationDegrees: (map['rotationDegrees'] as num?)?.toInt() ?? 90,
+      lowStorageWarning: map['lowStorageWarning'] as bool? ?? false,
+      cbrSupported: map['cbrSupported'] as bool? ?? true,
+    );
+  }
+}
+
+/// Segmento verificado de una grabación (evento `recording_segment`,
+/// Fase B, 3.1.2).
+class RecordingSegmentInfo {
+  const RecordingSegmentInfo({
+    required this.recordingId,
+    required this.index,
+    required this.fileName,
+    required this.filePath,
+    required this.status,
+    this.durationMs,
+    required this.sizeBytes,
+    this.sampleCount,
+    this.keyframeCount,
+    this.firstSampleKeyframe,
+    this.ptsMonotonic,
+    this.profileIdc,
+    this.closedCleanly = false,
+    this.reason,
+  });
+
+  final String recordingId;
+  final int index;
+  final String fileName;
+  final String filePath;
+
+  /// `ready`, `partial` o `corrupt`.
+  final String status;
+  final int? durationMs;
+  final int sizeBytes;
+  final int? sampleCount;
+  final int? keyframeCount;
+  final bool? firstSampleKeyframe;
+  final bool? ptsMonotonic;
+  final int? profileIdc;
+  final bool closedCleanly;
+  final String? reason;
+
+  factory RecordingSegmentInfo.fromMap(Map<Object?, Object?> map) {
+    return RecordingSegmentInfo(
+      recordingId: map['recordingId'] as String? ?? '',
+      index: (map['segmentIndex'] as num?)?.toInt() ?? 0,
+      fileName: map['fileName'] as String? ?? '',
+      filePath: map['filePath'] as String? ?? '',
+      status: map['status'] as String? ?? '',
+      durationMs: (map['durationMs'] as num?)?.toInt(),
+      sizeBytes: (map['sizeBytes'] as num?)?.toInt() ?? 0,
+      sampleCount: (map['sampleCount'] as num?)?.toInt(),
+      keyframeCount: (map['keyframeCount'] as num?)?.toInt(),
+      firstSampleKeyframe: map['firstSampleKeyframe'] as bool?,
+      ptsMonotonic: map['ptsMonotonic'] as bool?,
+      profileIdc: (map['profileIdc'] as num?)?.toInt(),
+      closedCleanly: map['closedCleanly'] as bool? ?? false,
+      reason: map['reason'] as String?,
+    );
+  }
+}
+
+/// Resultado de una grabación detenida (evento `recording_stopped` o
+/// `recording_error` al detener con error, Fase B, 3.1.2).
+class RecordingStoppedInfo {
+  const RecordingStoppedInfo({
+    required this.recordingId,
+    required this.segments,
+    required this.totalDurationMs,
+    required this.totalSizeBytes,
+    required this.status,
+    this.errorCode,
+    this.previewRestoreError,
+  });
+
+  final String recordingId;
+  final List<RecordingSegmentInfo> segments;
+  final int totalDurationMs;
+  final int totalSizeBytes;
+
+  /// `ready`, `partial`, `corrupt` o `idle`.
+  final String status;
+  final String? errorCode;
+  final String? previewRestoreError;
+
+  int get segmentCount => segments.length;
+
+  /// Ruta del primer segmento (la ruta final fusionada llega en 3.1.4).
+  String get filePath => segments.isEmpty ? '' : segments.first.filePath;
+
+  factory RecordingStoppedInfo.fromMap(Map<Object?, Object?> map) {
+    final List<Object?> rawSegments =
+        (map['segments'] as List?)?.cast<Object?>() ?? <Object?>[];
+    return RecordingStoppedInfo(
+      recordingId: map['recordingId'] as String? ?? '',
+      segments: rawSegments
+          .whereType<Map<Object?, Object?>>()
+          .map(RecordingSegmentInfo.fromMap)
+          .toList(),
+      totalDurationMs: (map['totalDurationMs'] as num?)?.toInt() ?? 0,
+      totalSizeBytes: (map['totalSizeBytes'] as num?)?.toInt() ?? 0,
+      status: map['status'] as String? ?? '',
+      errorCode: map['errorCode'] as String?,
+      previewRestoreError: map['previewRestoreError'] as String?,
+    );
+  }
+}
+
+/// Instantánea del estado de grabación para `getRecordingStatus`
+/// (Fase B, 3.1.2).
+class RecordingStatusSnapshot {
+  const RecordingStatusSnapshot({
+    required this.state,
+    this.recordingId,
+    this.elapsedMs = 0,
+    this.segmentIndex = 0,
+    this.segmentDurationMs = 0,
+    this.width,
+    this.height,
+    this.fps,
+    this.errorCode,
+  });
+
+  /// `idle`, `starting`, `recording`, `rotating_segment`, `stopping`
+  /// o `error`.
+  final String state;
+  final String? recordingId;
+  final int elapsedMs;
+  final int segmentIndex;
+  final int segmentDurationMs;
+  final int? width;
+  final int? height;
+  final int? fps;
+  final String? errorCode;
+
+  factory RecordingStatusSnapshot.fromMap(Map<Object?, Object?> map) {
+    return RecordingStatusSnapshot(
+      state: map['state'] as String? ?? 'idle',
+      recordingId: map['recordingId'] as String?,
+      elapsedMs: (map['elapsedMs'] as num?)?.toInt() ?? 0,
+      segmentIndex: (map['segmentIndex'] as num?)?.toInt() ?? 0,
+      segmentDurationMs: (map['segmentDurationMs'] as num?)?.toInt() ?? 0,
+      width: (map['width'] as num?)?.toInt(),
+      height: (map['height'] as num?)?.toInt(),
+      fps: (map['fps'] as num?)?.toInt(),
+      errorCode: map['errorCode'] as String?,
+    );
+  }
+
+  factory RecordingStatusSnapshot.idle() =>
+      const RecordingStatusSnapshot(state: 'idle');
+}
+
+/// Segmento interrumpido (`.tmp.mp4`) clasificado en la recuperación
+/// (Fase B, 3.1.2).
+class RecoveredSegmentInfo {
+  const RecoveredSegmentInfo({
+    required this.recordingId,
+    required this.index,
+    required this.fileName,
+    required this.filePath,
+    required this.status,
+    this.durationMs,
+    required this.sizeBytes,
+    this.reason,
+  });
+
+  final String recordingId;
+  final int index;
+  final String fileName;
+  final String filePath;
+
+  /// `ready`, `partial` o `corrupt`.
+  final String status;
+  final int? durationMs;
+  final int sizeBytes;
+  final String? reason;
+
+  /// Utilizable para reproducir (`ready` o `partial`).
+  bool get usable => status == 'ready' || status == 'partial';
+
+  factory RecoveredSegmentInfo.fromMap(Map<Object?, Object?> map) {
+    return RecoveredSegmentInfo(
+      recordingId: map['recordingId'] as String? ?? '',
+      index: (map['segmentIndex'] as num?)?.toInt() ?? 0,
+      fileName: map['fileName'] as String? ?? '',
+      filePath: map['filePath'] as String? ?? '',
+      status: map['status'] as String? ?? '',
+      durationMs: (map['durationMs'] as num?)?.toInt(),
+      sizeBytes: (map['sizeBytes'] as num?)?.toInt() ?? 0,
+      reason: map['reason'] as String?,
     );
   }
 }
