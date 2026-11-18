@@ -166,7 +166,9 @@ class StreamChannelHandlerErrorMappingTest {
     }
 
     @Test
-    fun `timeout con reserva usa la etapa de reserva`() {
+    fun `timeout con reserva usa la etapa de reserva`() = runBlocking {
+        // withTimeout es suspendida: como el primer test de timeout,
+        // este también corre dentro de runBlocking.
         val timeout: TimeoutCancellationException = try {
             withTimeout(1) { delay(10) }
             error("Se esperaba TimeoutCancellationException")
