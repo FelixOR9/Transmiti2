@@ -1,5 +1,6 @@
 package com.transmiti2.transmiti2.streaming.recording
 
+import android.graphics.SurfaceTexture
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.view.Surface
@@ -37,7 +38,15 @@ class RecordingSessionTest {
     private class FakeEncoder(
         override val config: VideoEncoderConfig,
     ) : VideoEncoderPort {
-        override val surface: Surface? = Surface()
+        // Superficie ficticia no nula: la sesión solo la pasa a
+        // `recreateSession` (nunca llama a métodos nativos sobre
+        // ella). `Surface()` sin argumento NO existe en la API
+        // pública 36 (solo `Surface(SurfaceTexture)` y
+        // `Surface(SurfaceControl)`); `SurfaceTexture(0)` es el
+        // marcador habitual en unitarias JVM puras. Los
+        // constructores son no-op tanto en el jar mockable de
+        // Gradle (CI) como en los stubs locales de repro3.
+        override val surface: Surface? = Surface(SurfaceTexture(0))
         override var outputFormat: MediaFormat? = null
         override var listener: VideoEncoderListener? = null
         var configureCalls = 0
