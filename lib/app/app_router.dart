@@ -10,6 +10,7 @@ import 'package:transmiti2/features/match_clock/presentation/match_clock_screen.
 import 'package:transmiti2/features/scoreboard/presentation/scoreboard_screen.dart';
 import 'package:transmiti2/features/shell/presentation/main_shell.dart';
 import 'package:transmiti2/features/sponsors/presentation/sponsors_screen.dart';
+import 'package:transmiti2/features/spike/muxer_spike_screen.dart';
 import 'package:transmiti2/features/stats/presentation/stats_screen.dart';
 
 /// Traduce el nombre de una ruta en su pantalla.
@@ -36,6 +37,8 @@ abstract final class AppRouter {
       AppRoutes.scoreboard => const ScoreboardScreen(),
       AppRoutes.matchClock => const MatchClockScreen(),
       AppRoutes.stats => const StatsScreen(),
+      // SPIKE 3.1.2 — TEMPORAL: se elimina antes de cerrar 3.1.2.
+      AppRoutes.spikeMuxer => const MuxerSpikeScreen(),
       _ => const MainShell(),
     };
     return MaterialPageRoute<void>(

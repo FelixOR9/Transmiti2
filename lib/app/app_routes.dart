@@ -14,4 +14,8 @@ abstract final class AppRoutes {
   static const String scoreboard = '/marcador';
   static const String matchClock = '/cronometro';
   static const String stats = '/estadisticas';
+
+  // SPIKE 3.1.2 — TEMPORAL: ruta de la pantalla debug del spike del
+  // muxer; se elimina antes de cerrar 3.1.2.
+  static const String spikeMuxer = '/spike-muxer';
 }

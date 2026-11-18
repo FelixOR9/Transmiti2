@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:transmiti2/app/app_routes.dart';
 import 'package:transmiti2/app/app_scope.dart';
 import 'package:transmiti2/app/theme/app_colors.dart';
 import 'package:transmiti2/features/streaming/application/permission_controller.dart';
@@ -189,6 +190,21 @@ class _BroadcastScreenState extends State<BroadcastScreen> {
         SnackBar(content: Text('No se pudo pedir el permiso: ${e.code}')),
       );
     }
+  }
+
+  /// SPIKE 3.1.2 — TEMPORAL: abre la pantalla debug del spike del
+  /// muxer; se elimina antes de cerrar 3.1.2. La vista previa del
+  /// Estudio se detiene primero: el spike abre la cámara con su propia
+  /// sesión y la cámara no admite dos sesiones a la vez.
+  Future<void> _openSpike() async {
+    if (_preview.state == PreviewState.active ||
+        _preview.state == PreviewState.recovering) {
+      await _preview.stop();
+    }
+    if (!mounted) {
+      return;
+    }
+    await Navigator.of(context).pushNamed(AppRoutes.spikeMuxer);
   }
 
   /// Copia el diagnóstico del último intento de vista previa al
@@ -455,6 +471,21 @@ class _BroadcastScreenState extends State<BroadcastScreen> {
         const _PhaseButton(
           label: 'GRABAR EN EL TELÉFONO',
           phase: 'Fase 3.2',
+        ),
+        const SizedBox(height: 12),
+        // SPIKE 3.1.2 — TEMPORAL: botón a la pantalla debug del spike
+        // del muxer; se elimina antes de cerrar 3.1.2.
+        FilledButton(
+          onPressed: _openSpike,
+          style: FilledButton.styleFrom(
+            backgroundColor: AppColors.live,
+            foregroundColor: Colors.white,
+            minimumSize: const Size.fromHeight(60),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
+          ),
+          child: const Text('SPIKE MUXER (temporal)'),
         ),
       ],
     );

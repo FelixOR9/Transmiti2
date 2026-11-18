@@ -48,6 +48,10 @@ interface PreviewSessionListener {
  * superficie de entrada del codificador y, cuando llegue la composición
  * EGL, la superficie de entrada del compositor. Ni el codificador ni el
  * compositor se mencionan aquí: la sesión no fija su destino de video.
+ *
+ * La plantilla de captura es `TEMPLATE_PREVIEW` por defecto; el spike
+ * de la 3.1.2 la cambia a `TEMPLATE_RECORD` cuando la sesión lleva la
+ * superficie del encoder (plan 3.1.2 §2.2).
  */
 interface PreviewSession {
     /**
@@ -110,6 +114,11 @@ class CameraSession(
     private val cameraManager: CameraManager,
     private val surfaceHandle: SurfaceProducerHandle,
     private val videoOutputSurface: Surface? = null,
+    // SPIKE 3.1.2 — TEMPORAL (lo usa el spike; producción 3.1.2 lo
+    // adopta): plantilla de la petición de repetición. Por defecto
+    // TEMPLATE_PREVIEW, como antes; TEMPLATE_RECORD cuando la sesión
+    // lleva la superficie del encoder.
+    private val captureTemplate: Int = CameraDevice.TEMPLATE_PREVIEW,
     private val opener: CameraDeviceOpener = CameraDeviceOpener { id, callback, handler ->
         cameraManager.openCamera(id, callback, handler)
     },
@@ -604,7 +613,7 @@ class CameraSession(
         previewSurface: Surface,
     ) {
         val builder = opened.createCaptureRequest(
-            CameraDevice.TEMPLATE_PREVIEW,
+            captureTemplate,
         ).apply {
             addTarget(previewSurface)
             videoOutputSurface?.let { addTarget(it) }
