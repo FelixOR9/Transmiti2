@@ -335,7 +335,10 @@ class MuxerSpikeRunner(
                 val csd1 = format.getByteBuffer("csd-1")
                 hasCsd0 = csd0 != null && csd0.remaining() > 0
                 hasCsd1 = csd1 != null && csd1.remaining() > 0
-                if (hasCsd0) {
+                // La comprobación explícita de nulidad es necesaria:
+                // `hasCsd0` es un booleano aparte y no produce smart
+                // cast sobre `csd0` (`ByteBuffer?` de getByteBuffer).
+                if (csd0 != null && hasCsd0) {
                     val bytes = ByteArray(csd0.remaining())
                     csd0.duplicate().get(bytes)
                     // Registro avcC: [1] = AVCProfileIndication
@@ -916,10 +919,14 @@ class MuxerSpikeRunner(
                 encoderName = info.name,
                 profiles = caps.profileLevels.map { it.profile },
                 levels = caps.profileLevels.map { it.level },
+                // `encoderCapabilities` es nulable (el codificador
+                // puede no anunciar capacidades de encoder): sin él no
+                // se puede confirmar CBR, así que se toma como no
+                // soportado en vez de fallar.
                 cbrSupported = caps.encoderCapabilities
-                    .isBitrateModeSupported(
+                    ?.isBitrateModeSupported(
                         MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR,
-                    ),
+                    ) == true,
             )
         }
         return AvcCaps(null, emptyList(), emptyList(), false)
