@@ -11,6 +11,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -59,7 +60,13 @@ class StreamEngineImplTest {
         var released = false
         // Fase B: en qué hilo se llamó a release() (debe ser el
         // dispatcher principal, porque llega a unregisterTexture).
+        // Se guarda el hilo en sí, no solo su nombre: con las
+        // aserciones JVM activadas (Gradle las activa en los tests
+        // unitarios), kotlinx-coroutines decora el nombre del hilo
+        // dentro de una corrutina ("TestMain @coroutine#18"), así que
+        // comparar nombres falla aunque el hilo sea el correcto.
         var releaseThread: String? = null
+        var releaseThreadObj: Thread? = null
         var lastCallback: SurfaceProducerCallback? = null
 
         override fun setSize(width: Int, height: Int) {
@@ -73,6 +80,7 @@ class StreamEngineImplTest {
         }
 
         override fun release() {
+            releaseThreadObj = Thread.currentThread()
             releaseThread = Thread.currentThread().name
             released = true
         }
@@ -202,22 +210,23 @@ class StreamEngineImplTest {
             // RuntimeException fuera del hilo principal. El motor debe
             // entregar el evento en mainDispatcher, no en el hilo del
             // scope (que en producción es DefaultDispatcher-worker).
-            // El dispatcher de prueba es un hilo único; su nombre real
-            // se observa con una tarea Java (sin corrutinas) antes del
-            // intento, en vez de suponerlo, para que el test no dependa
-            // del nombre que la factoría ponga al hilo en cada entorno.
-            // El mensaje de la aserción incluye los hilos observados,
-            // para que un fallo en CI diga en qué hilo llegó el evento.
-            // Si el evento llega en otro hilo, el test falla y el error
-            // real volvería a aparecer en el teléfono.
+            // La identidad del hilo se comprueba por objeto (assertSame),
+            // no por nombre: con las aserciones JVM activadas (Gradle
+            // las activa en los tests unitarios), kotlinx-coroutines
+            // decora el nombre del hilo dentro de una corrutina
+            // ("TestMain @coroutine#5"), así que comparar nombres falla
+            // aunque el evento llegue en el hilo correcto. La sonda
+            // observa el hilo del dispatcher con una tarea Java (sin
+            // corrutinas) antes del intento; el mensaje de la aserción
+            // incluye los nombres observados para diagnosticar un fallo.
             val fixture = Fixture()
-            val eventThreads = mutableListOf<String>()
+            val eventThreads = mutableListOf<Thread>()
             val executor = Executors.newSingleThreadExecutor { runnable ->
                 Thread(runnable, "TestMain")
             }
             try {
-                val mainThreadName = executor.submit(
-                    Callable { Thread.currentThread().name },
+                val mainThread = executor.submit(
+                    Callable { Thread.currentThread() },
                 ).get()
                 val engine = StreamEngineImpl(
                     cameraPermissionGranted = { true },
@@ -227,7 +236,7 @@ class StreamEngineImplTest {
                     scope = fixture.scope,
                     mainDispatcher = executor.asCoroutineDispatcher(),
                     onEvent = { event ->
-                        eventThreads.add(Thread.currentThread().name)
+                        eventThreads.add(Thread.currentThread())
                         fixture.events.add(event)
                     },
                 )
@@ -240,9 +249,9 @@ class StreamEngineImplTest {
                 )
                 assertEquals(
                     "preview_started debe emitirse en el hilo del " +
-                        "dispatcher principal ($mainThreadName), " +
-                        "llegó en $eventThreads",
-                    listOf(mainThreadName),
+                        "dispatcher principal (${mainThread.name}), " +
+                        "llegó en ${eventThreads.map { it.name }}",
+                    listOf(mainThread),
                     eventThreads,
                 )
             } finally {
@@ -257,18 +266,19 @@ class StreamEngineImplTest {
             // FlutterJNI.unregisterTexture (@UiThread). En un hilo
             // secundario lanza RuntimeException que se traga en
             // releaseHandle y deja la textura registrada en el motor
-            // (fuga: un segundo release() ya no reintenta). El nombre
-            // real del hilo del dispatcher se observa con una tarea
-            // Java (sin corrutinas) antes del intento, igual que en el
-            // test del evento; el mensaje de la aserción incluye el
-            // hilo observado.
+            // (fuga: un segundo release() ya no reintenta). La identidad
+            // del hilo se comprueba por objeto (assertSame), no por
+            // nombre, por el mismo motivo que en el test del evento:
+            // con aserciones JVM activadas, kotlinx-coroutines decora el
+            // nombre del hilo dentro de una corrutina
+            // ("TestMain @coroutine#18").
             val fixture = Fixture()
             val executor = Executors.newSingleThreadExecutor { runnable ->
                 Thread(runnable, "TestMain")
             }
             try {
-                val mainThreadName = executor.submit(
-                    Callable { Thread.currentThread().name },
+                val mainThread = executor.submit(
+                    Callable { Thread.currentThread() },
                 ).get()
                 val engine = StreamEngineImpl(
                     cameraPermissionGranted = { true },
@@ -282,12 +292,12 @@ class StreamEngineImplTest {
                 engine.startPreview()
                 engine.stopPreview()
                 assertTrue(fixture.handle.released)
-                assertEquals(
+                assertSame(
                     "release() debe correr en el hilo del dispatcher " +
-                        "principal ($mainThreadName), corrió en " +
+                        "principal (${mainThread.name}), corrió en " +
                         "${fixture.handle.releaseThread}",
-                    mainThreadName,
-                    fixture.handle.releaseThread,
+                    mainThread,
+                    fixture.handle.releaseThreadObj,
                 )
             } finally {
                 executor.shutdown()
