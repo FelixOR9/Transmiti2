@@ -176,6 +176,24 @@ class SpikeVideoEncoder(
         codec?.signalEndOfInputStream()
     }
 
+    /**
+     * Detiene el drenado sin liberar el codec, la superficie ni el
+     * hilo: tras esto no llegan más `onSample`. Se usa antes de
+     * soltar el muxer en la interrupción del spike, para que ninguna
+     * muestra tardía escriba sobre un muxer ya liberado. No sustituye
+     * a `release()`, que sigue siendo el que libera todo (llamar a
+     * `stop()` dos veces es inocuo: se traga la excepción). No se usa
+     * `release()` aquí porque apaga el hilo del encoder y el
+     * `release()` del muxer, publicado en ese hilo, nunca llegaría a
+     * ejecutarse.
+     */
+    fun stopDrain() {
+        try {
+            codec?.stop()
+        } catch (_: Exception) {
+        }
+    }
+
     /** Ejecuta `block` en el hilo del encoder (p. ej. `stop()` del muxer). */
     fun post(block: () -> Unit) {
         handler.post { block() }

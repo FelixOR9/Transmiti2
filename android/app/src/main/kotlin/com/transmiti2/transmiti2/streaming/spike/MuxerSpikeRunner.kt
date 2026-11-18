@@ -65,6 +65,34 @@ private fun MediaFormat.longOrNull(key: String): Long? {
     }
 }
 
+/**
+ * Descripción de una excepción con su clase: el mensaje solo nunca
+ * vuelve a aparecer como `null` (MediaMuxerCompat lanza con mensaje
+ * nulo al escribir tras `release()`).
+ */
+// SPIKE 3.1.2 — TEMPORAL
+internal fun describeException(e: Exception): String {
+    val message = e.message
+    return if (message != null) {
+        "${e.javaClass.simpleName}: $message"
+    } else {
+        e.javaClass.simpleName
+    }
+}
+
+/**
+ * Política de error del muxer tras una pasada: en una interrupción,
+ * un error del muxer no desecha el resultado — el archivo se verifica
+ * tal cual y el error queda en el campo `muxerError` del mapa. En una
+ * grabación normal, el mismo error sí es un fallo: se esperaba un
+ * cierre limpio con `stop()`.
+ */
+// SPIKE 3.1.2 — TEMPORAL
+internal fun shouldReportMuxerErrorAsFailure(
+    interrupt: Boolean,
+    muxerError: Exception?,
+): Boolean = !interrupt && muxerError != null
+
 /** Capacidades anunciadas del codificador H.264 del dispositivo. */
 // SPIKE 3.1.2 — TEMPORAL
 private data class AvcCaps(
@@ -104,6 +132,15 @@ private class DrainStats {
 
     @Volatile
     var eosTimeout = false
+
+    /**
+     * Guarda de abandono: cuando es `true`, el drenado está detenido
+     * (interrupción o fallo del cierre limpio) y las muestras que aún
+     * lleguen se ignoran sin tocar el muxer — una muestra tardía no
+     * debe escribir sobre un muxer ya liberado.
+     */
+    @Volatile
+    var drainStopped = false
 }
 
 /**
@@ -504,6 +541,11 @@ class MuxerSpikeRunner(
         )
         encoder.listener = object : SpikeEncoderListener {
             override fun onOutputFormatChanged(format: MediaFormat) {
+                // Guarda de abandono: un formato tardío no crea un
+                // muxer nuevo tras soltar el anterior.
+                if (stats.drainStopped) {
+                    return
+                }
                 try {
                     val created = muxerFactory(kind, tmpFile.absolutePath)
                     created.setOrientationHint(rotation)
@@ -519,6 +561,11 @@ class MuxerSpikeRunner(
                 buffer: ByteBuffer,
                 info: MediaCodec.BufferInfo,
             ) {
+                // Guarda de abandono: una muestra tardía se ignora sin
+                // tocar el muxer ni registrar error.
+                if (stats.drainStopped) {
+                    return
+                }
                 val current = muxer
                 if (current == null || trackIndex < 0) {
                     stats.samplesBeforeMuxer++
@@ -644,7 +691,20 @@ class MuxerSpikeRunner(
             }
             if (interrupt || !stoppedCleanly) {
                 // Abandono (interrupción o fallo del cierre limpio):
-                // el muxer se suelta sin `stop()`.
+                // el muxer se suelta sin `stop()`. Antes hay que
+                // cerrar el grifo, en este orden:
+                // 1. Guarda: descarta las muestras ya en cola.
+                // 2. `stopDrain()`: detiene el codec para que no
+                //    lleguen más muestras (no se usa `release()`:
+                //    apaga el hilo del encoder y el `release()` del
+                //    muxer, que se publica en ese hilo, nunca
+                //    llegaría a ejecutarse).
+                // Sin esto, la siguiente muestra escribía sobre el
+                // muxer ya liberado (`Muxer has been released!` en
+                // el clásico, mensaje nulo en compat) y la pasada
+                // se perdía antes de verificarse.
+                stats.drainStopped = true
+                encoder.stopDrain()
                 try {
                     runOnEncoderThread(encoder) {
                         muxer?.release()
@@ -674,11 +734,17 @@ class MuxerSpikeRunner(
                 "Error del codificador: ${e.message}",
             )
         }
-        stats.muxerError?.let { e ->
-            throw SpikeException(
-                StreamContract.MUXER_ERROR,
-                "Error del muxer: ${e.message}",
-            )
+        // En una interrupción, un error del muxer no desecha la
+        // pasada: el archivo existe y se verifica tal cual; el error
+        // queda en el campo `muxerError` del resultado. En una
+        // grabación normal, el mismo error sí es un fallo.
+        if (shouldReportMuxerErrorAsFailure(interrupt, stats.muxerError)) {
+            stats.muxerError?.let { e ->
+                throw SpikeException(
+                    StreamContract.MUXER_ERROR,
+                    "Error del muxer: ${describeException(e)}",
+                )
+            }
         }
         val finalFile: File
         if (!interrupt && stoppedCleanly) {
@@ -758,7 +824,7 @@ class MuxerSpikeRunner(
             "configHeight" to config.size.height,
             "configFps" to fps,
             "samplesBeforeMuxer" to stats.samplesBeforeMuxer,
-            "muxerError" to (stats.muxerError?.message),
+            "muxerError" to (stats.muxerError?.let { describeException(it) }),
             "eosTimeout" to stats.eosTimeout,
         )
     }
