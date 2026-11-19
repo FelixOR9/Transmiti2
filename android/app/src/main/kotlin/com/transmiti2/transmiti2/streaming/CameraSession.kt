@@ -135,12 +135,6 @@ class CameraSession(
     private val cameraManager: CameraManager,
     private val surfaceHandle: SurfaceProducerHandle,
     private val videoOutputSurface: Surface? = null,
-    // Solo lo usaba el spike (retirado al cerrar 3.1.2): plantilla de
-    // la petición de repetición. Por defecto TEMPLATE_PREVIEW;
-    // TEMPLATE_RECORD cuando la sesión lleva la superficie del
-    // encoder. Se retira en el commit que elimina `captureTemplate`
-    // de `CameraSession`, después de borrar `MuxerSpikeRunner`.
-    private val captureTemplate: Int = CameraDevice.TEMPLATE_PREVIEW,
     private val opener: CameraDeviceOpener = CameraDeviceOpener { id, callback, handler ->
         cameraManager.openCamera(id, callback, handler)
     },
@@ -160,7 +154,7 @@ class CameraSession(
      * parar). `open()` los restablece a los del constructor.
      */
     private var currentVideoSurface: Surface? = videoOutputSurface
-    private var currentTemplate: Int = captureTemplate
+    private var currentTemplate: Int = CameraDevice.TEMPLATE_PREVIEW
     private var deviceCharacteristics: CameraCharacteristics? = null
 
     /**
@@ -331,7 +325,7 @@ class CameraSession(
             // (solo vista previa), aunque una recreación anterior los
             // hubiera cambiado.
             currentVideoSurface = videoOutputSurface
-            currentTemplate = captureTemplate
+            currentTemplate = CameraDevice.TEMPLATE_PREVIEW
             val session = createSessionAndRepeat(
                 opened,
                 config,
