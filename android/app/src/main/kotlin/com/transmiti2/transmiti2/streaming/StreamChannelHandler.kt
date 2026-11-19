@@ -128,8 +128,10 @@ internal fun mapStartPreviewError(
  * Fase B, 3.1.2: `startRecording`, `stopRecording`,
  * `getRecordingStatus` y `recoverInterruptedRecordings` son reales
  * (grabación local sin audio, FGS tipo `camera`); `startStream` sigue
- * devolviendo `not_available_in_phase_3_0` (Fase 3.2). El audio se
- * rechaza con `recording_state_error`.
+ * devolviendo `not_available_in_phase_3_0` (Fase 3.2). En 3.1.3 el
+ * audio pasa real al motor (plan §6 D8–D9): el escenario del FGS y el
+ * audio efectivo se deciden por grabación según el permiso de
+ * micrófono.
  */
 class StreamChannelHandler(
     private val context: Context,
@@ -153,6 +155,12 @@ class StreamChannelHandler(
         StreamEngineImpl(
             cameraPermissionGranted = {
                 permissionManager.checkState(PermissionKind.CAMERA) ==
+                    PermissionStatus.GRANTED
+            },
+            // 3.1.3, plan §6 D8: espejo de la cámara; decide el
+            // escenario del FGS junto con `audioEnabled`.
+            microphonePermissionGranted = {
+                permissionManager.checkState(PermissionKind.MICROPHONE) ==
                     PermissionStatus.GRANTED
             },
             surfaceProvider = TextureRegistrySurfaceProducerProvider(registry),
@@ -360,11 +368,13 @@ class StreamChannelHandler(
 
     /**
      * Inicia la grabación y devuelve el `recordingId` (Fase B, 3.1.2).
-     * El audio está fuera de alcance: `audioEnabled = true` se rechaza
-     * con `recording_state_error` (plan §10.2: forzado a `false`).
-     * El error nativo viaja con su código, su mensaje y sus `details`
-     * (etapa, segmento, archivo) como los errores de vista previa de
-     * la Fase A.
+     * El audio se pasa tal cual lo pide Dart (3.1.3, plan §6 D9): el
+     * motor decide el escenario del FGS y el audio efectivo según el
+     * permiso de micrófono; sin micrófono la grabación arranca
+     * video-only, nunca se rechaza por pedir audio. El error nativo
+     * viaja con su código, su mensaje y sus `details` (etapa,
+     * segmento, archivo) como los errores de vista previa de la
+     * Fase A.
      */
     private fun startRecording(call: MethodCall, result: MethodChannel.Result) {
         val engine = previewEngine
@@ -377,14 +387,6 @@ class StreamChannelHandler(
             return
         }
         val audioEnabled = call.argument<Boolean>("audioEnabled") ?: false
-        if (audioEnabled) {
-            result.error(
-                StreamContract.RECORDING_STATE_ERROR,
-                "El audio no está disponible en la subetapa 3.1.2.",
-                null,
-            )
-            return
-        }
         val options = RecordingOptions(
             matchId = (call.argument<Any>("matchId") as? Number)?.toLong(),
             resolution = call.argument<String>("resolution") ?: "720p",
@@ -392,7 +394,7 @@ class StreamChannelHandler(
             videoBitrateBps =
                 (call.argument<Any>("videoBitrateBps") as? Number)?.toInt()
                     ?: 2_500_000,
-            audioEnabled = false,
+            audioEnabled = audioEnabled,
         )
         scope.launch {
             try {

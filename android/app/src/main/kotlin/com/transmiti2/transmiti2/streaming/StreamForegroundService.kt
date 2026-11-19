@@ -25,15 +25,16 @@ import com.transmiti2.transmiti2.MainActivity
  * poder sustituirlo en las pruebas del motor (el servicio real necesita
  * un `Context` y un `startForegroundService()` que no existen en JVM).
  *
- * - `startRecordingService()`: pre-comprobación de permisos y arranque
- *   del servicio con el escenario `WITHOUT_AUDIO`; `false` si falta
- *   algún permiso (el llamador devuelve `permission_denied` y no
+ * - `startRecordingService(scenario)`: pre-comprobación de permisos y
+ *   arranque del servicio con el escenario dado (`WITH_AUDIO` exige
+ *   CAMERA y RECORD_AUDIO; `WITHOUT_AUDIO` solo CAMERA); `false` si
+ *   falta algún permiso (el llamador devuelve `permission_denied` y no
  *   graba nada).
  * - `stopRecordingService()`: detiene el servicio (inofensivo si no
  *   está corriendo).
  */
 interface ForegroundServiceControl {
-    fun startRecordingService(): Boolean
+    fun startRecordingService(scenario: RecordingScenario): Boolean
     fun stopRecordingService()
 }
 
@@ -41,11 +42,8 @@ interface ForegroundServiceControl {
 class RealForegroundServiceControl(
     private val context: Context,
 ) : ForegroundServiceControl {
-    override fun startRecordingService(): Boolean {
-        return StreamForegroundService.start(
-            context,
-            RecordingScenario.WITHOUT_AUDIO,
-        )
+    override fun startRecordingService(scenario: RecordingScenario): Boolean {
+        return StreamForegroundService.start(context, scenario)
     }
 
     override fun stopRecordingService() {
@@ -158,6 +156,16 @@ class StreamForegroundService : Service() {
      */
     private var recordingStartElapsedMs: Long = 0
 
+    /**
+     * Escenario de la grabación en curso (con o sin audio): se fija al
+     * arrancar el servicio y `updateNotification()` lo usa en cada
+     * refresco, para que el título no vuelva a "sin audio" al primer
+     * segundo cuando se graba con audio (3.1.3, plan §6.1). La acción
+     * "Detener" llega sin escenario y no lo toca.
+     */
+    private var currentScenario: RecordingScenario =
+        RecordingScenario.WITHOUT_AUDIO
+
     /** Actualización del tiempo de la notificación, cada segundo. */
     private val tickerHandler = Handler(Looper.getMainLooper())
     private val ticker = object : Runnable {
@@ -199,6 +207,9 @@ class StreamForegroundService : Service() {
         }
         // Arranque real de una grabación (3.1.2): el servicio vive
         // hasta que la grabación para; wake lock y ticker en marcha.
+        // Se guarda el escenario con el que arrancó (3.1.3): la
+        // notificación lo usa en cada refresco.
+        currentScenario = scenario
         if (recordingStartElapsedMs == 0L) {
             recordingStartElapsedMs = SystemClock.elapsedRealtime()
         }
@@ -211,14 +222,14 @@ class StreamForegroundService : Service() {
         tickerHandler.removeCallbacks(ticker)
         tickerHandler.removeCallbacks(delayedStop)
         recordingStartElapsedMs = 0
+        currentScenario = RecordingScenario.WITHOUT_AUDIO
         releaseWakeLock()
         super.onDestroy()
     }
 
     /** Refresca la notificación con el tiempo transcurrido actual. */
     private fun updateNotification() {
-        val scenario = RecordingScenario.WITHOUT_AUDIO
-        val notification = buildNotification(scenario)
+        val notification = buildNotification(currentScenario)
         val manager = getSystemService(NotificationManager::class.java)
         manager?.notify(NOTIFICATION_ID, notification)
     }

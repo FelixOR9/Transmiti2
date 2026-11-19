@@ -84,9 +84,11 @@ typealias PreviewSessionFactory = (SurfaceProducerHandle) -> PreviewSession
  * Fase B, 3.1.2: `startRecording` y `stopRecording` son reales. La
  * grabación exige vista previa `ACTIVE` (la cámara ya está abierta y la
  * configuración elegida es la de la vista previa) y arranca el FGS
- * (tipo `camera`, sin audio) ANTES de la sesión (plan §9.2: protege el
- * proceso durante el arranque pesado); si la sesión falla, el servicio
- * se detiene. `stopPreview`, `onSurfaceCleanup` y la desconexión o el
+ * ANTES de la sesión (plan §9.2: protege el proceso durante el
+ * arranque pesado); si la sesión falla, el servicio se detiene. En
+ * 3.1.3 el escenario del FGS es por grabación (`WITH_AUDIO` solo si se
+ * pidió audio y el micrófono está concedido; `WITHOUT_AUDIO` en caso
+ * contrario, plan §6 D8). `stopPreview`, `onSurfaceCleanup` y la desconexión o el
  * error de cámara detienen primero la grabación limpiamente (plan
  * §6.4) y después aplican la lógica de vista previa. `startRecording`
  * y `stopRecording` se serializan con `recordingMutex`; el orden de
@@ -95,6 +97,15 @@ typealias PreviewSessionFactory = (SurfaceProducerHandle) -> PreviewSession
  */
 class StreamEngineImpl(
     private val cameraPermissionGranted: () -> Boolean,
+    /**
+     * Micrófono concedido (3.1.3, plan §6.1): espejo de
+     * `cameraPermissionGranted`. Junto con `options.audioEnabled`
+     * decide el escenario del FGS y el audio efectivo de la sesión.
+     * Por defecto `false` (sin comprobación explícita no hay audio:
+     * nunca se arranca el FGS con el tipo `microphone` sin haber
+     * comprobado el permiso).
+     */
+    private val microphonePermissionGranted: () -> Boolean = { false },
     private val surfaceProvider: SurfaceProducerProvider,
     private val sessionFactory: PreviewSessionFactory,
     private val displayRotationDegrees: () -> Int,
@@ -424,9 +435,13 @@ class StreamEngineImpl(
 
     /**
      * Inicia la grabación (Fase B, 3.1.2). Exige vista previa `ACTIVE`
-     * (plan §6.2) y el permiso de cámara; arranca el FGS (tipo
-     * `camera`, sin audio) ANTES de la sesión (plan §9.2) y devuelve el
-     * `recordingId`. Si la sesión falla, el servicio se detiene y se
+     * (plan §6.2) y el permiso de cámara; arranca el FGS ANTES de la
+     * sesión (plan §9.2) y devuelve el `recordingId`. El escenario del
+     * FGS es por grabación (3.1.3, plan §6 D8): `WITH_AUDIO` solo si se
+     * pidió audio y el micrófono está concedido; en caso contrario
+     * `WITHOUT_AUDIO`. La sesión recibe el audio efectivo: un fallo de
+     * audio nunca hace fallar el inicio (la sesión degrada a
+     * video-only, D9). Si la sesión falla, el servicio se detiene y se
      * propaga el error real (`RecordingException` con su código).
      * Una solicitud duplicada la rechaza la propia sesión con
      * `recording_state_error` (solo desde `IDLE`).
@@ -479,12 +494,29 @@ class StreamEngineImpl(
                     ),
                 )
             }
+            // Escenario del FGS por grabación (3.1.3, plan §6 D8):
+            // WITH_AUDIO solo si se pidió audio Y el micrófono está
+            // concedido; en caso contrario WITHOUT_AUDIO. La sesión
+            // recibe el audio efectivo: un fallo de audio nunca hace
+            // fallar el inicio (la sesión degrada a video-only, D9).
+            val effectiveAudio =
+                options.audioEnabled && microphonePermissionGranted()
+            val scenario = if (effectiveAudio) {
+                RecordingScenario.WITH_AUDIO
+            } else {
+                RecordingScenario.WITHOUT_AUDIO
+            }
             val fgs = foregroundService
-            if (fgs != null && !fgs.startRecordingService()) {
+            if (fgs != null && !fgs.startRecordingService(scenario)) {
+                val missing = if (effectiveAudio) {
+                    "cámara o de micrófono"
+                } else {
+                    "cámara"
+                }
                 throw CameraException(
                     StreamContract.PERMISSION_DENIED,
                     "No se pudo iniciar el servicio en primer plano " +
-                        "(permiso de cámara).",
+                        "(permiso de $missing).",
                 )
             }
             try {
@@ -494,6 +526,7 @@ class StreamEngineImpl(
                     rotationDegrees = currentRotation,
                     matchId = options.matchId?.toString(),
                     cameraManager = cameraManager,
+                    audioEnabled = effectiveAudio,
                 )
                 if (fgs != null) {
                     emitEvent(
@@ -590,6 +623,13 @@ class StreamEngineImpl(
             "height" to snapshot.height,
             "fps" to snapshot.fps,
             "errorCode" to snapshot.errorCode,
+            // Audio (3.1.3, plan §8.1): la UI re-sincroniza el estado
+            // de audio al volver a la pantalla sin haber visto los
+            // eventos (pedido con efecto, activo en el segmento
+            // actual, motivo cuando falta o se perdió).
+            "audioEnabled" to snapshot.audioEnabled,
+            "audioActive" to snapshot.audioActive,
+            "audioReason" to snapshot.audioReason,
             // Segmentos verificados hasta ahora (paso 6): la UI los
             // recupera al re-sincronizar sin haber visto los eventos.
             "segments" to snapshot.segments.map { it.toMap() },

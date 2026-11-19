@@ -35,7 +35,9 @@ import org.junit.Test
  * vista previa antes de grabar, permiso antes de arrancar, FGS antes de
  * la sesión, rechazo de duplicados sin tocar el FGS, parada de la
  * grabación antes que la vista previa, desconexión de cámara y limpieza
- * de superficie, y re-sincronización del estado.
+ * de superficie, y re-sincronización del estado. En 3.1.3: escenario
+ * del FGS por grabación (`WITH_AUDIO` solo con micrófono concedido y
+ * `audioEnabled`) y claves de audio en `recordingStatusMap`.
  */
 class StreamEngineRecordingTest {
 
@@ -181,6 +183,11 @@ class StreamEngineRecordingTest {
         var lastStartMatchId: String? = null
         /** Último `audioEnabled` con el que se llamó a `start` (3.1.3). */
         var lastStartAudioEnabled: Boolean? = null
+        /** Audio del snapshot (3.1.3): espejo de la sesión real
+         * (`audioEnabled = audioExpected`, `audioActive` con muxer). */
+        var fakeAudioEnabled = false
+        var fakeAudioActive = false
+        var fakeAudioReason: String? = null
         var startError: RecordingException? = null
         var stopResult: RecordingResult = RecordingResult.empty()
         var recoverResult: List<InterruptedSegmentInfo> = emptyList()
@@ -210,6 +217,9 @@ class StreamEngineRecordingTest {
                 height = 720,
                 fps = 30,
                 errorCode = null,
+                audioEnabled = fakeAudioEnabled,
+                audioActive = fakeAudioActive,
+                audioReason = fakeAudioReason,
             )
         }
 
@@ -229,6 +239,9 @@ class StreamEngineRecordingTest {
             startError?.let { throw it }
             fakeState = "recording"
             fakeRecordingId = startedInfo.recordingId
+            fakeAudioEnabled = audioEnabled
+            fakeAudioActive = audioEnabled
+            fakeAudioReason = null
             return startedInfo
         }
 
@@ -237,6 +250,9 @@ class StreamEngineRecordingTest {
             lastStopErrorCode = errorCode
             fakeState = "idle"
             fakeRecordingId = null
+            fakeAudioEnabled = false
+            fakeAudioActive = false
+            fakeAudioReason = null
             return stopResult
         }
 
@@ -249,9 +265,12 @@ class StreamEngineRecordingTest {
         var startCalls = 0
         var stopCalls = 0
         var startResult = true
+        /** Último escenario recibido (3.1.3). */
+        var lastScenario: RecordingScenario? = null
 
-        override fun startRecordingService(): Boolean {
+        override fun startRecordingService(scenario: RecordingScenario): Boolean {
             startCalls++
+            lastScenario = scenario
             return startResult
         }
 
@@ -266,6 +285,8 @@ class StreamEngineRecordingTest {
     ) {
         /** Mutable: la prueba puede revocar el permiso tras abrir la vista previa. */
         var permissionGranted = permissionGranted
+        /** Mutable: micrófono concedido (3.1.3), espejo del de cámara. */
+        var microphoneGranted = true
         val handle = FakeHandle()
         val provider = SurfaceProducerProvider { handle }
         var session: FakeSession = FakeSession(testConfig)
@@ -281,6 +302,7 @@ class StreamEngineRecordingTest {
         ): StreamEngineImpl {
             return StreamEngineImpl(
                 cameraPermissionGranted = { permissionGranted },
+                microphonePermissionGranted = { microphoneGranted },
                 surfaceProvider = provider,
                 sessionFactory = factory,
                 displayRotationDegrees = { displayRotation },
@@ -395,6 +417,68 @@ class StreamEngineRecordingTest {
         }
 
     @Test
+    fun `startRecording con microfono y audioEnabled usa WITH_AUDIO y pasa audio a la sesion`() =
+        runBlocking {
+            val fixture = Fixture()
+            val engine = fixture.engine()
+            engine.startPreview()
+
+            val id = engine.startRecording(
+                RecordingOptions(audioEnabled = true),
+            )
+
+            assertEquals("rec_20261118_120000_ab12", id)
+            assertEquals(1, fixture.fgs.startCalls)
+            assertEquals(RecordingScenario.WITH_AUDIO, fixture.fgs.lastScenario)
+            assertEquals(1, fixture.recording.startCalls)
+            assertEquals(true, fixture.recording.lastStartAudioEnabled)
+        }
+
+    @Test
+    fun `startRecording sin microfono usa WITHOUT_AUDIO y la sesion arranca video-only`() =
+        runBlocking {
+            val fixture = Fixture()
+            // El micrófono se revoca DESPUÉS de abrir la vista previa
+            // (mismo caso real que el permiso de cámara).
+            fixture.microphoneGranted = false
+            val engine = fixture.engine()
+            engine.startPreview()
+
+            val id = engine.startRecording(
+                RecordingOptions(audioEnabled = true),
+            )
+
+            // La grabación arranca igualmente (D9): el audio nunca
+            // hace fallar el inicio; solo cambia el escenario y el
+            // audio efectivo que recibe la sesión.
+            assertEquals("rec_20261118_120000_ab12", id)
+            assertEquals(1, fixture.fgs.startCalls)
+            assertEquals(
+                RecordingScenario.WITHOUT_AUDIO,
+                fixture.fgs.lastScenario,
+            )
+            assertEquals(1, fixture.recording.startCalls)
+            assertEquals(false, fixture.recording.lastStartAudioEnabled)
+        }
+
+    @Test
+    fun `startRecording con audioEnabled false usa WITHOUT_AUDIO aunque haya microfono`() =
+        runBlocking {
+            val fixture = Fixture()
+            val engine = fixture.engine()
+            engine.startPreview()
+
+            engine.startRecording(RecordingOptions(audioEnabled = false))
+
+            assertEquals(1, fixture.fgs.startCalls)
+            assertEquals(
+                RecordingScenario.WITHOUT_AUDIO,
+                fixture.fgs.lastScenario,
+            )
+            assertEquals(false, fixture.recording.lastStartAudioEnabled)
+        }
+
+    @Test
     fun `si el FGS no arranca no se graba nada`() = runBlocking {
         val fixture = Fixture()
         fixture.fgs.startResult = false
@@ -446,9 +530,14 @@ class StreamEngineRecordingTest {
             assertEquals(StreamContract.RECORDING_STATE_ERROR, e.code)
         }
         // La grabación activa sigue con su FGS: ni se vuelve a
-        // arrancar ni se detiene por el intento duplicado.
+        // arrancar ni se detiene por el intento duplicado, y el
+        // escenario no se re-decide.
         assertEquals(1, fixture.fgs.startCalls)
         assertEquals(0, fixture.fgs.stopCalls)
+        assertEquals(
+            RecordingScenario.WITH_AUDIO,
+            fixture.fgs.lastScenario,
+        )
         assertEquals(1, fixture.recording.startCalls)
     }
 
@@ -584,6 +673,22 @@ class StreamEngineRecordingTest {
             val map = engine.recordingStatusMap()
             assertEquals("recording", map["state"])
             assertEquals("rec_20261118_120000_ab12", map["recordingId"])
+        }
+
+    @Test
+    fun `recordingStatusMap incluye las claves de audio del snapshot`() =
+        runBlocking {
+            val fixture = Fixture()
+            val engine = fixture.engine()
+            engine.startPreview()
+            engine.startRecording(RecordingOptions(audioEnabled = true))
+
+            val map = engine.recordingStatusMap()
+
+            assertEquals("recording", map["state"])
+            assertEquals(true, map["audioEnabled"])
+            assertEquals(true, map["audioActive"])
+            assertEquals(null, map["audioReason"])
         }
 
     @Test
