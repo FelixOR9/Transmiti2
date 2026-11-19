@@ -619,6 +619,8 @@ class RecordingSessionTest {
             assertEquals(1280, snapshot.width)
             assertEquals(720, snapshot.height)
             assertEquals(30, snapshot.fps)
+            // Sin segmentos cerrados, la lista es vacía (paso 6).
+            assertEquals(0, snapshot.segments.size)
         }
 
     @Test

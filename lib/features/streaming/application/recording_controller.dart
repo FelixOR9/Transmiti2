@@ -378,6 +378,14 @@ class RecordingController extends ChangeNotifier {
     // sabía que grababa (o volvió tras un `detach`).
     _nativeSegmentIndex = snapshot.segmentIndex;
     _nativeSegmentDurationMs = snapshot.segmentDurationMs;
+    // Segmentos verificados del snapshot (paso 6): al volver a la
+    // pantalla tras un `detach`, los eventos se perdieron. Solo los
+    // de la grabación que el motor está grabando.
+    if (snapshot.recordingId == null ||
+        _recordingId == null ||
+        snapshot.recordingId == _recordingId) {
+      _mergeSegments(snapshot.segments);
+    }
     if (_state == RecordingState.idle || _state == RecordingState.error) {
       _recordingId = snapshot.recordingId;
       _startedAtMs = _nowMs() - snapshot.elapsedMs;
@@ -540,13 +548,17 @@ class RecordingController extends ChangeNotifier {
     try {
       final RecordingInfo info = await _service.stopRecording();
       await _updateRowFromInfo(info);
+      // La lista completa viene del método (paso 5): la confirmación
+      // y la tarjeta usan estos segmentos, no la lista parcial de
+      // Dart (que puede haber perdido eventos).
       _lastStopped = RecordingStoppedInfo(
         recordingId: info.recordingId,
-        segments: List<RecordingSegmentInfo>.unmodifiable(_segments),
+        segments: List<RecordingSegmentInfo>.unmodifiable(info.segments),
         totalDurationMs: info.durationMs,
         totalSizeBytes: info.sizeBytes,
         status: info.status,
       );
+      _applyStoppedSegments(_lastStopped!);
       _state = RecordingState.idle;
       // Relojes a cero al llegar a `idle`: el diagnóstico en `idle`
       // no debe seguir contando (fix duraciones 3.1.2, paso 2).
@@ -600,6 +612,37 @@ class RecordingController extends ChangeNotifier {
     _timer = null;
   }
 
+  /// Fusiona segmentos verificados en `_segments` por índice (los ya
+  /// conocidos se actualizan, los nuevos se añaden en orden). La lista
+  /// de Dart puede haber perdido eventos; la del motor es completa.
+  void _mergeSegments(Iterable<RecordingSegmentInfo> incoming) {
+    bool changed = false;
+    for (final RecordingSegmentInfo segment in incoming) {
+      final int existing = _segments.indexWhere(
+        (s) => s.index == segment.index,
+      );
+      if (existing >= 0) {
+        _segments[existing] = segment;
+      } else {
+        _segments.add(segment);
+        changed = true;
+      }
+    }
+    if (changed) {
+      _segments.sort((a, b) => a.index.compareTo(b.index));
+    }
+  }
+
+  /// Sincroniza `_segments` y el índice nativo con el resultado
+  /// completo de una parada (paso 5): la lista del motor es completa,
+  /// la de Dart puede haber perdido eventos.
+  void _applyStoppedSegments(RecordingStoppedInfo stopped) {
+    _segments
+      ..clear()
+      ..addAll(stopped.segments);
+    _applyStoppedNative(stopped);
+  }
+
   /// Índice y duración nativos del último segmento verificado, desde
   /// el resultado completo de una parada (paso 3). Sin segmentos, el
   /// índice es desconocido.
@@ -636,15 +679,7 @@ class RecordingController extends ChangeNotifier {
       case StreamContract.eventRecordingSegment:
         final RecordingSegmentInfo segment =
             RecordingSegmentInfo.fromMap(event);
-        final int existing = _segments.indexWhere(
-          (s) => s.index == segment.index,
-        );
-        if (existing >= 0) {
-          _segments[existing] = segment;
-        } else {
-          _segments.add(segment);
-          _segments.sort((a, b) => a.index.compareTo(b.index));
-        }
+        _mergeSegments(<RecordingSegmentInfo>[segment]);
         // Un segmento nuevo empieza ahora (rotación por keyframe).
         _segmentStartedAtMs = _nowMs();
         // Índice nativo del segmento en curso (paso 3): el evento
@@ -666,7 +701,7 @@ class RecordingController extends ChangeNotifier {
         final RecordingStoppedInfo stopped =
             RecordingStoppedInfo.fromMap(event);
         _lastStopped = stopped;
-        _applyStoppedNative(stopped);
+        _applyStoppedSegments(stopped);
         if (!_stopInitiated) {
           // Parada externa (notificación, cámara): la fila la
           // actualiza el evento, no `stop()`.
@@ -702,7 +737,7 @@ class RecordingController extends ChangeNotifier {
           final RecordingStoppedInfo stopped =
               RecordingStoppedInfo.fromMap(event);
           _lastStopped = stopped;
-          _applyStoppedNative(stopped);
+          _applyStoppedSegments(stopped);
           if (!_stopInitiated) {
             unawaited(
               _updateRowFromInfo(

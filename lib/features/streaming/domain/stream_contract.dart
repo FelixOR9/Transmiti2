@@ -287,6 +287,7 @@ class RecordingInfo {
     required this.durationMs,
     required this.sizeBytes,
     required this.status,
+    this.segments = const <RecordingSegmentInfo>[],
   });
 
   final String recordingId;
@@ -297,13 +298,24 @@ class RecordingInfo {
   /// Estado final de la grabación (`ready`, `partial`, ...).
   final String status;
 
+  /// Segmentos verificados (completos): el método `stopRecording`
+  /// los devuelve para que la UI no dependa de haber recibido todos
+  /// los eventos `recording_segment` (fix duraciones 3.1.2, paso 5).
+  final List<RecordingSegmentInfo> segments;
+
   factory RecordingInfo.fromMap(Map<Object?, Object?> map) {
+    final List<Object?> rawSegments =
+        (map['segments'] as List?)?.cast<Object?>() ?? <Object?>[];
     return RecordingInfo(
       recordingId: map['recordingId'] as String? ?? '',
       filePath: map['filePath'] as String? ?? '',
       durationMs: (map['durationMs'] as num?)?.toInt() ?? 0,
       sizeBytes: (map['sizeBytes'] as num?)?.toInt() ?? 0,
       status: map['status'] as String? ?? '',
+      segments: rawSegments
+          .whereType<Map<Object?, Object?>>()
+          .map(RecordingSegmentInfo.fromMap)
+          .toList(),
     );
   }
 }
@@ -475,6 +487,7 @@ class RecordingStatusSnapshot {
     this.height,
     this.fps,
     this.errorCode,
+    this.segments = const <RecordingSegmentInfo>[],
   });
 
   /// `idle`, `starting`, `recording`, `rotating_segment`, `stopping`
@@ -489,7 +502,13 @@ class RecordingStatusSnapshot {
   final int? fps;
   final String? errorCode;
 
+  /// Segmentos verificados hasta ahora (paso 6): la UI los recupera
+  /// al re-sincronizar sin haber visto los eventos.
+  final List<RecordingSegmentInfo> segments;
+
   factory RecordingStatusSnapshot.fromMap(Map<Object?, Object?> map) {
+    final List<Object?> rawSegments =
+        (map['segments'] as List?)?.cast<Object?>() ?? <Object?>[];
     return RecordingStatusSnapshot(
       state: map['state'] as String? ?? 'idle',
       recordingId: map['recordingId'] as String?,
@@ -500,6 +519,10 @@ class RecordingStatusSnapshot {
       height: (map['height'] as num?)?.toInt(),
       fps: (map['fps'] as num?)?.toInt(),
       errorCode: map['errorCode'] as String?,
+      segments: rawSegments
+          .whereType<Map<Object?, Object?>>()
+          .map(RecordingSegmentInfo.fromMap)
+          .toList(),
     );
   }
 

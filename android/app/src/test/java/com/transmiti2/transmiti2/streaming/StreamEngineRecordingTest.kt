@@ -455,6 +455,15 @@ class StreamEngineRecordingTest {
             assertEquals(12_000, info.durationMs)
             assertEquals(3_750_000, info.sizeBytes)
             assertEquals("ready", info.status)
+            // El método devuelve la lista completa de segmentos
+            // (paso 5): la UI no depende de los eventos recibidos.
+            assertEquals(1, info.segments.size)
+            assertEquals(0, info.segments.first().index)
+            assertEquals(12_000L, info.segments.first().durationMs)
+            assertEquals(
+                SegmentStatus.READY,
+                info.segments.first().status,
+            )
             assertEquals(1, fixture.recording.stopCalls)
             assertEquals(1, fixture.fgs.stopCalls)
             assertTrue(
@@ -473,6 +482,7 @@ class StreamEngineRecordingTest {
 
         assertEquals("", info.recordingId)
         assertEquals("idle", info.status)
+        assertEquals(0, info.segments.size)
         assertEquals(1, fixture.recording.stopCalls)
     }
 

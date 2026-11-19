@@ -434,6 +434,9 @@ class StreamChannelHandler(
             "durationMs" to info.durationMs,
             "sizeBytes" to info.sizeBytes,
             "status" to info.status,
+            // Segmentos verificados (paso 5): la confirmación de la
+            // parada ya no depende de los eventos recibidos.
+            "segments" to info.segments.map { it.toMap() },
         )
     }
 
@@ -456,6 +459,7 @@ class StreamChannelHandler(
                     "height" to null,
                     "fps" to null,
                     "errorCode" to null,
+                    "segments" to emptyList<Any>(),
                 ),
             )
             return

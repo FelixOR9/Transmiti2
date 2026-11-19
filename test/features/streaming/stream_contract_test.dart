@@ -131,12 +131,28 @@ void main() {
         'durationMs': 60000,
         'sizeBytes': 123456,
         'status': 'ready',
+        // La lista completa de segmentos (paso 5).
+        'segments': <Map<Object?, Object?>>[
+          <Object?, Object?>{
+            'recordingId': 'rec-1',
+            'segmentIndex': 0,
+            'fileName': 'rec-1_seg000.mp4',
+            'filePath': '/tmp/rec.mp4',
+            'status': 'ready',
+            'durationMs': 60000,
+            'sizeBytes': 123456,
+            'closedCleanly': true,
+          },
+        ],
       });
       expect(info.recordingId, 'rec-1');
       expect(info.filePath, '/tmp/rec.mp4');
       expect(info.durationMs, 60000);
       expect(info.sizeBytes, 123456);
       expect(info.status, 'ready');
+      expect(info.segments.length, 1);
+      expect(info.segments[0].index, 0);
+      expect(info.segments[0].durationMs, 60000);
     });
   });
 
@@ -214,11 +230,27 @@ void main() {
             'width': 1280,
             'height': 720,
             'fps': 30,
+            // Segmentos verificados hasta ahora (paso 6).
+            'segments': <Map<Object?, Object?>>[
+              <Object?, Object?>{
+                'recordingId': 'rec-1',
+                'segmentIndex': 0,
+                'fileName': 'rec-1_seg000.mp4',
+                'filePath': '/docs/rec-1_seg000.mp4',
+                'status': 'ready',
+                'durationMs': 60000,
+                'sizeBytes': 123456,
+                'closedCleanly': true,
+              },
+            ],
           });
       expect(snapshot.state, 'recording');
       expect(snapshot.elapsedMs, 30000);
       expect(snapshot.segmentIndex, 1);
+      expect(snapshot.segments.length, 1);
+      expect(snapshot.segments[0].index, 0);
       expect(RecordingStatusSnapshot.idle().state, 'idle');
+      expect(RecordingStatusSnapshot.idle().segments, isEmpty);
     });
 
     test('RecoveredSegmentInfo distingue utilizable de corrupto', () {

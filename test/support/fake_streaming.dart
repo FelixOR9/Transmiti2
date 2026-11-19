@@ -183,12 +183,31 @@ class FakeStreamingService implements StreamingService {
     if (error != null) {
       throw StreamingException(error);
     }
+    // El método devuelve la lista completa de segmentos (paso 5):
+    // un segmento `ready` de 12 s, coherente con `durationMs`.
     return RecordingInfo(
       recordingId: recordingId,
       filePath: '/docs/recordings/${recordingId}_seg000.mp4',
       durationMs: 12000,
       sizeBytes: 3750000,
       status: 'ready',
+      segments: <RecordingSegmentInfo>[
+        RecordingSegmentInfo(
+          recordingId: recordingId,
+          index: 0,
+          fileName: '${recordingId}_seg000.mp4',
+          filePath: '/docs/recordings/${recordingId}_seg000.mp4',
+          status: 'ready',
+          durationMs: 12000,
+          sizeBytes: 3750000,
+          sampleCount: 360,
+          keyframeCount: 6,
+          firstSampleKeyframe: true,
+          ptsMonotonic: true,
+          profileIdc: 66,
+          closedCleanly: true,
+        ),
+      ],
     );
   }
 

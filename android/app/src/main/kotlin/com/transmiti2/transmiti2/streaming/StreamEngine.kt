@@ -1,5 +1,7 @@
 package com.transmiti2.transmiti2.streaming
 
+import com.transmiti2.transmiti2.streaming.recording.RecordingSegmentResult
+
 /**
  * Motor RTMP (Fase 3.0: solo el modelo de datos y la interfaz).
  *
@@ -55,6 +57,10 @@ data class RecordingInfo(
     val sizeBytes: Long,
     /** Estado final de la grabación (`ready`, `partial`, ...). */
     val status: String,
+    /** Segmentos verificados (completos): el método `stopRecording`
+     * los devuelve para que la UI no dependa de haber recibido todos
+     * los eventos `recording_segment` (fix duraciones 3.1.2, paso 5). */
+    val segments: List<RecordingSegmentResult> = emptyList(),
 )
 
 /** Estados de una sesión de transmisión (para las fases 3.1 en adelante). */

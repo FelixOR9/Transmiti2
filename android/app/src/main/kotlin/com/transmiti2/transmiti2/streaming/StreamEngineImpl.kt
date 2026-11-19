@@ -553,6 +553,7 @@ class StreamEngineImpl(
             durationMs = result.totalDurationMs,
             sizeBytes = result.totalSizeBytes,
             status = result.status,
+            segments = result.segments,
         )
     }
 
@@ -589,6 +590,9 @@ class StreamEngineImpl(
             "height" to snapshot.height,
             "fps" to snapshot.fps,
             "errorCode" to snapshot.errorCode,
+            // Segmentos verificados hasta ahora (paso 6): la UI los
+            // recupera al re-sincronizar sin haber visto los eventos.
+            "segments" to snapshot.segments.map { it.toMap() },
         )
     }
 

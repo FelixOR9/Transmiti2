@@ -181,6 +181,9 @@ data class RecordingStatusSnapshot(
     val height: Int?,
     val fps: Int?,
     val errorCode: String?,
+    /** Segmentos verificados hasta ahora (paso 6): la UI los recupera
+     * al re-sincronizar sin haber visto los eventos. */
+    val segments: List<RecordingSegmentResult> = emptyList(),
 )
 
 /** Segmento interrumpido (`.tmp.mp4`) clasificado en la recuperación. */
@@ -355,6 +358,9 @@ open class RecordingSession(
             height = encoderConfig?.height,
             fps = encoderConfig?.fps,
             errorCode = lastError?.code,
+            segments = synchronized(segmentResults) {
+                segmentResults.sortedBy { it.index }.toList()
+            },
         )
     }
 

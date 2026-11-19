@@ -361,14 +361,67 @@ void main() {
       await recording.stop();
       await tester.pump();
 
-      // El resumen de la parada (en este grupo, desde los eventos de
-      // Dart: 2 segmentos; el paso 5 lo construirá desde el método).
+      // El resumen de la parada viene del MÉTODO (paso 5): el falso
+      // devuelve 1 segmento, aunque Dart vio 2 eventos. La lista del
+      // motor es completa y es la que manda.
       expect(
         recording.diagnosticText,
         contains(
-          'Última parada: estado=ready duración total=12000ms segmentos=2',
+          'Última parada: estado=ready duración total=12000ms segmentos=1',
         ),
       );
+    });
+
+    testWidgets('stop usa los segmentos del método aunque falte un evento', (
+      WidgetTester tester,
+    ) async {
+      await pumpController(tester);
+      await recording.start();
+      await tester.pump();
+
+      // Sin ningún evento `recording_segment`: la lista de Dart está
+      // vacía, pero el método devuelve el segmento verificado.
+      expect(recording.segments, isEmpty);
+
+      await recording.stop();
+      await tester.pump();
+
+      expect(recording.lastStopped, isNotNull);
+      expect(recording.lastStopped!.segmentCount, 1);
+      expect(recording.segments.length, 1);
+      expect(recording.segments[0].index, 0);
+      expect(recording.segments[0].durationMs, 12000);
+      expect(recording.segments[0].status, 'ready');
+    });
+
+    testWidgets('al volver, el snapshot restaura los segmentos', (
+      WidgetTester tester,
+    ) async {
+      await pumpController(tester);
+      // La UI se fue y volvió sin ver los eventos de segmento: el
+      // snapshot trae los verificados (paso 6).
+      recording.detach();
+      service.recordingStatus = RecordingStatusSnapshot(
+        state: 'recording',
+        recordingId: 'rec_20261118_120000_ab12',
+        elapsedMs: 65000,
+        segmentIndex: 1,
+        segmentDurationMs: 5000,
+        width: 1280,
+        height: 720,
+        fps: 30,
+        segments: <RecordingSegmentInfo>[
+          RecordingSegmentInfo.fromMap(segmentEvent(0)),
+        ],
+      );
+      recording.attach();
+      await tester.pump();
+
+      expect(recording.state, RecordingState.recording);
+      expect(recording.segments.length, 1);
+      expect(recording.segments[0].index, 0);
+      expect(recording.segments[0].durationMs, 60000);
+      expect(recording.nativeSegmentIndex, 1);
     });
 
     testWidgets(
