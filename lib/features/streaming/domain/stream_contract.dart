@@ -390,6 +390,12 @@ class RecordingSegmentInfo {
     /// FPS medido por el verificador (ronda 3): se muestra en el
     /// diagnóstico para decidir la tolerancia con evidencia.
     this.fpsMeasured,
+    /// Muestras leídas por el verificador (ronda 4, fix 3): el
+    /// `sampleCount` de arriba es el del drenado y puede diferir;
+    /// este es el recuento que vio el verificador.
+    this.verifiedSampleCount,
+    /// Duración de la fase 1 de verificación en ms (ronda 4, fix 2).
+    this.ioPhaseMs,
     this.closedCleanly = false,
     this.reason,
   });
@@ -409,6 +415,8 @@ class RecordingSegmentInfo {
   final bool? ptsMonotonic;
   final int? profileIdc;
   final double? fpsMeasured;
+  final int? verifiedSampleCount;
+  final int? ioPhaseMs;
   final bool closedCleanly;
   final String? reason;
 
@@ -427,6 +435,8 @@ class RecordingSegmentInfo {
       ptsMonotonic: map['ptsMonotonic'] as bool?,
       profileIdc: (map['profileIdc'] as num?)?.toInt(),
       fpsMeasured: (map['fpsMeasured'] as num?)?.toDouble(),
+      verifiedSampleCount: (map['verifiedSampleCount'] as num?)?.toInt(),
+      ioPhaseMs: (map['ioPhaseMs'] as num?)?.toInt(),
       closedCleanly: map['closedCleanly'] as bool? ?? false,
       reason: map['reason'] as String?,
     );

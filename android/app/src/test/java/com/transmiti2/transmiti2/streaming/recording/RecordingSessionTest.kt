@@ -791,4 +791,36 @@ class RecordingSessionTest {
         assertEquals(123_831L, result.totalDurationMs)
         assertEquals("partial", result.status)
     }
+
+    @Test
+    fun `toMap incluye el recuento verificado y la fase E_S`() {
+        // Ronda 4, fix 3: la tarjeta muestra el recuento del
+        // verificador y la duración de la fase 1; ambos viajan en el
+        // mapa del evento `recording_segment`. Sin estas claves, Dart
+        // los dibujaría como `—` aunque el verificador los midiera.
+        val segment = RecordingSegmentResult(
+            recordingId = "rec_20261119_012113_3210",
+            index = 0,
+            fileName = "rec_20261119_012113_3210_seg000.mp4",
+            filePath = "/docs/rec_20261119_012113_3210_seg000.mp4",
+            status = SegmentStatus.PARTIAL,
+            durationMs = 60_007L,
+            sizeBytes = 18_750_000L,
+            sampleCount = 1801,
+            keyframeCount = 30,
+            firstSampleKeyframe = true,
+            ptsMonotonic = true,
+            profileIdc = 66,
+            fpsMeasured = 30.0,
+            verifiedSampleCount = 1801,
+            ioPhaseMs = 61_234L,
+            closedCleanly = true,
+            reason = "verification_timeout",
+        )
+        val map = segment.toMap()
+        assertEquals(1801, map["verifiedSampleCount"])
+        assertEquals(61_234L, map["ioPhaseMs"])
+        assertEquals(30.0, map["fpsMeasured"])
+        assertEquals(1801, map["sampleCount"])
+    }
 }

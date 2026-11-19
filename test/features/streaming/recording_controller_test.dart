@@ -120,6 +120,8 @@ void main() {
         'ptsMonotonic': true,
         'profileIdc': 66,
         'fpsMeasured': 29.9,
+        'verifiedSampleCount': 1798,
+        'ioPhaseMs': 61234,
         'closedCleanly': true,
         'reason': null,
       };
@@ -336,6 +338,11 @@ void main() {
       await recording.start();
       await tester.pump();
 
+      // El evento `recording_started` alimenta el diagnóstico
+      // (codificador, FPS esperado...): sin él la tarjeta muestra `—`.
+      service.emitEvent(startedEvent());
+      await tester.pump();
+
       service.emitEvent(segmentEvent(0));
       await tester.pump();
       final Map<String, Object?> corrupt = segmentEvent(1)
@@ -347,19 +354,20 @@ void main() {
 
       final String? text = recording.diagnosticText;
       expect(text, isNotNull);
+      expect(text, contains('FPS esperado: 30'));
       expect(text, contains('Segmentos verificados: 2'));
       expect(
         text,
         contains(
           'seg0: ready 60000ms motivo=— cerradoLimpio=sí fps=29.9 '
-          'muestras=1800',
+          'muestras=1800 verif=1798 fase=61.2s',
         ),
       );
       expect(
         text,
         contains(
           'seg1: corrupt —ms motivo=duracion_no_valida cerradoLimpio=sí '
-          'fps=29.9 muestras=1800',
+          'fps=29.9 muestras=1800 verif=1798 fase=61.2s',
         ),
       );
 

@@ -62,6 +62,10 @@ class RecordingDiagnostics {
     this.lowStorageWarning,
     this.exceptionClass,
     this.lastErrorStage,
+    /// FPS esperado de la grabación (ronda 4, fix 3): el rango
+    /// seleccionado para el segmento; se muestra en el diagnóstico
+    /// para comparar con el FPS medido por segmento.
+    this.fps,
   });
 
   /// Etapa alcanzada (`starting`, `recording`, `rotating`...).
@@ -81,6 +85,9 @@ class RecordingDiagnostics {
   /// Etapa en la que falló el intento (`null` si no hubo error).
   final String? lastErrorStage;
 
+  /// FPS esperado (del evento `recording_started`).
+  final int? fps;
+
   factory RecordingDiagnostics.fromStarted(RecordingStartedInfo info) {
     return RecordingDiagnostics(
       stage: 'recording',
@@ -90,6 +97,7 @@ class RecordingDiagnostics {
       bitrateBps: info.bitrateBps,
       cbrSupported: info.cbrSupported,
       lowStorageWarning: info.lowStorageWarning,
+      fps: info.fps,
     );
   }
 
@@ -265,6 +273,9 @@ class RecordingController extends ChangeNotifier {
       'Bitrate: ${diag.bitrateBps?.toString() ?? '—'} bps',
     );
     text.writeln(
+      'FPS esperado: ${diag.fps?.toString() ?? '—'}',
+    );
+    text.writeln(
       'CBR: ${diag.cbrSupported == null ? '—' : diag.cbrSupported! ? 'sí' : 'no'}',
     );
     text.writeln(
@@ -285,6 +296,9 @@ class RecordingController extends ChangeNotifier {
     // de la última parada (del evento o del método, ya completo).
     // Ronda 3: la línea añade el FPS medido y las muestras, para
     // decidir la tolerancia con evidencia en el teléfono.
+    // Ronda 4, fix 3: la línea añade el recuento del verificador
+    // (`verif=`, distinto del `muestras=` del drenado) y la duración
+    // de la fase 1 (`fase=`, en segundos con un decimal).
     final List<String> tail = <String>[];
     tail.add('Segmentos verificados: ${_segments.length}');
     if (_segments.isNotEmpty) {
@@ -296,7 +310,9 @@ class RecordingController extends ChangeNotifier {
           'motivo=${segment.reason ?? '—'} '
           'cerradoLimpio=${segment.closedCleanly ? 'sí' : 'no'} '
           'fps=${segment.fpsMeasured?.toStringAsFixed(1) ?? '—'} '
-          'muestras=${segment.sampleCount?.toString() ?? '—'}',
+          'muestras=${segment.sampleCount?.toString() ?? '—'} '
+          'verif=${segment.verifiedSampleCount?.toString() ?? '—'} '
+          'fase=${segment.ioPhaseMs == null ? '—' : '${(segment.ioPhaseMs! / 1000).toStringAsFixed(1)}s'}',
         );
       }
     }

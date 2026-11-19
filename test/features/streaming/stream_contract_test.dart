@@ -186,11 +186,18 @@ void main() {
             'status': 'ready',
             'durationMs': 60000,
             'sizeBytes': 18750000,
+            'verifiedSampleCount': 1798,
+            'ioPhaseMs': 61234,
             'closedCleanly': true,
           });
       expect(segment.index, 2);
       expect(segment.fileName, 'rec-1_seg002.mp4');
       expect(segment.status, 'ready');
+      // Ronda 4, fix 3: el recuento del verificador y la duración de
+      // la fase 1 llegan por el mismo mapa; sin ellos la tarjeta no
+      // puede mostrarlos.
+      expect(segment.verifiedSampleCount, 1798);
+      expect(segment.ioPhaseMs, 61234);
       expect(segment.closedCleanly, isTrue);
     });
 

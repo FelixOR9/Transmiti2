@@ -81,6 +81,13 @@ data class RecordingSegmentResult(
     /** FPS medido por el verificador (ronda 3): se muestra en el
      * diagnóstico para decidir la tolerancia con evidencia. */
     val fpsMeasured: Double? = null,
+    /** Muestras leídas por el verificador (ronda 4, fix 3): el
+     * `sampleCount` de arriba es el del drenado y puede diferir;
+     * este es el recuento que vio el verificador. */
+    val verifiedSampleCount: Int? = null,
+    /** Duración de la fase 1 de verificación en ms (ronda 4, fix
+     * 2): extractor + decodificación completa. */
+    val ioPhaseMs: Long? = null,
     val closedCleanly: Boolean,
     val reason: String?,
 ) {
@@ -98,6 +105,8 @@ data class RecordingSegmentResult(
         "ptsMonotonic" to ptsMonotonic,
         "profileIdc" to profileIdc,
         "fpsMeasured" to fpsMeasured,
+        "verifiedSampleCount" to verifiedSampleCount,
+        "ioPhaseMs" to ioPhaseMs,
         "closedCleanly" to closedCleanly,
         "reason" to reason,
     )
@@ -1052,6 +1061,8 @@ open class RecordingSession(
             ptsMonotonic = closed.ptsMonotonic,
             profileIdc = verification.checks.profileIdc,
             fpsMeasured = verification.checks.fpsMeasured,
+            verifiedSampleCount = verification.checks.sampleCount,
+            ioPhaseMs = verification.checks.ioPhaseMs,
             closedCleanly = closed.closedCleanly,
             reason = verification.reason,
         )
