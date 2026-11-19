@@ -59,11 +59,11 @@ dependencies {
     // (que sí exigen API 24) no se usan en este proyecto.
     implementation("androidx.datastore:datastore-preferences:1.3.0")
     implementation("com.google.crypto.tink:tink-android:1.24.0")
-    // SPIKE 3.1.2 — TEMPORAL: comparación MediaMuxer clásico frente a
-    // MediaMuxerCompat (Media3 1.11.1, estable 2026-11-11, minSdk 21).
-    // Si gana el clásico, media3-muxer se retira al cerrar 3.1.2;
-    // media3-exoplayer se queda en ambos casos (reproducción nativa,
-    // dirección aprobada). Ver plan 3.1.2 §12.1.
+    // Media3 1.11.1 (estable 2026-11-11, minSdk 21): media3-muxer para
+    // MediaMuxerCompat — ganó el spike frente al clásico en muerte
+    // real del proceso (decisión 3.1.2, informe spike-resultados §18)
+    // — y media3-exoplayer para la reproducción nativa y la
+    // verificación de segmentos (dirección aprobada).
     implementation("androidx.media3:media3-muxer:1.11.1")
     implementation("androidx.media3:media3-exoplayer:1.11.1")
     testImplementation("junit:junit:4.13.2")

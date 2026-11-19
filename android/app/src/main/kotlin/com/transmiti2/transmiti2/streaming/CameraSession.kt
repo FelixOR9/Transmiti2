@@ -49,9 +49,9 @@ interface PreviewSessionListener {
  * EGL, la superficie de entrada del compositor. Ni el codificador ni el
  * compositor se mencionan aquí: la sesión no fija su destino de video.
  *
- * La plantilla de captura es `TEMPLATE_PREVIEW` por defecto; el spike
- * de la 3.1.2 la cambia a `TEMPLATE_RECORD` cuando la sesión lleva la
- * superficie del encoder (plan 3.1.2 §2.2).
+ * La plantilla de captura es `TEMPLATE_PREVIEW` en vista previa;
+ * `recreateSession` la cambia a `TEMPLATE_RECORD` cuando la sesión
+ * lleva la superficie del encoder (grabación 3.1.2).
  */
 interface PreviewSession {
     /**
@@ -135,10 +135,11 @@ class CameraSession(
     private val cameraManager: CameraManager,
     private val surfaceHandle: SurfaceProducerHandle,
     private val videoOutputSurface: Surface? = null,
-    // SPIKE 3.1.2 — TEMPORAL (lo usa el spike; producción 3.1.2 lo
-    // adopta): plantilla de la petición de repetición. Por defecto
-    // TEMPLATE_PREVIEW, como antes; TEMPLATE_RECORD cuando la sesión
-    // lleva la superficie del encoder.
+    // Solo lo usaba el spike (retirado al cerrar 3.1.2): plantilla de
+    // la petición de repetición. Por defecto TEMPLATE_PREVIEW;
+    // TEMPLATE_RECORD cuando la sesión lleva la superficie del
+    // encoder. Se retira en el commit que elimina `captureTemplate`
+    // de `CameraSession`, después de borrar `MuxerSpikeRunner`.
     private val captureTemplate: Int = CameraDevice.TEMPLATE_PREVIEW,
     private val opener: CameraDeviceOpener = CameraDeviceOpener { id, callback, handler ->
         cameraManager.openCamera(id, callback, handler)
