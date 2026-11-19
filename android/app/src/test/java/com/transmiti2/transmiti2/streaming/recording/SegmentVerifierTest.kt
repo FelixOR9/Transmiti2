@@ -233,4 +233,159 @@ class SegmentVerifierTest {
         assertNull(effectiveDurationMs(null, null, null))
         assertNull(effectiveDurationMs(0L, null, null))
     }
+
+    // --- `classifyIncomplete` (ronda 2: timeout / error con medidas
+    // parciales). El teléfono mostró `seg0/seg1: corrupt —ms
+    // motivo=verification_timeout cerradoLimpio=sí`: la verificación no
+    // terminó en 30 s y `verify()` descartaba las medidas ya tomadas.
+    // Ahora el segmento legible es `partial` con el motivo visible y
+    // la duración medida sobrevive.
+
+    private fun classifyTimedOut(
+        checks: VerificationChecks = goodChecks(),
+        expectedWidth: Int? = 1280,
+        expectedHeight: Int? = 720,
+        expectedFps: Int? = 30,
+        reason: String = "verification_timeout",
+    ) = classifyIncomplete(
+        checks,
+        expectedWidth,
+        expectedHeight,
+        expectedFps,
+        reason,
+    )
+
+    @Test
+    fun `timeout en ExoPlayer con medidas del extractor es partial con motivo y duracion`() {
+        // Caso del teléfono: extractor + decodificación completos, la
+        // confirmación de ExoPlayer no llegó a tiempo.
+        val result = classifyTimedOut(
+            checks = goodChecks().copy(
+                exoplayerReady = false,
+                exoplayerDurationMs = null,
+            ),
+        )
+        assertEquals(SegmentStatus.PARTIAL, result.status)
+        assertEquals("verification_timeout", result.reason)
+        assertEquals(60_000L, result.checks.durationMs)
+        assertEquals(1800, result.checks.sampleCount)
+    }
+
+    @Test
+    fun `timeout con decode sin completar sigue siendo partial con duracion`() {
+        // La decodificación no terminó (o no se confirmó): no es
+        // «fallida», es «no verificada a tiempo». El archivo legible
+        // sigue siendo utilizable.
+        val result = classifyTimedOut(
+            checks = goodChecks().copy(
+                decodeOk = false,
+                decodedFrames = 900,
+                exoplayerReady = false,
+                exoplayerDurationMs = null,
+            ),
+        )
+        assertEquals(SegmentStatus.PARTIAL, result.status)
+        assertEquals("verification_timeout", result.reason)
+        assertEquals(60_000L, result.checks.durationMs)
+    }
+
+    @Test
+    fun `error de verificacion con medidas es partial con verification_error`() {
+        val result = classifyTimedOut(
+            checks = goodChecks().copy(
+                decodeOk = false,
+                exoplayerReady = false,
+                exoplayerDurationMs = null,
+            ),
+            reason = "verification_error",
+        )
+        assertEquals(SegmentStatus.PARTIAL, result.status)
+        assertEquals("verification_error", result.reason)
+        assertEquals(60_000L, result.checks.durationMs)
+    }
+
+    @Test
+    fun `timeout con extractor que no abre es corrupt con el motivo medido`() {
+        val result = classifyTimedOut(
+            checks = goodChecks().copy(
+                extractorOpens = false,
+                hasAvcTrack = false,
+                width = null,
+                height = null,
+                sampleCount = 0,
+                keyframeCount = 0,
+                firstSampleKeyframe = false,
+                durationMs = null,
+                fpsMeasured = null,
+                profileIdc = null,
+                decodeOk = false,
+                decodedFrames = 0,
+                exoplayerReady = false,
+                exoplayerDurationMs = null,
+            ),
+        )
+        assertEquals(SegmentStatus.CORRUPT, result.status)
+        assertEquals("extractor_no_abre", result.reason)
+    }
+
+    @Test
+    fun `timeout sin muestras es corrupt`() {
+        val result = classifyTimedOut(
+            checks = goodChecks().copy(
+                sampleCount = 0,
+                keyframeCount = 0,
+                durationMs = null,
+                fpsMeasured = null,
+                decodeOk = false,
+                decodedFrames = 0,
+            ),
+        )
+        assertEquals(SegmentStatus.CORRUPT, result.status)
+        assertEquals("sin_muestras", result.reason)
+    }
+
+    @Test
+    fun `timeout con duracion no valida es corrupt`() {
+        val result = classifyTimedOut(
+            checks = goodChecks().copy(durationMs = 0L),
+        )
+        assertEquals(SegmentStatus.CORRUPT, result.status)
+        assertEquals("duracion_no_valida", result.reason)
+    }
+
+    @Test
+    fun `timeout con resolucion distinta es corrupt`() {
+        val result = classifyTimedOut(
+            checks = goodChecks().copy(width = 640, height = 480),
+        )
+        assertEquals(SegmentStatus.CORRUPT, result.status)
+        assertEquals("resolucion_no_coincide", result.reason)
+    }
+
+    @Test
+    fun `timeout con FPS fuera de tolerancia es corrupt`() {
+        val result = classifyTimedOut(
+            checks = goodChecks().copy(fpsMeasured = 25.0),
+        )
+        assertEquals(SegmentStatus.CORRUPT, result.status)
+        assertEquals("fps_no_coincide", result.reason)
+    }
+
+    @Test
+    fun `timeout sin configuracion esperada no comprueba resolucion ni FPS`() {
+        val result = classifyTimedOut(
+            checks = goodChecks().copy(
+                width = 640,
+                height = 480,
+                fpsMeasured = 24.0,
+                exoplayerReady = false,
+                exoplayerDurationMs = null,
+            ),
+            expectedWidth = null,
+            expectedHeight = null,
+            expectedFps = null,
+        )
+        assertEquals(SegmentStatus.PARTIAL, result.status)
+        assertEquals("verification_timeout", result.reason)
+    }
 }
