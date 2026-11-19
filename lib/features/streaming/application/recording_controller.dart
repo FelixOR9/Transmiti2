@@ -116,13 +116,21 @@ class RecordingDiagnostics {
   }
 }
 
-/// Grabación local de video sin audio (Fase B, 3.1.2).
+/// Grabación local de video, con audio AAC desde la 3.1.3 (Fase B,
+/// 3.1.2: video-only).
 ///
 /// Orquesta `startRecording` / `stopRecording` del servicio, escucha
 /// los eventos `recording_*`, guarda la fila de la grabación en SQLite
 /// (plan §8.1: una fila por grabación, `recording` al iniciar,
 /// `ready`/`corrupt` al detener) y clasifica las interrupciones al
 /// volver a la pantalla (plan §7.3).
+///
+/// Audio (3.1.3, plan §6.2 D9): al tocar «GRABAR» se pide el
+/// micrófono; concedido → `audioEnabled: true`; denegado → video-only
+/// y la UI muestra «SOLO VIDEO». La denegación NO impide grabar: la
+/// grabación arranca en ambos casos. Si el audio se pierde en caliente
+/// (evento `recording_audio_lost`), el video continúa y el estado de
+/// grabación no cambia a error.
 ///
 /// Ciclo de vida (obligatorio, distinto de la vista previa):
 /// - Si se sale de la pantalla con una grabación activa, la grabación
@@ -188,6 +196,35 @@ class RecordingController extends ChangeNotifier {
 
   String? _errorMessage;
   String? get errorMessage => _errorMessage;
+
+  /// Estado de audio de la grabación en curso (3.1.3, plan §8.1).
+  ///
+  /// `audioEnabled` es lo que se pidió al arrancar (del permiso de
+  /// micrófono y confirmado por `recording_started`); `audioActive`
+  /// es si el audio se está capturando ahora mismo (`false` tras una
+  /// pérdida en caliente); `audioReason` es el motivo de video-only
+  /// (permiso denegado o motivo nativo). El chip de la pantalla
+  /// refleja este estado real, no el permiso.
+  bool _audioEnabled = false;
+  bool get audioEnabled => _audioEnabled;
+
+  bool _audioActive = false;
+  bool get audioActive => _audioActive;
+
+  String? _audioReason;
+  String? get audioReason => _audioReason;
+
+  /// Pérdida de audio en caliente (evento `recording_audio_lost`):
+  /// motivo, índice del segmento en curso y mensaje del motor. La
+  /// grabación sigue: el estado no cambia a error.
+  String? _audioLostReason;
+  String? get audioLostReason => _audioLostReason;
+
+  int? _audioLostSegmentIndex;
+  int? get audioLostSegmentIndex => _audioLostSegmentIndex;
+
+  String? _audioLostMessage;
+  String? get audioLostMessage => _audioLostMessage;
 
   RecordingDiagnostics? _diagnostics;
   RecordingDiagnostics? get diagnostics => _diagnostics;
@@ -281,6 +318,18 @@ class RecordingController extends ChangeNotifier {
     text.writeln(
       'Poco espacio: ${diag.lowStorageWarning == null ? '—' : diag.lowStorageWarning! ? 'sí' : 'no'}',
     );
+    // Audio (3.1.3, plan §8.2): cabecera con/sin audio, frecuencia,
+    // canales y motivo de video-only; y la pérdida en caliente, si la
+    // hubo. Se muestra también tras la parada: describe la última
+    // grabación.
+    text.writeln('Audio: ${_audioHeader()}');
+    if (_audioLostReason != null) {
+      text.writeln(
+        'Audio perdido en seg ${_audioLostSegmentIndex?.toString() ?? '—'}: '
+        '$_audioLostReason'
+        '${_audioLostMessage == null || _audioLostMessage!.isEmpty ? '' : ' — $_audioLostMessage'}',
+      );
+    }
     text.writeln(
       'Clase de excepción: ${diag.exceptionClass ?? '—'}',
     );
@@ -299,6 +348,8 @@ class RecordingController extends ChangeNotifier {
     // Ronda 4, fix 3: la línea añade el recuento del verificador
     // (`verif=`, distinto del `muestras=` del drenado) y la duración
     // de la fase 1 (`fase=`, en segundos con un decimal).
+    // 3.1.3: la línea añade el audio (`audio=<duración>ms av=<offset>ms`
+    // cuando hay pista AAC, `audio=no` en video-only).
     final List<String> tail = <String>[];
     tail.add('Segmentos verificados: ${_segments.length}');
     if (_segments.isNotEmpty) {
@@ -312,7 +363,8 @@ class RecordingController extends ChangeNotifier {
           'fps=${segment.fpsMeasured?.toStringAsFixed(1) ?? '—'} '
           'muestras=${segment.sampleCount?.toString() ?? '—'} '
           'verif=${segment.verifiedSampleCount?.toString() ?? '—'} '
-          'fase=${segment.ioPhaseMs == null ? '—' : '${(segment.ioPhaseMs! / 1000).toStringAsFixed(1)}s'}',
+          'fase=${segment.ioPhaseMs == null ? '—' : '${(segment.ioPhaseMs! / 1000).toStringAsFixed(1)}s'}'
+          '${_segmentAudioSuffix(segment)}',
         );
       }
     }
@@ -339,6 +391,41 @@ class RecordingController extends ChangeNotifier {
     final int seconds = totalSeconds % 60;
     return '${minutes.toString().padLeft(2, '0')}:'
         '${seconds.toString().padLeft(2, '0')}';
+  }
+
+  /// Cabecera de audio del diagnóstico (3.1.3, plan §8.2):
+  /// `sí (48 kHz mono)` con audio, `no (<motivo>)` en video-only.
+  /// Sin el evento `recording_started` todavía, solo `sí`/`no`: la
+  /// frecuencia y los canales los confirma el motor.
+  String _audioHeader() {
+    if (!_audioEnabled) {
+      return _audioReason == null ? 'no' : 'no ($_audioReason)';
+    }
+    final RecordingStartedInfo? info = _startedInfo;
+    final int? rate = info?.audioSampleRate;
+    final int? channels = info?.audioChannels;
+    if (rate == null || channels == null) {
+      return 'sí';
+    }
+    final String rateText =
+        rate % 1000 == 0 ? '${rate ~/ 1000} kHz' : '$rate Hz';
+    final String channelsText = switch (channels) {
+      1 => 'mono',
+      2 => 'estéreo',
+      _ => '$channels canales',
+    };
+    return 'sí ($rateText $channelsText)';
+  }
+
+  /// Sufijo de audio de una línea de segmento (3.1.3, plan §8.2):
+  /// duración de audio y offset A/V cuando hay pista AAC, `audio=no`
+  /// en video-only (incluidos los segmentos de 3.1.2, sin claves).
+  String _segmentAudioSuffix(RecordingSegmentInfo segment) {
+    if (!segment.hasAudio) {
+      return ' audio=no';
+    }
+    return ' audio=${segment.audioDurationMs?.toString() ?? '—'}ms '
+        'av=${segment.avOffsetMs?.toString() ?? '—'}ms';
   }
 
   StreamSubscription<Map<String, Object?>>? _eventsSubscription;
@@ -398,6 +485,23 @@ class RecordingController extends ChangeNotifier {
     // sabía que grababa (o volvió tras un `detach`).
     _nativeSegmentIndex = snapshot.segmentIndex;
     _nativeSegmentDurationMs = snapshot.segmentDurationMs;
+    // Estado de audio del snapshot (3.1.3, plan §8.1): la UI lo
+    // recupera al volver sin haber visto los eventos. El motivo
+    // nativo manda cuando lo hay; si el motor no dice nada y Dart ya
+    // sabía por qué no hay audio (permiso denegado), se conserva.
+    // Con audio activo no hay motivo de video-only.
+    _audioEnabled = snapshot.audioEnabled;
+    _audioActive = snapshot.audioActive;
+    if (snapshot.audioEnabled) {
+      _audioReason = null;
+      if (!snapshot.audioActive) {
+        // Pérdida en caliente mientras la UI no miraba: el motivo del
+        // snapshot es el de la pérdida (Kotlin: `audioLostReason`).
+        _audioLostReason = snapshot.audioReason;
+      }
+    } else {
+      _audioReason = snapshot.audioReason ?? _audioReason;
+    }
     // Segmentos verificados del snapshot (paso 6): al volver a la
     // pantalla tras un `detach`, los eventos se perdieron. Solo los
     // de la grabación que el motor está grabando.
@@ -462,11 +566,14 @@ class RecordingController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Inicia la grabación (sin audio). Solo desde `idle` o `error`;
-  /// exige la vista previa activa (plan §6.2). El permiso de
-  /// notificaciones se pide con el motivo (plan §9.1) pero la
-  /// grabación no depende de él: si se deniega, el servicio arranca
-  /// igual.
+  /// Inicia la grabación (con audio si el micrófono está concedido).
+  /// Solo desde `idle` o `error`; exige la vista previa activa
+  /// (plan §6.2). Al tocar «GRABAR» se pide el micrófono (plan §6.2
+  /// D9): concedido → `audioEnabled: true`; denegado → video-only.
+  /// La denegación NO impide grabar: la grabación arranca en ambos
+  /// casos. El permiso de notificaciones se pide con el motivo
+  /// (plan §9.1) pero la grabación no depende de él: si se deniega,
+  /// el servicio arranca igual.
   Future<void> start({int? matchId}) async {
     if (_state != RecordingState.idle && _state != RecordingState.error) {
       return;
@@ -488,6 +595,16 @@ class RecordingController extends ChangeNotifier {
     _diagnostics = null;
     _lastStopped = null;
     _segments.clear();
+    // Estado de audio a cero: una segunda grabación no hereda el de
+    // la anterior (igual que los relojes, fix duraciones 3.1.2,
+    // paso 2). El evento `recording_started` lo confirma después.
+    _startedInfo = null;
+    _audioEnabled = false;
+    _audioActive = false;
+    _audioReason = null;
+    _audioLostReason = null;
+    _audioLostSegmentIndex = null;
+    _audioLostMessage = null;
     // Relojes a cero: una segunda grabación en la misma sesión no debe
     // heredar el tiempo de la anterior (fix duraciones 3.1.2, paso 2:
     // la base nunca se limpiaba y el contador corría en vista previa y
@@ -498,6 +615,27 @@ class RecordingController extends ChangeNotifier {
     _nativeSegmentIndex = 0;
     _nativeSegmentDurationMs = 0;
     notifyListeners();
+    // Micrófono (3.1.3, D9): si ya está concedido o denegado de
+    // forma permanente, `request` no muestra ningún diálogo y
+    // devuelve el estado actual. Si la solicitud falla, se graba
+    // sin audio: el video es la prioridad.
+    bool audioEnabled = false;
+    PermissionStatus? micStatus;
+    try {
+      micStatus = await _permissions.request(PermissionKind.microphone);
+    } on Object {
+      micStatus = null;
+    }
+    audioEnabled = micStatus == PermissionStatus.granted;
+    if (micStatus == PermissionStatus.denied ||
+        micStatus == PermissionStatus.permanentlyDenied) {
+      // Motivo de video-only que conoce Dart: el motor no sabe por
+      // qué se le pidió sin audio. `notRequested` (sin respuesta del
+      // diálogo) no es una denegación: no se inventa el motivo.
+      _audioReason = StreamContract.permissionDenied;
+    }
+    _audioEnabled = audioEnabled;
+    _audioActive = audioEnabled;
     // Notificaciones: mejor esfuerzo (la grabación no depende de
     // este permiso; sin él la notificación solo se ve en el
     // Administrador de tareas).
@@ -513,7 +651,7 @@ class RecordingController extends ChangeNotifier {
           resolution: '720p',
           fps: 30,
           videoBitrateBps: 2500000,
-          audioEnabled: false,
+          audioEnabled: audioEnabled,
         ),
       );
       _recordingId = id;
@@ -577,9 +715,14 @@ class RecordingController extends ChangeNotifier {
         totalDurationMs: info.durationMs,
         totalSizeBytes: info.sizeBytes,
         status: info.status,
+        audioEnabled: info.audioEnabled,
       );
       _applyStoppedSegments(_lastStopped!);
       _state = RecordingState.idle;
+      // La captura terminó: el audio ya no está activo, pero el
+      // estado (`audioEnabled`, motivo) se conserva para el
+      // diagnóstico de la última grabación.
+      _audioActive = false;
       // Relojes a cero al llegar a `idle`: el diagnóstico en `idle`
       // no debe seguir contando (fix duraciones 3.1.2, paso 2).
       _startedAtMs = null;
@@ -685,6 +828,16 @@ class RecordingController extends ChangeNotifier {
         _recordingId = info.recordingId;
         _startedInfo = info;
         _diagnostics = RecordingDiagnostics.fromStarted(info);
+        // Audio real de la grabación (3.1.3): el evento manda sobre
+        // lo pedido. Si el motor degradó a video-only, el motivo
+        // nativo manda; si no dice nada y Dart ya sabía por qué no
+        // hay audio (permiso denegado), se conserva. Con audio no
+        // hay motivo de video-only.
+        _audioEnabled = info.audioEnabled;
+        _audioActive = info.audioEnabled;
+        _audioReason = info.audioEnabled
+            ? null
+            : (info.audioReason ?? _audioReason);
         // Asignación directa (no `??=`): el inicio de una grabación
         // fija su propia base; si la base anterior no se limpió, no
         // debe reutilizarse (fix duraciones 3.1.2, paso 2).
@@ -738,12 +891,26 @@ class RecordingController extends ChangeNotifier {
           );
         }
         _state = RecordingState.idle;
+        // La captura terminó: el audio ya no está activo, pero el
+        // estado se conserva para el diagnóstico de la última
+        // grabación.
+        _audioActive = false;
         // Relojes a cero al llegar a `idle` (paso 2; igual que en
         // `stop()`: la grabación terminó y el diagnóstico no debe
         // seguir contando).
         _startedAtMs = null;
         _segmentStartedAtMs = null;
         _stopTimer();
+        notifyListeners();
+      case StreamContract.eventRecordingAudioLost:
+        // Pérdida de audio en caliente (3.1.3, D7): el video
+        // continúa y el estado de grabación NO cambia a error. Solo
+        // se actualiza el estado de audio y el diagnóstico.
+        _audioActive = false;
+        _audioLostReason = event['reason'] as String?;
+        _audioLostSegmentIndex =
+            (event['segmentIndex'] as num?)?.toInt();
+        _audioLostMessage = event['message'] as String?;
         notifyListeners();
       case StreamContract.eventRecordingError:
         _errorCode =

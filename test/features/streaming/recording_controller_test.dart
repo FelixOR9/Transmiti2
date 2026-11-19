@@ -141,6 +141,50 @@ void main() {
       };
     }
 
+    /// Evento `recording_started` con audio AAC (3.1.3): el motor
+    /// confirma 48 kHz mono y el origen de timestamps.
+    Map<String, Object?> startedEventWithAudio() {
+      return startedEvent()
+        ..['audioEnabled'] = true
+        ..['audioSampleRate'] = 48000
+        ..['audioChannels'] = 1
+        ..['audioEncoderName'] = 'c2.qti.aac.encoder'
+        ..['timestampSource'] = 'REALTIME';
+    }
+
+    /// Evento `recording_started` en video-only por degradación
+    /// nativa (el formato AAC no llegó en 2 s).
+    Map<String, Object?> startedEventVideoOnly() {
+      return startedEvent()
+        ..['audioEnabled'] = false
+        ..['audioReason'] = 'audio_format_timeout';
+    }
+
+    /// Segmento verificado con pista AAC (3.1.3).
+    Map<String, Object?> segmentEventWithAudio(int index) {
+      return segmentEvent(index)
+        ..['hasAudio'] = true
+        ..['audioDurationMs'] = 59800
+        ..['audioSampleCount'] = 2800
+        ..['audioSampleRate'] = 48000
+        ..['audioChannels'] = 1
+        ..['avOffsetMs'] = 120
+        ..['avDurationDiffMs'] = 200
+        ..['audioGapSamples'] = 0;
+    }
+
+    /// Pérdida de audio en caliente (3.1.3, D7): el micrófono murió
+    /// en el segmento 0; el video continúa.
+    Map<String, Object?> audioLostEvent() {
+      return <String, Object?>{
+        'type': StreamContract.eventRecordingAudioLost,
+        'recordingId': 'rec_20261118_120000_ab12',
+        'reason': 'audio_dead_object',
+        'segmentIndex': 0,
+        'message': 'El micrófono dejó de responder.',
+      };
+    }
+
     testWidgets('inicia la grabación con la vista previa activa', (
       WidgetTester tester,
     ) async {
@@ -360,14 +404,14 @@ void main() {
         text,
         contains(
           'seg0: ready 60000ms motivo=— cerradoLimpio=sí fps=29.9 '
-          'muestras=1800 verif=1798 fase=61.2s',
+          'muestras=1800 verif=1798 fase=61.2s audio=no',
         ),
       );
       expect(
         text,
         contains(
           'seg1: corrupt —ms motivo=duracion_no_valida cerradoLimpio=sí '
-          'fps=29.9 muestras=1800 verif=1798 fase=61.2s',
+          'fps=29.9 muestras=1800 verif=1798 fase=61.2s audio=no',
         ),
       );
 
@@ -590,5 +634,295 @@ void main() {
       expect(recording.errorCode, StreamContract.cameraDisconnected);
       expect(recording.errorMessage, 'Cámara desconectada.');
     });
+
+    // Audio AAC (3.1.3, plan §10.2).
+
+    testWidgets(
+      'start() con micrófono concedido pasa audioEnabled: true y graba',
+      (WidgetTester tester) async {
+        await pumpController(tester);
+        service.requestOutcomes[PermissionKind.microphone] =
+            PermissionStatus.granted;
+
+        await recording.start();
+        await tester.pump();
+
+        // Se pidieron micrófono y notificaciones (2 llamadas); el
+        // estado del micrófono quedó concedido.
+        expect(service.requestPermissionsCalls, 2);
+        expect(
+          service.permissionStates.microphone,
+          PermissionStatus.granted,
+        );
+        expect(service.lastRecordingOptions?.audioEnabled, isTrue);
+        expect(service.startRecordingCalls, 1);
+        expect(recording.state, RecordingState.recording);
+        expect(recording.audioEnabled, isTrue);
+        expect(recording.audioActive, isTrue);
+        expect(recording.audioReason, isNull);
+      },
+    );
+
+    testWidgets(
+      'start() con micrófono denegado graba en video-only (D9)',
+      (WidgetTester tester) async {
+        await pumpController(tester);
+        service.requestOutcomes[PermissionKind.microphone] =
+            PermissionStatus.denied;
+
+        await recording.start();
+        await tester.pump();
+
+        // La denegación NO impide grabar: la grabación arranca igual,
+        // solo sin audio.
+        expect(service.startRecordingCalls, 1);
+        expect(service.lastRecordingOptions?.audioEnabled, isFalse);
+        expect(recording.state, RecordingState.recording);
+        expect(recording.audioEnabled, isFalse);
+        expect(recording.audioActive, isFalse);
+        expect(recording.audioReason, StreamContract.permissionDenied);
+        expect(
+          recording.diagnosticText,
+          contains('Audio: no (permission_denied)'),
+        );
+      },
+    );
+
+    testWidgets(
+      'start() con micrófono bloqueado no muestra el diálogo y graba',
+      (WidgetTester tester) async {
+        await pumpController(tester);
+        service.permissionStates = const PermissionStates(
+          camera: PermissionStatus.granted,
+          microphone: PermissionStatus.permanentlyDenied,
+          notifications: PermissionStatus.notRequested,
+        );
+        await permissions.refresh();
+
+        await recording.start();
+        await tester.pump();
+
+        // Solo se pidió notificaciones: el micrófono bloqueado no
+        // lanza el diálogo del sistema.
+        expect(service.requestPermissionsCalls, 1);
+        expect(
+          service.lastRequestedPermissions,
+          <PermissionKind>[PermissionKind.notifications],
+        );
+        expect(service.lastRecordingOptions?.audioEnabled, isFalse);
+        expect(recording.state, RecordingState.recording);
+        expect(recording.audioEnabled, isFalse);
+      },
+    );
+
+    testWidgets('el evento recording_started con audio rellena el estado', (
+      WidgetTester tester,
+    ) async {
+      await pumpController(tester);
+      service.requestOutcomes[PermissionKind.microphone] =
+          PermissionStatus.granted;
+      await recording.start();
+      await tester.pump();
+
+      service.emitEvent(startedEventWithAudio());
+      await tester.pump();
+
+      expect(recording.audioEnabled, isTrue);
+      expect(recording.audioActive, isTrue);
+      expect(recording.startedInfo?.audioSampleRate, 48000);
+      expect(recording.startedInfo?.audioChannels, 1);
+      expect(recording.startedInfo?.audioEncoderName, 'c2.qti.aac.encoder');
+      expect(recording.startedInfo?.timestampSource, 'REALTIME');
+      expect(
+        recording.diagnosticText,
+        contains('Audio: sí (48 kHz mono)'),
+      );
+    });
+
+    testWidgets('el evento recording_started video-only muestra el motivo', (
+      WidgetTester tester,
+    ) async {
+      await pumpController(tester);
+      service.requestOutcomes[PermissionKind.microphone] =
+          PermissionStatus.granted;
+      await recording.start();
+      await tester.pump();
+
+      // El motor degradó a video-only aunque Dart pidió audio.
+      service.emitEvent(startedEventVideoOnly());
+      await tester.pump();
+
+      expect(recording.audioEnabled, isFalse);
+      expect(recording.audioActive, isFalse);
+      expect(recording.audioReason, 'audio_format_timeout');
+      expect(
+        recording.diagnosticText,
+        contains('Audio: no (audio_format_timeout)'),
+      );
+    });
+
+    testWidgets(
+      'recording_audio_lost actualiza el estado sin cambiar a error',
+      (WidgetTester tester) async {
+        await pumpController(tester);
+        service.requestOutcomes[PermissionKind.microphone] =
+            PermissionStatus.granted;
+        await recording.start();
+        await tester.pump();
+        service.emitEvent(startedEventWithAudio());
+        await tester.pump();
+        expect(recording.audioActive, isTrue);
+
+        service.emitEvent(audioLostEvent());
+        await tester.pump();
+
+        // No es un error de grabación: el estado sigue siendo
+        // `recording` y no hay código de error.
+        expect(recording.state, RecordingState.recording);
+        expect(recording.errorCode, isNull);
+        expect(recording.errorMessage, isNull);
+        expect(recording.audioEnabled, isTrue);
+        expect(recording.audioActive, isFalse);
+        expect(recording.audioLostReason, 'audio_dead_object');
+        expect(recording.audioLostSegmentIndex, 0);
+        expect(
+          recording.audioLostMessage,
+          'El micrófono dejó de responder.',
+        );
+        expect(
+          recording.diagnosticText,
+          contains(
+            'Audio perdido en seg 0: audio_dead_object — '
+            'El micrófono dejó de responder.',
+          ),
+        );
+        // La grabación sigue: el temporizador no se paró.
+        expect(timers.first.isActive, isTrue);
+      },
+    );
+
+    testWidgets(
+      'la pérdida de audio no se confunde con el estado error',
+      (WidgetTester tester) async {
+        await pumpController(tester);
+        service.requestOutcomes[PermissionKind.microphone] =
+            PermissionStatus.granted;
+        await recording.start();
+        await tester.pump();
+        service.emitEvent(startedEventWithAudio());
+        await tester.pump();
+        service.emitEvent(audioLostEvent());
+        await tester.pump();
+        expect(recording.state, RecordingState.recording);
+
+        // Un error real después de la pérdida sí detiene con error.
+        service.emitEvent(<String, Object?>{
+          'type': StreamContract.eventRecordingError,
+          'recordingId': 'rec_20261118_120000_ab12',
+          'code': StreamContract.cameraDisconnected,
+          'message': 'Cámara desconectada.',
+          'details': <String, Object?>{'stage': 'recording'},
+        });
+        await tester.pump();
+
+        expect(recording.state, RecordingState.error);
+        expect(recording.errorCode, StreamContract.cameraDisconnected);
+        // La pérdida de audio queda registrada aparte del error.
+        expect(recording.audioLostReason, 'audio_dead_object');
+      },
+    );
+
+    testWidgets('la línea de segmento muestra el audio y el offset A/V', (
+      WidgetTester tester,
+    ) async {
+      await pumpController(tester);
+      service.requestOutcomes[PermissionKind.microphone] =
+          PermissionStatus.granted;
+      await recording.start();
+      await tester.pump();
+      service.emitEvent(startedEventWithAudio());
+      await tester.pump();
+
+      service.emitEvent(segmentEventWithAudio(0));
+      await tester.pump();
+      service.emitEvent(segmentEvent(1));
+      await tester.pump();
+
+      final String? text = recording.diagnosticText;
+      expect(text, isNotNull);
+      expect(
+        text,
+        contains(
+          'seg0: ready 60000ms motivo=— cerradoLimpio=sí fps=29.9 '
+          'muestras=1800 verif=1798 fase=61.2s audio=59800ms av=120ms',
+        ),
+      );
+      // Segmento video-only (sin claves de audio): `audio=no`.
+      expect(
+        text,
+        contains(
+          'seg1: ready 60000ms motivo=— cerradoLimpio=sí fps=29.9 '
+          'muestras=1800 verif=1798 fase=61.2s audio=no',
+        ),
+      );
+    });
+
+    testWidgets('al volver, el snapshot re-sincroniza el estado de audio', (
+      WidgetTester tester,
+    ) async {
+      await pumpController(tester);
+      recording.detach();
+      service.recordingStatus = RecordingStatusSnapshot(
+        state: 'recording',
+        recordingId: 'rec_20261118_120000_ab12',
+        elapsedMs: 30000,
+        segmentIndex: 0,
+        segmentDurationMs: 5000,
+        width: 1280,
+        height: 720,
+        fps: 30,
+        audioEnabled: true,
+        audioActive: true,
+      );
+      recording.attach();
+      await tester.pump();
+
+      expect(recording.state, RecordingState.recording);
+      expect(recording.audioEnabled, isTrue);
+      expect(recording.audioActive, isTrue);
+      expect(recording.audioReason, isNull);
+    });
+
+    testWidgets(
+      'al volver con el audio perdido, el snapshot lo refleja',
+      (WidgetTester tester) async {
+        await pumpController(tester);
+        recording.detach();
+        service.recordingStatus = const RecordingStatusSnapshot(
+          state: 'recording',
+          recordingId: 'rec_20261118_120000_ab12',
+          elapsedMs: 45000,
+          segmentIndex: 0,
+          segmentDurationMs: 45000,
+          width: 1280,
+          height: 720,
+          fps: 30,
+          audioEnabled: true,
+          audioActive: false,
+          audioReason: 'audio_dead_object',
+        );
+        recording.attach();
+        await tester.pump();
+
+        expect(recording.state, RecordingState.recording);
+        expect(recording.audioEnabled, isTrue);
+        expect(recording.audioActive, isFalse);
+        expect(recording.audioLostReason, 'audio_dead_object');
+        expect(
+          recording.diagnosticText,
+          contains('Audio perdido en seg —: audio_dead_object'),
+        );
+      },
+    );
   });
 }

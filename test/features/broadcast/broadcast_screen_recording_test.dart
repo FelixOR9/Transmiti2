@@ -182,5 +182,122 @@ void main() {
       expect(find.textContaining('c2.qti.avc.encoder'), findsOneWidget);
       expect(find.text('COPIAR DIAGNÓSTICO'), findsWidgets);
     });
+
+    // Chip de audio (3.1.3, plan §8.2 y §10.2).
+
+    testWidgets('con micrófono concedido el chip muestra CON AUDIO', (
+      WidgetTester tester,
+    ) async {
+      final FakeStreamingService service = grantedService();
+      service.requestOutcomes[PermissionKind.microphone] =
+          PermissionStatus.granted;
+      await pumpStudio(tester, service);
+      await startPreview(tester);
+      await tapRecord(tester);
+
+      service.emitEvent(<String, Object?>{
+        'type': StreamContract.eventRecordingStarted,
+        'recordingId': 'rec_20261118_120000_ab12',
+        'width': 1280,
+        'height': 720,
+        'fps': 30,
+        'bitrateBps': 2500000,
+        'encoderName': 'c2.qti.avc.encoder',
+        'rotationDegrees': 90,
+        'cbrSupported': true,
+        'audioEnabled': true,
+        'audioSampleRate': 48000,
+        'audioChannels': 1,
+        'audioEncoderName': 'c2.qti.aac.encoder',
+      });
+      await tester.pumpAndSettle();
+
+      expect(find.text('CON AUDIO'), findsOneWidget);
+      expect(find.text('SOLO VIDEO'), findsNothing);
+      expect(find.textContaining('Audio: sí (48 kHz mono)'), findsOneWidget);
+    });
+
+    testWidgets(
+      'con micrófono denegado el chip muestra SOLO VIDEO y el motivo',
+      (WidgetTester tester) async {
+        final FakeStreamingService service = grantedService();
+        service.requestOutcomes[PermissionKind.microphone] =
+            PermissionStatus.denied;
+        await pumpStudio(tester, service);
+        await startPreview(tester);
+        await tapRecord(tester);
+
+        // La denegación no impide grabar: el botón pasa a DETENER
+        // GRABACIÓN y el chip dice SOLO VIDEO.
+        expect(find.text('DETENER GRABACIÓN'), findsOneWidget);
+        expect(find.text('CON AUDIO'), findsNothing);
+        expect(find.text('SOLO VIDEO'), findsOneWidget);
+
+        service.emitEvent(<String, Object?>{
+          'type': StreamContract.eventRecordingStarted,
+          'recordingId': 'rec_20261118_120000_ab12',
+          'width': 1280,
+          'height': 720,
+          'fps': 30,
+          'bitrateBps': 2500000,
+          'encoderName': 'c2.qti.avc.encoder',
+          'rotationDegrees': 90,
+          'cbrSupported': true,
+          'audioEnabled': false,
+          'audioReason': 'permission_denied',
+        });
+        await tester.pumpAndSettle();
+
+        expect(find.text('SOLO VIDEO'), findsOneWidget);
+        expect(
+          find.textContaining('Audio: no (permission_denied)'),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets(
+      'la pérdida de audio en caliente cambia el chip a SOLO VIDEO',
+      (WidgetTester tester) async {
+        final FakeStreamingService service = grantedService();
+        service.requestOutcomes[PermissionKind.microphone] =
+            PermissionStatus.granted;
+        await pumpStudio(tester, service);
+        await startPreview(tester);
+        await tapRecord(tester);
+        service.emitEvent(<String, Object?>{
+          'type': StreamContract.eventRecordingStarted,
+          'recordingId': 'rec_20261118_120000_ab12',
+          'width': 1280,
+          'height': 720,
+          'fps': 30,
+          'bitrateBps': 2500000,
+          'audioEnabled': true,
+          'audioSampleRate': 48000,
+          'audioChannels': 1,
+        });
+        await tester.pumpAndSettle();
+        expect(find.text('CON AUDIO'), findsOneWidget);
+
+        service.emitEvent(<String, Object?>{
+          'type': StreamContract.eventRecordingAudioLost,
+          'recordingId': 'rec_20261118_120000_ab12',
+          'reason': 'audio_dead_object',
+          'segmentIndex': 0,
+          'message': 'El micrófono dejó de responder.',
+        });
+        await tester.pumpAndSettle();
+
+        // El video continúa: sigue GRABANDO, pero sin audio.
+        expect(find.text('GRABANDO'), findsOneWidget);
+        expect(find.text('DETENER GRABACIÓN'), findsOneWidget);
+        expect(find.text('CON AUDIO'), findsNothing);
+        expect(find.text('SOLO VIDEO'), findsOneWidget);
+        expect(
+          find.textContaining('Audio perdido en seg 0: audio_dead_object'),
+          findsOneWidget,
+        );
+      },
+    );
   });
 }

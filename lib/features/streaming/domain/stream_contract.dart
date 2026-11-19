@@ -118,6 +118,14 @@ abstract final class StreamContract {
   static const String eventRecordingStopped = 'recording_stopped';
   static const String eventRecordingError = 'recording_error';
 
+  /// Pérdida de audio en caliente (3.1.3, plan §8.1):
+  /// `{recordingId, reason, segmentIndex, message}`. `reason` es uno
+  /// de `audio_dead_object`, `audio_invalid_operation`,
+  /// `audio_encoder_error`, `audio_silence` o `audio_format_timeout`.
+  /// No es un error de grabación: el estado sigue siendo `recording`
+  /// y el video continúa.
+  static const String eventRecordingAudioLost = 'recording_audio_lost';
+
   // Códigos de error (nunca llevan la clave ni la URL dentro).
   static const String notAvailableInPhase30 = 'not_available_in_phase_3_0';
 
@@ -288,6 +296,7 @@ class RecordingInfo {
     required this.sizeBytes,
     required this.status,
     this.segments = const <RecordingSegmentInfo>[],
+    this.audioEnabled = false,
   });
 
   final String recordingId;
@@ -303,6 +312,10 @@ class RecordingInfo {
   /// los eventos `recording_segment` (fix duraciones 3.1.2, paso 5).
   final List<RecordingSegmentInfo> segments;
 
+  /// Audio de la grabación (3.1.3, plan §8.1): `true` si al menos un
+  /// segmento lleva pista AAC (`RecordingResult.audioEnabled`).
+  final bool audioEnabled;
+
   factory RecordingInfo.fromMap(Map<Object?, Object?> map) {
     final List<Object?> rawSegments =
         (map['segments'] as List?)?.cast<Object?>() ?? <Object?>[];
@@ -316,6 +329,7 @@ class RecordingInfo {
           .whereType<Map<Object?, Object?>>()
           .map(RecordingSegmentInfo.fromMap)
           .toList(),
+      audioEnabled: map['audioEnabled'] as bool? ?? false,
     );
   }
 }
@@ -336,6 +350,12 @@ class RecordingStartedInfo {
     this.rotationDegrees = 90,
     this.lowStorageWarning = false,
     this.cbrSupported = true,
+    this.audioEnabled = false,
+    this.audioSampleRate,
+    this.audioChannels,
+    this.audioEncoderName,
+    this.audioReason,
+    this.timestampSource,
   });
 
   final String recordingId;
@@ -353,6 +373,30 @@ class RecordingStartedInfo {
   final bool lowStorageWarning;
   final bool cbrSupported;
 
+  /// Audio de la grabación (3.1.3, plan §8.1): `true` si el motor
+  /// arrancó con pista AAC. `false` en modo video-only (permiso
+  /// denegado, micrófono no disponible o formato AAC sin llegar).
+  /// Las claves ausentes (eventos de versiones anteriores) son
+  /// `false`/`null`: nunca se inventan valores.
+  final bool audioEnabled;
+
+  /// Frecuencia de muestreo real del AAC (Hz), si hay audio.
+  final int? audioSampleRate;
+
+  /// Canales reales del AAC (1 = mono), si hay audio.
+  final int? audioChannels;
+
+  /// Nombre del codificador AAC, si hay audio.
+  final String? audioEncoderName;
+
+  /// Motivo de video-only cuando se pidió audio (`null` si hay audio
+  /// o no se pidió).
+  final String? audioReason;
+
+  /// Origen de los timestamps de la cámara (`REALTIME`/`UNKNOWN`),
+  /// para la sincronización A/V (plan §4).
+  final String? timestampSource;
+
   factory RecordingStartedInfo.fromMap(Map<Object?, Object?> map) {
     return RecordingStartedInfo(
       recordingId: map['recordingId'] as String? ?? '',
@@ -367,6 +411,12 @@ class RecordingStartedInfo {
       rotationDegrees: (map['rotationDegrees'] as num?)?.toInt() ?? 90,
       lowStorageWarning: map['lowStorageWarning'] as bool? ?? false,
       cbrSupported: map['cbrSupported'] as bool? ?? true,
+      audioEnabled: map['audioEnabled'] as bool? ?? false,
+      audioSampleRate: (map['audioSampleRate'] as num?)?.toInt(),
+      audioChannels: (map['audioChannels'] as num?)?.toInt(),
+      audioEncoderName: map['audioEncoderName'] as String?,
+      audioReason: map['audioReason'] as String?,
+      timestampSource: map['timestampSource'] as String?,
     );
   }
 }
@@ -398,6 +448,15 @@ class RecordingSegmentInfo {
     this.ioPhaseMs,
     this.closedCleanly = false,
     this.reason,
+    this.hasAudio = false,
+    this.audioDurationMs,
+    this.audioSampleCount,
+    this.audioSampleRate,
+    this.audioChannels,
+    this.avOffsetMs,
+    this.avDurationDiffMs,
+    this.audioReason,
+    this.audioGapSamples = 0,
   });
 
   final String recordingId;
@@ -420,6 +479,30 @@ class RecordingSegmentInfo {
   final bool closedCleanly;
   final String? reason;
 
+  /// Audio del segmento (3.1.3, plan §8.1). `hasAudio` es `false` en
+  /// modo video-only y en los segmentos de 3.1.2 (sin claves de
+  /// audio): nunca se inventa audio donde no lo hay.
+  final bool hasAudio;
+
+  /// Duración real de la pista AAC (ms) y muestras AAC leídas.
+  final int? audioDurationMs;
+  final int? audioSampleCount;
+
+  /// Formato real de la pista AAC (Hz y canales).
+  final int? audioSampleRate;
+  final int? audioChannels;
+
+  /// Desplazamiento A/V medido (primer PTS de audio − primer PTS de
+  /// video, ms) y diferencia de duraciones (video − audio, ms).
+  final int? avOffsetMs;
+  final int? avDurationDiffMs;
+
+  /// Motivo de audio del segmento (p. ej. `audio_format_timeout`).
+  final String? audioReason;
+
+  /// Muestras de audio descartadas por cola llena (aviso §5.2).
+  final int audioGapSamples;
+
   factory RecordingSegmentInfo.fromMap(Map<Object?, Object?> map) {
     return RecordingSegmentInfo(
       recordingId: map['recordingId'] as String? ?? '',
@@ -439,6 +522,15 @@ class RecordingSegmentInfo {
       ioPhaseMs: (map['ioPhaseMs'] as num?)?.toInt(),
       closedCleanly: map['closedCleanly'] as bool? ?? false,
       reason: map['reason'] as String?,
+      hasAudio: map['hasAudio'] as bool? ?? false,
+      audioDurationMs: (map['audioDurationMs'] as num?)?.toInt(),
+      audioSampleCount: (map['audioSampleCount'] as num?)?.toInt(),
+      audioSampleRate: (map['audioSampleRate'] as num?)?.toInt(),
+      audioChannels: (map['audioChannels'] as num?)?.toInt(),
+      avOffsetMs: (map['avOffsetMs'] as num?)?.toInt(),
+      avDurationDiffMs: (map['avDurationDiffMs'] as num?)?.toInt(),
+      audioReason: map['audioReason'] as String?,
+      audioGapSamples: (map['audioGapSamples'] as num?)?.toInt() ?? 0,
     );
   }
 }
@@ -454,6 +546,7 @@ class RecordingStoppedInfo {
     required this.status,
     this.errorCode,
     this.previewRestoreError,
+    this.audioEnabled = false,
   });
 
   final String recordingId;
@@ -465,6 +558,10 @@ class RecordingStoppedInfo {
   final String status;
   final String? errorCode;
   final String? previewRestoreError;
+
+  /// Audio de la grabación (3.1.3, plan §8.1): `true` si al menos un
+  /// segmento lleva pista AAC.
+  final bool audioEnabled;
 
   int get segmentCount => segments.length;
 
@@ -485,6 +582,7 @@ class RecordingStoppedInfo {
       status: map['status'] as String? ?? '',
       errorCode: map['errorCode'] as String?,
       previewRestoreError: map['previewRestoreError'] as String?,
+      audioEnabled: map['audioEnabled'] as bool? ?? false,
     );
   }
 }
@@ -503,6 +601,9 @@ class RecordingStatusSnapshot {
     this.fps,
     this.errorCode,
     this.segments = const <RecordingSegmentInfo>[],
+    this.audioEnabled = false,
+    this.audioActive = false,
+    this.audioReason,
   });
 
   /// `idle`, `starting`, `recording`, `rotating_segment`, `stopping`
@@ -521,6 +622,15 @@ class RecordingStatusSnapshot {
   /// al re-sincronizar sin haber visto los eventos.
   final List<RecordingSegmentInfo> segments;
 
+  /// Audio de la grabación (3.1.3, plan §8.1): `audioEnabled` es lo
+  /// que se pidió al arrancar, `audioActive` es si el audio se está
+  /// capturando ahora mismo (`false` tras una pérdida en caliente) y
+  /// `audioReason` es el motivo de video-only o de la pérdida.
+  /// Claves ausentes → `false`/`null`: nunca se inventan valores.
+  final bool audioEnabled;
+  final bool audioActive;
+  final String? audioReason;
+
   factory RecordingStatusSnapshot.fromMap(Map<Object?, Object?> map) {
     final List<Object?> rawSegments =
         (map['segments'] as List?)?.cast<Object?>() ?? <Object?>[];
@@ -538,6 +648,9 @@ class RecordingStatusSnapshot {
           .whereType<Map<Object?, Object?>>()
           .map(RecordingSegmentInfo.fromMap)
           .toList(),
+      audioEnabled: map['audioEnabled'] as bool? ?? false,
+      audioActive: map['audioActive'] as bool? ?? false,
+      audioReason: map['audioReason'] as String?,
     );
   }
 

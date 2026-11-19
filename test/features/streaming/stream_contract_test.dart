@@ -284,4 +284,168 @@ void main() {
       expect(corrupt.reason, 'sin_moov');
     });
   });
+
+  group('Campos de audio (3.1.3, plan §8.1)', () {
+    test('el evento de pérdida de audio tiene nombre estable', () {
+      expect(
+        StreamContract.eventRecordingAudioLost,
+        'recording_audio_lost',
+      );
+    });
+
+    test('RecordingStartedInfo lee los campos de audio', () {
+      final RecordingStartedInfo info =
+          RecordingStartedInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'width': 1280,
+            'height': 720,
+            'fps': 30,
+            'bitrateBps': 2500000,
+            'audioEnabled': true,
+            'audioSampleRate': 48000,
+            'audioChannels': 1,
+            'audioEncoderName': 'c2.qti.aac.encoder',
+            'timestampSource': 'REALTIME',
+          });
+      expect(info.audioEnabled, isTrue);
+      expect(info.audioSampleRate, 48000);
+      expect(info.audioChannels, 1);
+      expect(info.audioEncoderName, 'c2.qti.aac.encoder');
+      expect(info.audioReason, isNull);
+      expect(info.timestampSource, 'REALTIME');
+    });
+
+    test('RecordingStartedInfo sin claves de audio no inventa valores', () {
+      final RecordingStartedInfo info =
+          RecordingStartedInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'width': 1280,
+            'height': 720,
+            'fps': 30,
+            'bitrateBps': 2500000,
+          });
+      expect(info.audioEnabled, isFalse);
+      expect(info.audioSampleRate, isNull);
+      expect(info.audioChannels, isNull);
+      expect(info.audioEncoderName, isNull);
+      expect(info.audioReason, isNull);
+      expect(info.timestampSource, isNull);
+    });
+
+    test('RecordingStartedInfo video-only lee el motivo', () {
+      final RecordingStartedInfo info =
+          RecordingStartedInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'width': 1280,
+            'height': 720,
+            'fps': 30,
+            'bitrateBps': 2500000,
+            'audioEnabled': false,
+            'audioReason': 'audio_format_timeout',
+          });
+      expect(info.audioEnabled, isFalse);
+      expect(info.audioReason, 'audio_format_timeout');
+    });
+
+    test('RecordingSegmentInfo lee los campos de audio', () {
+      final RecordingSegmentInfo segment =
+          RecordingSegmentInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'segmentIndex': 0,
+            'fileName': 'rec-1_seg000.mp4',
+            'filePath': '/docs/rec-1_seg000.mp4',
+            'status': 'ready',
+            'durationMs': 60000,
+            'sizeBytes': 18750000,
+            'closedCleanly': true,
+            'hasAudio': true,
+            'audioDurationMs': 59800,
+            'audioSampleCount': 2800,
+            'audioSampleRate': 48000,
+            'audioChannels': 1,
+            'avOffsetMs': 120,
+            'avDurationDiffMs': 200,
+            'audioGapSamples': 3,
+          });
+      expect(segment.hasAudio, isTrue);
+      expect(segment.audioDurationMs, 59800);
+      expect(segment.audioSampleCount, 2800);
+      expect(segment.audioSampleRate, 48000);
+      expect(segment.audioChannels, 1);
+      expect(segment.avOffsetMs, 120);
+      expect(segment.avDurationDiffMs, 200);
+      expect(segment.audioReason, isNull);
+      expect(segment.audioGapSamples, 3);
+    });
+
+    test('RecordingSegmentInfo sin claves de audio es video-only', () {
+      final RecordingSegmentInfo segment =
+          RecordingSegmentInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'segmentIndex': 0,
+            'fileName': 'rec-1_seg000.mp4',
+            'filePath': '/docs/rec-1_seg000.mp4',
+            'status': 'ready',
+            'durationMs': 60000,
+            'sizeBytes': 18750000,
+            'closedCleanly': true,
+          });
+      expect(segment.hasAudio, isFalse);
+      expect(segment.audioDurationMs, isNull);
+      expect(segment.audioSampleCount, isNull);
+      expect(segment.avOffsetMs, isNull);
+      expect(segment.avDurationDiffMs, isNull);
+      expect(segment.audioGapSamples, 0);
+    });
+
+    test('RecordingStatusSnapshot lee el estado de audio', () {
+      final RecordingStatusSnapshot snapshot =
+          RecordingStatusSnapshot.fromMap(<Object?, Object?>{
+            'state': 'recording',
+            'recordingId': 'rec-1',
+            'elapsedMs': 30000,
+            'segmentIndex': 0,
+            'segmentDurationMs': 5000,
+            'audioEnabled': true,
+            'audioActive': false,
+            'audioReason': 'audio_dead_object',
+          });
+      expect(snapshot.audioEnabled, isTrue);
+      expect(snapshot.audioActive, isFalse);
+      expect(snapshot.audioReason, 'audio_dead_object');
+    });
+
+    test('RecordingStatusSnapshot sin claves de audio no inventa valores', () {
+      final RecordingStatusSnapshot snapshot =
+          RecordingStatusSnapshot.fromMap(<Object?, Object?>{
+            'state': 'recording',
+            'recordingId': 'rec-1',
+          });
+      expect(snapshot.audioEnabled, isFalse);
+      expect(snapshot.audioActive, isFalse);
+      expect(snapshot.audioReason, isNull);
+    });
+
+    test('RecordingStoppedInfo lee audioEnabled a nivel de grabación', () {
+      final RecordingStoppedInfo stopped =
+          RecordingStoppedInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'segments': <Map<Object?, Object?>>[],
+            'totalDurationMs': 60000,
+            'totalSizeBytes': 18750000,
+            'status': 'ready',
+            'audioEnabled': true,
+          });
+      expect(stopped.audioEnabled, isTrue);
+      final RecordingStoppedInfo withoutAudio =
+          RecordingStoppedInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'segments': <Map<Object?, Object?>>[],
+            'totalDurationMs': 60000,
+            'totalSizeBytes': 18750000,
+            'status': 'ready',
+          });
+      expect(withoutAudio.audioEnabled, isFalse);
+    });
+  });
 }

@@ -25,9 +25,7 @@ import 'package:transmiti2/shared/widgets/section_label.dart';
 /// Permisos (3.1.0): no se pide ningún permiso al entrar. Al tocar
 /// "Vista previa" se pide la cámara con un motivo en la app antes del
 /// diálogo del sistema. Si se deniega, se puede reintentar; si se deniega
-/// permanentemente, se ofrece abrir los ajustes de la aplicación. El
-/// micrófono no se pide todavía: su camino queda construido para la
-/// subetapa 3.1.3.
+/// permanentemente, se ofrece abrir los ajustes de la aplicación.
 ///
 /// Vista previa (3.1.1): con el permiso concedido, "Vista previa" abre
 /// la cámara trasera real con Camera2 y muestra su imagen en vivo con el
@@ -35,12 +33,14 @@ import 'package:transmiti2/shared/widgets/section_label.dart';
 /// la orientación del sensor). Al salir de la pantalla, al ir a segundo
 /// plano o al girar el teléfono, la cámara se cierra o se reinicia.
 ///
-/// Grabación local (Fase B, 3.1.2): con la vista previa activa, "GRABAR"
-/// graba el partido en MP4 en el teléfono (sin audio, segmentos de ~60 s)
-/// y "DETENER GRABACIÓN" lo para. Mientras se graba, la vista previa no
-/// se para ni se reinicia (ni al salir de la pantalla: la grabación
-/// continúa por el servicio en primer plano y la UI se re-sincroniza al
-/// volver).
+/// Grabación local (Fase B, 3.1.2; audio en 3.1.3): con la vista previa
+/// activa, "GRABAR" graba el partido en MP4 en el teléfono (segmentos
+/// de ~60 s) y "DETENER GRABACIÓN" lo para. Al tocar «GRABAR» se pide
+/// el micrófono: concedido → la grabación lleva audio AAC; denegado →
+/// video-only y el chip muestra «SOLO VIDEO» (la denegación no impide
+/// grabar). Mientras se graba, la vista previa no se para ni se
+/// reinicia (ni al salir de la pantalla: la grabación continúa por el
+/// servicio en primer plano y la UI se re-sincroniza al volver).
 ///
 /// Lo que NO hace todavía: transmisión (Fase 3.2). Ese botón aparece
 /// deshabilitado con la fase en la que llega.
@@ -648,6 +648,10 @@ class _BroadcastScreenState extends State<BroadcastScreen> {
   /// número de segmento es el del controlador (1-based, índice
   /// nativo; fix duraciones 3.1.2, paso 3: antes era
   /// `last.index + 1` de la lista parcial de Dart).
+  /// 3.1.3: el chip «CON AUDIO» / «SOLO VIDEO» refleja el estado
+  /// REAL de la grabación (del evento `recording_started` / del
+  /// snapshot), no el permiso: si el audio se pierde en caliente,
+  /// el chip pasa a «SOLO VIDEO» sin detener la grabación.
   Widget _recordingIndicator(TextTheme text) {
     final int segmentNumber = _recording.currentSegmentDisplay ?? 1;
     return Wrap(
@@ -673,6 +677,7 @@ class _BroadcastScreenState extends State<BroadcastScreen> {
             ),
           ],
         ),
+        _audioChip(text),
         Text(
           _formatDuration(_recording.elapsedMs),
           style: text.bodyMedium,
@@ -683,6 +688,29 @@ class _BroadcastScreenState extends State<BroadcastScreen> {
           style: text.bodyMedium?.copyWith(color: AppColors.textMuted),
         ),
       ],
+    );
+  }
+
+  /// Chip de audio (3.1.3, plan §8.2): «CON AUDIO» solo mientras el
+  /// audio está activo; «SOLO VIDEO» en modo video-only o tras una
+  /// pérdida en caliente. Píldora con borde, mismo estilo compacto
+  /// que el resto de la pantalla (sin botones nuevos).
+  Widget _audioChip(TextTheme text) {
+    final bool withAudio =
+        _recording.audioEnabled && _recording.audioActive;
+    final String label = withAudio ? 'CON AUDIO' : 'SOLO VIDEO';
+    final Color color =
+        withAudio ? AppColors.primary : AppColors.textMuted;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        border: Border.all(color: color),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        label,
+        style: text.labelSmall?.copyWith(color: color),
+      ),
     );
   }
 
