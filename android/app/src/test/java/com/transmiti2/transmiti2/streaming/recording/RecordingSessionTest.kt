@@ -620,4 +620,69 @@ class RecordingSessionTest {
             assertEquals(720, snapshot.height)
             assertEquals(30, snapshot.fps)
         }
+
+    @Test
+    fun `fromSegments suma las duraciones medidas aunque un segmento sea corrupt`() {
+        // Fix duraciones 3.1.2, paso 4: el total no debe ser 0 por un
+        // segmento `corrupt` por otro motivo (p. ej. decode) si su
+        // duración se midió; el nulo solo aporta 0.
+        val segments = listOf(
+            RecordingSegmentResult(
+                recordingId = "rec_20261118_120000_ab12",
+                index = 0,
+                fileName = "rec_20261118_120000_ab12_seg000.mp4",
+                filePath = "/docs/recordings/rec_20261118_120000_ab12_seg000.mp4",
+                status = SegmentStatus.READY,
+                durationMs = 60_000L,
+                sizeBytes = 18_750_000L,
+                sampleCount = 1800,
+                keyframeCount = 30,
+                firstSampleKeyframe = true,
+                ptsMonotonic = true,
+                profileIdc = 66,
+                closedCleanly = true,
+                reason = null,
+            ),
+            RecordingSegmentResult(
+                recordingId = "rec_20261118_120000_ab12",
+                index = 1,
+                fileName = "rec_20261118_120000_ab12_seg001.mp4",
+                filePath = "/docs/recordings/rec_20261118_120000_ab12_seg001.mp4",
+                status = SegmentStatus.CORRUPT,
+                durationMs = 5_000L,
+                sizeBytes = 1_500_000L,
+                sampleCount = 150,
+                keyframeCount = 3,
+                firstSampleKeyframe = true,
+                ptsMonotonic = true,
+                profileIdc = 66,
+                closedCleanly = true,
+                reason = "decode_incompleto",
+            ),
+            RecordingSegmentResult(
+                recordingId = "rec_20261118_120000_ab12",
+                index = 2,
+                fileName = "rec_20261118_120000_ab12_seg002.mp4",
+                filePath = "/docs/recordings/rec_20261118_120000_ab12_seg002.mp4",
+                status = SegmentStatus.CORRUPT,
+                durationMs = null,
+                sizeBytes = 0L,
+                sampleCount = 0,
+                keyframeCount = 0,
+                firstSampleKeyframe = false,
+                ptsMonotonic = true,
+                profileIdc = null,
+                closedCleanly = false,
+                reason = "sin_muestras",
+            ),
+        )
+        val result = RecordingResult.fromSegments(
+            recordingId = "rec_20261118_120000_ab12",
+            segments = segments,
+            errorCode = null,
+            previewRestoreError = null,
+        )
+        assertEquals(65_000L, result.totalDurationMs)
+        assertEquals("partial", result.status)
+    }
 }

@@ -201,4 +201,36 @@ class SegmentVerifierTest {
         assertEquals(SegmentStatus.CORRUPT, result.status)
         assertEquals("decode_incompleto", result.reason)
     }
+
+    @Test
+    fun `duracion del contenedor valida se usa tal cual`() {
+        assertEquals(
+            60_000L,
+            effectiveDurationMs(60_000L, 0L, 59_967_000L),
+        )
+    }
+
+    @Test
+    fun `KEY_DURATION en 0 cae al tramo PTS`() {
+        // Hueco del paso 4: antes, un 0 no caía al fallback y el
+        // segmento quedaba `corrupt` por `duracion_no_valida`.
+        assertEquals(
+            60_000L,
+            effectiveDurationMs(0L, 0L, 59_967_000L),
+        )
+    }
+
+    @Test
+    fun `sin KEY_DURATION cae al tramo PTS`() {
+        assertEquals(
+            60_000L,
+            effectiveDurationMs(null, 0L, 59_967_000L),
+        )
+    }
+
+    @Test
+    fun `sin KEY_DURATION ni PTS no hay duracion`() {
+        assertNull(effectiveDurationMs(null, null, null))
+        assertNull(effectiveDurationMs(0L, null, null))
+    }
 }

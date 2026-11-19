@@ -66,6 +66,29 @@ data class SegmentVerification(
 )
 
 /**
+ * Duración efectiva de un segmento (ms): la del contenedor
+ * (`KEY_DURATION`) cuando es válida (> 0); si falta o es 0, el tramo
+ * PTS de las muestras leídas + 1 frame (33 ms). Pura, testeable en
+ * JVM. (Fix duraciones 3.1.2, paso 4: el fallback solo cubría la
+ * clave ausente, no el valor 0 — un `KEY_DURATION = 0` clasificaba el
+ * segmento `corrupt` con `duracion_no_valida` aunque las muestras
+ * estuvieran completas.)
+ */
+fun effectiveDurationMs(
+    keyDurationMs: Long?,
+    firstPtsUs: Long?,
+    lastPtsUs: Long?,
+): Long? {
+    if (keyDurationMs != null && keyDurationMs > 0) {
+        return keyDurationMs
+    }
+    if (firstPtsUs != null && lastPtsUs != null) {
+        return (lastPtsUs - firstPtsUs) / 1000 + 33
+    }
+    return null
+}
+
+/**
  * Clasifica un segmento a partir de sus medidas (plan §7.1). Pura:
  * no toca Android, testeable en JVM.
  *
@@ -345,12 +368,13 @@ class DefaultSegmentVerifier(
                     }
                     extractor.advance()
                 }
-                if (durationMs == null && firstPtsUs != null &&
-                    lastPtsUs != null
-                ) {
-                    // Sin duración en el contenedor: tramo PTS + 1 frame.
-                    durationMs = (lastPtsUs!! - firstPtsUs!!) / 1000 + 33
-                }
+                // Duración efectiva: si el contenedor no trae duración
+                // (o trae 0), el tramo PTS de las muestras (paso 4).
+                durationMs = effectiveDurationMs(
+                    durationMs,
+                    firstPtsUs,
+                    lastPtsUs,
+                )
                 // EOS al decodificador y drenado final.
                 if (decoder != null) {
                     var eosQueued = false
