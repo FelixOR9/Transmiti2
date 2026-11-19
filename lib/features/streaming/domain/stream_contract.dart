@@ -297,6 +297,7 @@ class RecordingInfo {
     required this.status,
     this.segments = const <RecordingSegmentInfo>[],
     this.audioEnabled = false,
+    this.droppedInputBuffers = 0,
   });
 
   final String recordingId;
@@ -316,6 +317,13 @@ class RecordingInfo {
   /// segmento lleva pista AAC (`RecordingResult.audioEnabled`).
   final bool audioEnabled;
 
+  /// Instrumentación de audio 3.1.3: buffers de entrada AAC
+  /// descartados porque la cola del codec estaba llena
+  /// (`droppedInputBuffers` nativo). El método `stopRecording`
+  /// devuelve el mismo mapa que el evento `recording_stopped`, así
+  /// que la parada por método también trae el valor real; ausente → 0.
+  final int droppedInputBuffers;
+
   factory RecordingInfo.fromMap(Map<Object?, Object?> map) {
     final List<Object?> rawSegments =
         (map['segments'] as List?)?.cast<Object?>() ?? <Object?>[];
@@ -330,6 +338,8 @@ class RecordingInfo {
           .map(RecordingSegmentInfo.fromMap)
           .toList(),
       audioEnabled: map['audioEnabled'] as bool? ?? false,
+      droppedInputBuffers:
+          (map['droppedInputBuffers'] as num?)?.toInt() ?? 0,
     );
   }
 }
@@ -457,6 +467,7 @@ class RecordingSegmentInfo {
     this.avDurationDiffMs,
     this.audioReason,
     this.audioGapSamples = 0,
+    this.audioStartOffsetMs,
   });
 
   final String recordingId;
@@ -503,6 +514,12 @@ class RecordingSegmentInfo {
   /// Muestras de audio descartadas por cola llena (aviso §5.2).
   final int audioGapSamples;
 
+  /// Desplazamiento (ms) de la primera muestra de audio respecto al
+  /// origen común del segmento (instrumentación de audio 3.1.3): `null`
+  /// cuando ninguna muestra llegó a la sesión (H1) o cuando el motor
+  /// no lo envía (segmentos de 3.1.2). Nunca se inventa.
+  final int? audioStartOffsetMs;
+
   factory RecordingSegmentInfo.fromMap(Map<Object?, Object?> map) {
     return RecordingSegmentInfo(
       recordingId: map['recordingId'] as String? ?? '',
@@ -531,6 +548,7 @@ class RecordingSegmentInfo {
       avDurationDiffMs: (map['avDurationDiffMs'] as num?)?.toInt(),
       audioReason: map['audioReason'] as String?,
       audioGapSamples: (map['audioGapSamples'] as num?)?.toInt() ?? 0,
+      audioStartOffsetMs: (map['audioStartOffsetMs'] as num?)?.toInt(),
     );
   }
 }
@@ -547,6 +565,7 @@ class RecordingStoppedInfo {
     this.errorCode,
     this.previewRestoreError,
     this.audioEnabled = false,
+    this.droppedInputBuffers = 0,
   });
 
   final String recordingId;
@@ -562,6 +581,11 @@ class RecordingStoppedInfo {
   /// Audio de la grabación (3.1.3, plan §8.1): `true` si al menos un
   /// segmento lleva pista AAC.
   final bool audioEnabled;
+
+  /// Entradas PCM descartadas por el encoder AAC al parar
+  /// (instrumentación de audio 3.1.3: `dequeueInputBuffer` sin búfer
+  /// libre). Ausente → 0.
+  final int droppedInputBuffers;
 
   int get segmentCount => segments.length;
 
@@ -583,6 +607,7 @@ class RecordingStoppedInfo {
       errorCode: map['errorCode'] as String?,
       previewRestoreError: map['previewRestoreError'] as String?,
       audioEnabled: map['audioEnabled'] as bool? ?? false,
+      droppedInputBuffers: (map['droppedInputBuffers'] as num?)?.toInt() ?? 0,
     );
   }
 }

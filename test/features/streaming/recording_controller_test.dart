@@ -427,6 +427,33 @@ void main() {
           'Última parada: estado=ready duración total=12000ms segmentos=1',
         ),
       );
+      // La parada por método trae el contador del falso (0 por
+      // defecto, nunca inventado): el método devuelve el mismo mapa
+      // que el evento `recording_stopped`.
+      expect(
+        recording.diagnosticText,
+        contains('descartadasEntradaAAC=0'),
+      );
+    });
+
+    testWidgets('stop por método trae el contador real de descartadas', (
+      WidgetTester tester,
+    ) async {
+      await pumpController(tester);
+      await recording.start();
+      await tester.pump();
+
+      // El método devuelve el contador real del motor (el mismo valor
+      // que el evento `recording_stopped`): la parada por método no
+      // lo pierde.
+      service.stopDroppedInputBuffers = 5;
+      await recording.stop();
+      await tester.pump();
+
+      expect(
+        recording.diagnosticText,
+        contains('descartadasEntradaAAC=5'),
+      );
     });
 
     testWidgets('stop usa los segmentos del método aunque falte un evento', (
@@ -866,6 +893,79 @@ void main() {
         ),
       );
     });
+
+    testWidgets(
+      'el diagnóstico muestra el origen de timestamps y los datos de '
+      'audio por segmento',
+      (WidgetTester tester) async {
+        await pumpController(tester);
+        service.requestOutcomes[PermissionKind.microphone] =
+            PermissionStatus.granted;
+        await recording.start();
+        await tester.pump();
+        service.emitEvent(startedEventWithAudio());
+        await tester.pump();
+
+        // Segmento con audio: primera muestra a 85 ms del origen y
+        // 3 muestras descartadas; segmento video-only sin claves.
+        final Map<String, Object?> withAudio =
+            segmentEventWithAudio(0)
+              ..['audioStartOffsetMs'] = 85
+              ..['audioGapSamples'] = 3;
+        service.emitEvent(withAudio);
+        await tester.pump();
+        service.emitEvent(segmentEvent(1));
+        await tester.pump();
+
+        final String? text = recording.diagnosticText;
+        expect(text, isNotNull);
+        expect(text, contains('Audio: sí (48 kHz mono)'));
+        expect(text, contains('Origen timestamps: REALTIME'));
+        expect(
+          text,
+          contains(
+            'seg0: ready 60000ms motivo=— cerradoLimpio=sí fps=29.9 '
+            'muestras=1800 verif=1798 fase=61.2s audio=59800ms av=120ms '
+            'inicioAudio=85 huecosAudio=3',
+          ),
+        );
+        // Sin claves de audio: `audio=no` y el inicio como `—`.
+        expect(
+          text,
+          contains(
+            'seg1: ready 60000ms motivo=— cerradoLimpio=sí fps=29.9 '
+            'muestras=1800 verif=1798 fase=61.2s audio=no '
+            'inicioAudio=— huecosAudio=0',
+          ),
+        );
+      },
+    );
+
+    testWidgets(
+      'el diagnóstico muestra las descartadas de entrada AAC al parar',
+      (WidgetTester tester) async {
+        await pumpController(tester);
+        await recording.start();
+        await tester.pump();
+
+        // Sin evento `recording_started`: el origen es desconocido.
+        expect(recording.diagnosticText, contains('Origen timestamps: —'));
+
+        // Parada externa por evento con el contador nativo.
+        final Map<String, Object?> stopped = stoppedEvent()
+          ..['droppedInputBuffers'] = 5;
+        service.emitEvent(stopped);
+        await tester.pump();
+
+        expect(
+          recording.diagnosticText,
+          contains(
+            'Última parada: estado=ready duración total=12000ms '
+            'segmentos=1 descartadasEntradaAAC=5',
+          ),
+        );
+      },
+    );
 
     testWidgets('al volver, el snapshot re-sincroniza el estado de audio', (
       WidgetTester tester,

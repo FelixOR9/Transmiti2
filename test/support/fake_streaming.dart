@@ -61,6 +61,9 @@ class FakeStreamingService implements StreamingService {
   String? stopRecordingError;
   int startRecordingCalls = 0;
   int stopRecordingCalls = 0;
+  // Instrumentación de audio 3.1.3: buffers de entrada AAC
+  // descartados que devuelve el método `stopRecording` (0 por defecto).
+  int stopDroppedInputBuffers = 0;
   RecordingOptions? lastRecordingOptions;
   RecordingStatusSnapshot recordingStatus =
       RecordingStatusSnapshot.idle();
@@ -191,6 +194,7 @@ class FakeStreamingService implements StreamingService {
       durationMs: 12000,
       sizeBytes: 3750000,
       status: 'ready',
+      droppedInputBuffers: stopDroppedInputBuffers,
       segments: <RecordingSegmentInfo>[
         RecordingSegmentInfo(
           recordingId: recordingId,

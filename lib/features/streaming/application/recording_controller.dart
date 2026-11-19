@@ -323,6 +323,12 @@ class RecordingController extends ChangeNotifier {
     // hubo. Se muestra también tras la parada: describe la última
     // grabación.
     text.writeln('Audio: ${_audioHeader()}');
+    // Instrumentación de audio 3.1.3: el origen de timestamps del
+    // teléfono decide si un offset A/V es sospechoso (H2). `—` sin
+    // el evento `recording_started` todavía.
+    text.writeln(
+      'Origen timestamps: ${_startedInfo?.timestampSource ?? '—'}',
+    );
     if (_audioLostReason != null) {
       text.writeln(
         'Audio perdido en seg ${_audioLostSegmentIndex?.toString() ?? '—'}: '
@@ -372,7 +378,8 @@ class RecordingController extends ChangeNotifier {
       tail.add(
         'Última parada: estado=${_lastStopped!.status} '
         'duración total=${_lastStopped!.totalDurationMs}ms '
-        'segmentos=${_lastStopped!.segments.length}',
+        'segmentos=${_lastStopped!.segments.length} '
+        'descartadasEntradaAAC=${_lastStopped!.droppedInputBuffers}',
       );
     }
     for (int i = 0; i < tail.length; i++) {
@@ -420,12 +427,20 @@ class RecordingController extends ChangeNotifier {
   /// Sufijo de audio de una línea de segmento (3.1.3, plan §8.2):
   /// duración de audio y offset A/V cuando hay pista AAC, `audio=no`
   /// en video-only (incluidos los segmentos de 3.1.2, sin claves).
+  /// Instrumentación de audio 3.1.3: `inicioAudio` es el offset de la
+  /// primera muestra de audio de la sesión (`null` = ninguna muestra
+  /// llegó, H1) y `huecosAudio` las muestras descartadas; `av=` sigue
+  /// siendo el offset del verificador. Un `null` se muestra como `—`.
   String _segmentAudioSuffix(RecordingSegmentInfo segment) {
+    final String inicioAudio =
+        segment.audioStartOffsetMs?.toString() ?? '—';
+    final String huecosAudio = segment.audioGapSamples.toString();
     if (!segment.hasAudio) {
-      return ' audio=no';
+      return ' audio=no inicioAudio=$inicioAudio huecosAudio=$huecosAudio';
     }
     return ' audio=${segment.audioDurationMs?.toString() ?? '—'}ms '
-        'av=${segment.avOffsetMs?.toString() ?? '—'}ms';
+        'av=${segment.avOffsetMs?.toString() ?? '—'}ms '
+        'inicioAudio=$inicioAudio huecosAudio=$huecosAudio';
   }
 
   StreamSubscription<Map<String, Object?>>? _eventsSubscription;
@@ -716,6 +731,7 @@ class RecordingController extends ChangeNotifier {
         totalSizeBytes: info.sizeBytes,
         status: info.status,
         audioEnabled: info.audioEnabled,
+        droppedInputBuffers: info.droppedInputBuffers,
       );
       _applyStoppedSegments(_lastStopped!);
       _state = RecordingState.idle;

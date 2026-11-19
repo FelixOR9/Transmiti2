@@ -378,6 +378,56 @@ void main() {
       expect(segment.audioGapSamples, 3);
     });
 
+    test('RecordingSegmentInfo lee audioStartOffsetMs cuando lo hay', () {
+      final RecordingSegmentInfo segment =
+          RecordingSegmentInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'segmentIndex': 0,
+            'fileName': 'rec-1_seg000.mp4',
+            'filePath': '/docs/rec-1_seg000.mp4',
+            'status': 'ready',
+            'durationMs': 60000,
+            'sizeBytes': 18750000,
+            'closedCleanly': true,
+            'hasAudio': true,
+            'audioStartOffsetMs': 85,
+            'audioGapSamples': 3,
+          });
+      expect(segment.audioStartOffsetMs, 85);
+      expect(segment.audioGapSamples, 3);
+    });
+
+    test('RecordingSegmentInfo sin audioStartOffsetMs no inventa valores', () {
+      // Ausente (segmentos de 3.1.2) y `null` explícito (ninguna
+      // muestra llegó a la sesión, H1): en ambos casos `null`.
+      final RecordingSegmentInfo absent =
+          RecordingSegmentInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'segmentIndex': 0,
+            'fileName': 'rec-1_seg000.mp4',
+            'filePath': '/docs/rec-1_seg000.mp4',
+            'status': 'ready',
+            'durationMs': 60000,
+            'sizeBytes': 18750000,
+            'closedCleanly': true,
+          });
+      expect(absent.audioStartOffsetMs, isNull);
+      final RecordingSegmentInfo explicitNull =
+          RecordingSegmentInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'segmentIndex': 0,
+            'fileName': 'rec-1_seg000.mp4',
+            'filePath': '/docs/rec-1_seg000.mp4',
+            'status': 'partial',
+            'durationMs': 30625,
+            'sizeBytes': 18750000,
+            'closedCleanly': true,
+            'hasAudio': false,
+            'audioStartOffsetMs': null,
+          });
+      expect(explicitNull.audioStartOffsetMs, isNull);
+    });
+
     test('RecordingSegmentInfo sin claves de audio es video-only', () {
       final RecordingSegmentInfo segment =
           RecordingSegmentInfo.fromMap(<Object?, Object?>{
@@ -424,6 +474,58 @@ void main() {
       expect(snapshot.audioEnabled, isFalse);
       expect(snapshot.audioActive, isFalse);
       expect(snapshot.audioReason, isNull);
+    });
+
+    test('RecordingStoppedInfo lee droppedInputBuffers cuando lo hay', () {
+      final RecordingStoppedInfo stopped =
+          RecordingStoppedInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'segments': <Map<Object?, Object?>>[],
+            'totalDurationMs': 60000,
+            'totalSizeBytes': 18750000,
+            'status': 'ready',
+            'audioEnabled': true,
+            'droppedInputBuffers': 7,
+          });
+      expect(stopped.droppedInputBuffers, 7);
+    });
+
+    test('RecordingInfo lee droppedInputBuffers cuando lo hay', () {
+      final RecordingInfo info =
+          RecordingInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'filePath': '/docs/recordings/rec-1_seg000.mp4',
+            'durationMs': 60000,
+            'sizeBytes': 18750000,
+            'status': 'ready',
+            'audioEnabled': true,
+            'droppedInputBuffers': 7,
+          });
+      expect(info.droppedInputBuffers, 7);
+    });
+
+    test('RecordingInfo sin droppedInputBuffers es 0', () {
+      final RecordingInfo info =
+          RecordingInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'filePath': '/docs/recordings/rec-1_seg000.mp4',
+            'durationMs': 60000,
+            'sizeBytes': 18750000,
+            'status': 'ready',
+          });
+      expect(info.droppedInputBuffers, 0);
+    });
+
+    test('RecordingStoppedInfo sin droppedInputBuffers es 0', () {
+      final RecordingStoppedInfo stopped =
+          RecordingStoppedInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'segments': <Map<Object?, Object?>>[],
+            'totalDurationMs': 60000,
+            'totalSizeBytes': 18750000,
+            'status': 'ready',
+          });
+      expect(stopped.droppedInputBuffers, 0);
     });
 
     test('RecordingStoppedInfo lee audioEnabled a nivel de grabación', () {
