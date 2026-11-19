@@ -213,6 +213,10 @@ class RecordingSessionTest {
     ) : SegmentVerifier {
         var verifyCalls = 0
         var lastClosedCleanly: Boolean? = null
+        /** Última expectativa de audio recibida (3.1.3). */
+        var lastExpectedAudio: Boolean? = null
+        var lastExpectedSampleRate: Int? = null
+        var lastExpectedChannels: Int? = null
         /** Retardo artificial por verificación (prueba de serie). */
         var verifyDelayMs: Long = 0L
         /** Concurrencia observada dentro de `verify()`. */
@@ -225,9 +229,15 @@ class RecordingSessionTest {
             expectedWidth: Int?,
             expectedHeight: Int?,
             expectedFps: Int?,
+            expectedAudio: Boolean?,
+            expectedSampleRate: Int?,
+            expectedChannels: Int?,
         ): SegmentVerification {
             verifyCalls++
             lastClosedCleanly = closedCleanly
+            lastExpectedAudio = expectedAudio
+            lastExpectedSampleRate = expectedSampleRate
+            lastExpectedChannels = expectedChannels
             val current = currentConcurrent.incrementAndGet()
             maxConcurrent.updateAndGet { max -> maxOf(max, current) }
             try {

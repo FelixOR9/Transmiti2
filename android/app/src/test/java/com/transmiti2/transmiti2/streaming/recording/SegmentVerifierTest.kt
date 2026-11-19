@@ -36,12 +36,39 @@ class SegmentVerifierTest {
         expectedWidth: Int? = 1280,
         expectedHeight: Int? = 720,
         expectedFps: Int? = 30,
+        expectedAudio: Boolean? = null,
+        expectedSampleRate: Int? = null,
+        expectedChannels: Int? = null,
     ) = classifySegment(
         closedCleanly,
         checks,
         expectedWidth,
         expectedHeight,
         expectedFps,
+        expectedAudio,
+        expectedSampleRate,
+        expectedChannels,
+    )
+
+    // Checks con audio completo y verificado (3.1.3): 60 s de video a
+    // 30 FPS y ~2812 tramas AAC a 48 kHz mono; offset A/V 120 ms y
+    // diferencia de duraciones 80 ms (dentro de las tolerancias de
+    // 500 ms). La duración de referencia de ExoPlayer es la de video
+    // (60 000 ms, mayor que la de audio).
+    private fun audioChecks() = goodChecks().copy(
+        hasAudioTrack = true,
+        audioSampleCount = 2812,
+        audioDurationMs = 59_920L,
+        audioSampleRate = 48_000,
+        audioChannels = 1,
+        audioFirstPtsUs = 120_000L,
+        audioLastPtsUs = 60_018_667L,
+        audioPtsMonotonic = true,
+        audioDecodeOk = true,
+        audioDecodedFrames = 2812,
+        avOffsetMs = 120L,
+        avDurationDiffMs = 80L,
+        referenceDurationMs = 60_000L,
     )
 
     @Test
@@ -313,12 +340,18 @@ class SegmentVerifierTest {
         expectedHeight: Int? = 720,
         expectedFps: Int? = 30,
         reason: String = "verification_timeout",
+        expectedAudio: Boolean? = null,
+        expectedSampleRate: Int? = null,
+        expectedChannels: Int? = null,
     ) = classifyIncomplete(
         checks,
         expectedWidth,
         expectedHeight,
         expectedFps,
         reason,
+        expectedAudio,
+        expectedSampleRate,
+        expectedChannels,
     )
 
     @Test
@@ -561,5 +594,455 @@ class SegmentVerifierTest {
         val esperaTotalMs =
             1800L * DefaultSegmentVerifier.drainTimeoutUs(false) / 1000
         assertEquals(0L, esperaTotalMs)
+    }
+
+    // --- Audio (3.1.3, plan §7.3). Comprueban RESULTADOS, no solo
+    // llamadas: los checks se construyen a mano con los campos de
+    // audio medidos.
+
+    @Test
+    fun `ready con audio verificado`() {
+        val result = classify(
+            closedCleanly = true,
+            checks = audioChecks(),
+            expectedAudio = true,
+            expectedSampleRate = 48_000,
+            expectedChannels = 1,
+        )
+        assertEquals(SegmentStatus.READY, result.status)
+        assertNull(result.reason)
+    }
+
+    @Test
+    fun `interrumpido con audio verificado es partial sin motivo`() {
+        val result = classify(
+            closedCleanly = false,
+            checks = audioChecks(),
+            expectedAudio = true,
+            expectedSampleRate = 48_000,
+            expectedChannels = 1,
+        )
+        assertEquals(SegmentStatus.PARTIAL, result.status)
+        assertNull(result.reason)
+    }
+
+    @Test
+    fun `ready video-only con expectedAudio false`() {
+        // Sin cambio respecto a hoy: sin pista de audio y sin audio
+        // esperado, la clasificación es la de video.
+        val result = classify(
+            closedCleanly = true,
+            expectedAudio = false,
+        )
+        assertEquals(SegmentStatus.READY, result.status)
+        assertNull(result.reason)
+    }
+
+    @Test
+    fun `audio esperado sin pista es partial sin_pista_audio, no corrupt`() {
+        // Video válido + audio esperado pero ausente: el video sigue
+        // siendo utilizable (plan §7.3, regla 5).
+        val result = classify(
+            closedCleanly = true,
+            expectedAudio = true,
+            expectedSampleRate = 48_000,
+            expectedChannels = 1,
+        )
+        assertEquals(SegmentStatus.PARTIAL, result.status)
+        assertEquals("sin_pista_audio", result.reason)
+    }
+
+    @Test
+    fun `audio esperado con pista sin muestras es partial audio_sin_muestras`() {
+        val result = classify(
+            closedCleanly = true,
+            checks = goodChecks().copy(hasAudioTrack = true),
+            expectedAudio = true,
+        )
+        assertEquals(SegmentStatus.PARTIAL, result.status)
+        assertEquals("audio_sin_muestras", result.reason)
+    }
+
+    @Test
+    fun `audio no monotono es partial audio_no_monotono`() {
+        val result = classify(
+            closedCleanly = true,
+            checks = audioChecks().copy(audioPtsMonotonic = false),
+            expectedAudio = true,
+        )
+        assertEquals(SegmentStatus.PARTIAL, result.status)
+        assertEquals("audio_no_monotono", result.reason)
+    }
+
+    @Test
+    fun `sampleRate distinto del esperado es partial audio_formato_no_coincide`() {
+        // Motivo añadido en este commit (no está en el plan §7.3):
+        // la pista existe y tiene muestras, así que `sin_pista_audio`
+        // o `audio_sin_muestras` mentirían, y la duración puede
+        // coincidir, así que `duracion_audio_no_coincide` también.
+        val result = classify(
+            closedCleanly = true,
+            checks = audioChecks(),
+            expectedAudio = true,
+            expectedSampleRate = 44_100,
+            expectedChannels = 1,
+        )
+        assertEquals(SegmentStatus.PARTIAL, result.status)
+        assertEquals("audio_formato_no_coincide", result.reason)
+    }
+
+    @Test
+    fun `canales distintos del esperado es partial audio_formato_no_coincide`() {
+        val result = classify(
+            closedCleanly = true,
+            checks = audioChecks(),
+            expectedAudio = true,
+            expectedSampleRate = 48_000,
+            expectedChannels = 2,
+        )
+        assertEquals(SegmentStatus.PARTIAL, result.status)
+        assertEquals("audio_formato_no_coincide", result.reason)
+    }
+
+    @Test
+    fun `offset AV de 500 ms en el limite es ready`() {
+        val result = classify(
+            closedCleanly = true,
+            checks = audioChecks().copy(avOffsetMs = 500L),
+            expectedAudio = true,
+        )
+        assertEquals(SegmentStatus.READY, result.status)
+        assertNull(result.reason)
+    }
+
+    @Test
+    fun `offset AV de 501 ms es partial audio_desincronizado`() {
+        val result = classify(
+            closedCleanly = true,
+            checks = audioChecks().copy(avOffsetMs = 501L),
+            expectedAudio = true,
+        )
+        assertEquals(SegmentStatus.PARTIAL, result.status)
+        assertEquals("audio_desincronizado", result.reason)
+    }
+
+    @Test
+    fun `offset AV negativo de menos 501 ms es partial audio_desincronizado`() {
+        // El offset puede ser negativo (audio antes que video).
+        val result = classify(
+            closedCleanly = true,
+            checks = audioChecks().copy(avOffsetMs = -501L),
+            expectedAudio = true,
+        )
+        assertEquals(SegmentStatus.PARTIAL, result.status)
+        assertEquals("audio_desincronizado", result.reason)
+    }
+
+    @Test
+    fun `diferencia de duraciones de 500 ms en el limite es ready`() {
+        val result = classify(
+            closedCleanly = true,
+            checks = audioChecks().copy(avDurationDiffMs = 500L),
+            expectedAudio = true,
+        )
+        assertEquals(SegmentStatus.READY, result.status)
+        assertNull(result.reason)
+    }
+
+    @Test
+    fun `diferencia de duraciones de 501 ms es partial duracion_audio_no_coincide`() {
+        val result = classify(
+            closedCleanly = true,
+            checks = audioChecks().copy(avDurationDiffMs = 501L),
+            expectedAudio = true,
+        )
+        assertEquals(SegmentStatus.PARTIAL, result.status)
+        assertEquals("duracion_audio_no_coincide", result.reason)
+    }
+
+    @Test
+    fun `audio sin decodificar completo es partial audio_decode_incompleto`() {
+        val result = classify(
+            closedCleanly = true,
+            checks = audioChecks().copy(
+                audioDecodeOk = false,
+                audioDecodedFrames = 1400,
+            ),
+            expectedAudio = true,
+        )
+        assertEquals(SegmentStatus.PARTIAL, result.status)
+        assertEquals("audio_decode_incompleto", result.reason)
+    }
+
+    @Test
+    fun `corrupt por video aunque el audio sea perfecto`() {
+        // El audio no salva un video defectuoso (plan §7.3, regla 1).
+        val result = classify(
+            closedCleanly = true,
+            checks = audioChecks().copy(sampleCount = 0),
+            expectedAudio = true,
+        )
+        assertEquals(SegmentStatus.CORRUPT, result.status)
+        assertEquals("sin_muestras", result.reason)
+    }
+
+    @Test
+    fun `expectedAudio null con audio medido clasifica como video`() {
+        // Recuperación: el audio medido es solo diagnóstico, ni se
+        // exige ni se prohíbe.
+        val result = classify(
+            closedCleanly = true,
+            checks = audioChecks(),
+            expectedAudio = null,
+        )
+        assertEquals(SegmentStatus.READY, result.status)
+        assertNull(result.reason)
+    }
+
+    @Test
+    fun `expectedAudio null sin audio clasifica como video`() {
+        val result = classify(
+            closedCleanly = true,
+            expectedAudio = null,
+        )
+        assertEquals(SegmentStatus.READY, result.status)
+        assertNull(result.reason)
+    }
+
+    @Test
+    fun `expectedAudio null con audio defectuoso no lo denuncia`() {
+        // Sin expectativa no hay fallo de audio que denunciar: el
+        // video válido manda.
+        val result = classify(
+            closedCleanly = true,
+            checks = audioChecks().copy(audioDecodeOk = false),
+            expectedAudio = null,
+        )
+        assertEquals(SegmentStatus.READY, result.status)
+        assertNull(result.reason)
+    }
+
+    @Test
+    fun `expectedAudio false con audio presente lo ignora`() {
+        // Modo video-only: el audio medido es solo diagnóstico.
+        val result = classify(
+            closedCleanly = true,
+            checks = audioChecks().copy(audioDecodeOk = false),
+            expectedAudio = false,
+        )
+        assertEquals(SegmentStatus.READY, result.status)
+        assertNull(result.reason)
+    }
+
+    @Test
+    fun `la duracion de referencia es el maximo de video y audio`() {
+        // ExoPlayer reporta la pista más larga: con audio más largo
+        // que el video, la referencia es la de audio.
+        val result = classify(
+            closedCleanly = true,
+            checks = audioChecks().copy(
+                audioDurationMs = 60_100L,
+                avDurationDiffMs = -100L,
+                referenceDurationMs = 60_100L,
+                exoplayerDurationMs = 60_100L,
+            ),
+            expectedAudio = true,
+        )
+        assertEquals(SegmentStatus.READY, result.status)
+        assertNull(result.reason)
+    }
+
+    @Test
+    fun `ExoPlayer contra la duracion de referencia, no la de video`() {
+        // ExoPlayer 60 100 ms coincide con la referencia (audio más
+        // largo); contra la duración de video (60 000 ms) la
+        // diferencia también estaría dentro de 100 ms, así que este
+        // caso usa 60 250 ms: fuera de la referencia por 150 ms.
+        val result = classify(
+            closedCleanly = true,
+            checks = audioChecks().copy(
+                audioDurationMs = 60_100L,
+                avDurationDiffMs = -100L,
+                referenceDurationMs = 60_100L,
+                exoplayerDurationMs = 60_250L,
+            ),
+            expectedAudio = true,
+        )
+        assertEquals(SegmentStatus.CORRUPT, result.status)
+        assertEquals("duracion_no_coincide", result.reason)
+    }
+
+    // --- Regresión 3.1.2 con los casos reales del teléfono
+    // (plan §10.1, D13): los segmentos `ready` siguen clasificando
+    // `ready` con `expectedAudio = false`.
+
+    private fun phoneChecks(durationMs: Long, sampleCount: Int) =
+        goodChecks().copy(
+            durationMs = durationMs,
+            sampleCount = sampleCount,
+            fpsMeasured = 30.0,
+            exoplayerDurationMs = durationMs,
+            referenceDurationMs = durationMs,
+        )
+
+    @Test
+    fun `regresion 3_1_2 rec_20261119_112803_30a2 sigue ready sin audio`() {
+        val segments = listOf(
+            60_007L to 1800,
+            60_007L to 1800,
+            20_358L to 611,
+        )
+        for ((durationMs, sampleCount) in segments) {
+            val result = classify(
+                closedCleanly = true,
+                checks = phoneChecks(durationMs, sampleCount),
+                expectedAudio = false,
+            )
+            assertEquals(SegmentStatus.READY, result.status)
+            assertNull(result.reason)
+        }
+    }
+
+    @Test
+    fun `regresion 3_1_2 rec_20261119_113418_e952 sigue ready sin audio`() {
+        val segments = listOf(
+            60_007L to 1800,
+            60_007L to 1800,
+            60_007L to 1800,
+            31_719L to 952,
+        )
+        for ((durationMs, sampleCount) in segments) {
+            val result = classify(
+                closedCleanly = true,
+                checks = phoneChecks(durationMs, sampleCount),
+                expectedAudio = false,
+            )
+            assertEquals(SegmentStatus.READY, result.status)
+            assertNull(result.reason)
+        }
+    }
+
+    // --- `classifyIncomplete` con audio (3.1.3).
+
+    @Test
+    fun `timeout con audio parcial medido es partial verification_timeout y la duracion de audio sobrevive`() {
+        // El audio se midió a medias (1400 tramas, decode sin
+        // completar, diferencia de duraciones enorme por la lectura
+        // cortada): nada de eso es un fallo de audio establecido, así
+        // que el motivo que sobrevive es el del timeout y la duración
+        // de audio medida no se descarta.
+        val result = classifyTimedOut(
+            checks = audioChecks().copy(
+                audioSampleCount = 1400,
+                audioDurationMs = 30_000L,
+                avDurationDiffMs = 30_000L,
+                audioDecodeOk = false,
+                audioDecodedFrames = 1400,
+                exoplayerReady = false,
+                exoplayerDurationMs = null,
+            ),
+            expectedAudio = true,
+            expectedSampleRate = 48_000,
+            expectedChannels = 1,
+        )
+        assertEquals(SegmentStatus.PARTIAL, result.status)
+        assertEquals("verification_timeout", result.reason)
+        assertEquals(30_000L, result.checks.audioDurationMs)
+        assertEquals(1400, result.checks.audioSampleCount)
+    }
+
+    @Test
+    fun `timeout con audio esperado y escaneo de pistas sin audio es partial sin_pista_audio`() {
+        // El escaneo de pistas corrió (hay pista AVC) y no encontró
+        // audio: la ausencia es definitiva aunque la verificación no
+        // terminara.
+        val result = classifyTimedOut(
+            checks = goodChecks().copy(
+                exoplayerReady = false,
+                exoplayerDurationMs = null,
+            ),
+            expectedAudio = true,
+        )
+        assertEquals(SegmentStatus.PARTIAL, result.status)
+        assertEquals("sin_pista_audio", result.reason)
+    }
+
+    @Test
+    fun `timeout con offset AV medido fuera de tolerancia es partial audio_desincronizado`() {
+        // El offset se mide con los primeros PTS de ambas pistas y no
+        // depende de terminar la lectura: es un defecto establecido.
+        val result = classifyTimedOut(
+            checks = audioChecks().copy(
+                avOffsetMs = 800L,
+                exoplayerReady = false,
+                exoplayerDurationMs = null,
+            ),
+            expectedAudio = true,
+        )
+        assertEquals(SegmentStatus.PARTIAL, result.status)
+        assertEquals("audio_desincronizado", result.reason)
+    }
+
+    @Test
+    fun `timeout sin muestras de audio todavia es verification_timeout, no audio_sin_muestras`() {
+        // Pista de audio encontrada pero ninguna muestra leída aún:
+        // el bucle pudo cortarse antes de la primera muestra de
+        // audio; no se inventa el fallo.
+        val result = classifyTimedOut(
+            checks = goodChecks().copy(
+                hasAudioTrack = true,
+                audioSampleRate = 48_000,
+                audioChannels = 1,
+                exoplayerReady = false,
+                exoplayerDurationMs = null,
+            ),
+            expectedAudio = true,
+        )
+        assertEquals(SegmentStatus.PARTIAL, result.status)
+        assertEquals("verification_timeout", result.reason)
+    }
+
+    // --- `effectiveAudioDurationMs` (3.1.3). Espejo de
+    // `effectiveDurationMs` para video, con 1 trama AAC (1024
+    // muestras) en vez de 1 frame de video (33 ms).
+
+    @Test
+    fun `duracion de audio del contenedor valida se usa tal cual`() {
+        assertEquals(
+            60_000L,
+            effectiveAudioDurationMs(60_000L, 0L, 59_979_000L, 48_000),
+        )
+    }
+
+    @Test
+    fun `KEY_DURATION de audio en 0 cae al tramo PTS mas una trama`() {
+        // 59 979 ms de tramo + 21 ms (1 trama a 48 kHz) = 60 000 ms.
+        assertEquals(
+            60_000L,
+            effectiveAudioDurationMs(0L, 0L, 59_979_000L, 48_000),
+        )
+    }
+
+    @Test
+    fun `sin KEY_DURATION de audio cae al tramo PTS mas una trama`() {
+        assertEquals(
+            60_000L,
+            effectiveAudioDurationMs(null, 0L, 59_979_000L, 48_000),
+        )
+    }
+
+    @Test
+    fun `una trama a 44,1 kHz son 23 ms`() {
+        // 59 977 ms de tramo + 23 ms = 60 000 ms.
+        assertEquals(
+            60_000L,
+            effectiveAudioDurationMs(null, 0L, 59_977_000L, 44_100),
+        )
+    }
+
+    @Test
+    fun `sin muestras de audio no hay duracion de audio`() {
+        assertNull(effectiveAudioDurationMs(null, null, null, 48_000))
+        assertNull(effectiveAudioDurationMs(0L, null, null, 48_000))
     }
 }

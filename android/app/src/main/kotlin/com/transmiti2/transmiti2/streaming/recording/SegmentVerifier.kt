@@ -59,6 +59,30 @@ data class VerificationChecks(
     val decodedFrames: Int,
     val exoplayerReady: Boolean,
     val exoplayerDurationMs: Long?,
+    // --- Audio (3.1.3, plan §7.1). Todos con valor por defecto «no
+    // medido», para que las construcciones existentes (tests y
+    // `emptyChecks()`) sigan compilando sin cambios. `audioPtsMonotonic`
+    // no estaba en la lista del encargo, pero el plan §7.1 lo mide
+    // (tabla «PTS monótonos») y la clasificación lo exige.
+    val hasAudioTrack: Boolean = false,
+    val audioSampleCount: Int = 0,
+    val audioDurationMs: Long? = null,
+    val audioSampleRate: Int? = null,
+    val audioChannels: Int? = null,
+    val audioFirstPtsUs: Long? = null,
+    val audioLastPtsUs: Long? = null,
+    val audioPtsMonotonic: Boolean = true,
+    val audioDecodeOk: Boolean = false,
+    val audioDecodedFrames: Int = 0,
+    val avOffsetMs: Long? = null,
+    val avDurationDiffMs: Long? = null,
+    // Duración de referencia para el contraste con ExoPlayer:
+    // `max(duración video, duración audio)` cuando hay audio.
+    // `null` = la de video (`durationMs`). El valor por defecto es
+    // `null` (y no `durationMs`) a propósito: con `copy(durationMs
+    // = ...)` un valor por defecto igual a `durationMs` quedaría
+    // obsoleto y el contraste usaría una duración vieja.
+    val referenceDurationMs: Long? = null,
 )
 
 /** Resultado de verificar un segmento. */
@@ -97,6 +121,20 @@ private class PartialChecks {
     var decodedFrames = 0
     var exoplayerReady = false
     var exoplayerDurationMs: Long? = null
+    // Audio (3.1.3): mismos campos que `VerificationChecks`, mutables.
+    var hasAudioTrack = false
+    var audioSampleCount = 0
+    var audioDurationMs: Long? = null
+    var audioSampleRate: Int? = null
+    var audioChannels: Int? = null
+    var audioFirstPtsUs: Long? = null
+    var audioLastPtsUs: Long? = null
+    var audioPtsMonotonic = true
+    var audioDecodeOk = false
+    var audioDecodedFrames = 0
+    var avOffsetMs: Long? = null
+    var avDurationDiffMs: Long? = null
+    var referenceDurationMs: Long? = null
 
     fun toChecks() = VerificationChecks(
         extractorOpens = extractorOpens,
@@ -115,6 +153,19 @@ private class PartialChecks {
         decodedFrames = decodedFrames,
         exoplayerReady = exoplayerReady,
         exoplayerDurationMs = exoplayerDurationMs,
+        hasAudioTrack = hasAudioTrack,
+        audioSampleCount = audioSampleCount,
+        audioDurationMs = audioDurationMs,
+        audioSampleRate = audioSampleRate,
+        audioChannels = audioChannels,
+        audioFirstPtsUs = audioFirstPtsUs,
+        audioLastPtsUs = audioLastPtsUs,
+        audioPtsMonotonic = audioPtsMonotonic,
+        audioDecodeOk = audioDecodeOk,
+        audioDecodedFrames = audioDecodedFrames,
+        avOffsetMs = avOffsetMs,
+        avDurationDiffMs = avDurationDiffMs,
+        referenceDurationMs = referenceDurationMs,
     )
 }
 
@@ -157,6 +208,35 @@ fun computeFpsMeasured(sampleCount: Int, durationMs: Long?): Double? {
 }
 
 /**
+ * Duración efectiva de la pista de audio (ms): espejo de
+ * `effectiveDurationMs` para video (3.1.3, plan §7.1). La del
+ * contenedor (`KEY_DURATION`) cuando es válida (> 0); si falta o es
+ * 0, el tramo PTS de las muestras leídas + 1 trama AAC
+ * (`1024 / sampleRate`, en ms: 21 ms a 48 kHz, 23 ms a 44,1 kHz).
+ * Sin frecuencia de muestreo conocida, 21 ms (48 kHz, el objetivo
+ * de D1). Sin muestras no hay duración. Pura, testeable en JVM.
+ */
+fun effectiveAudioDurationMs(
+    keyDurationMs: Long?,
+    firstPtsUs: Long?,
+    lastPtsUs: Long?,
+    sampleRate: Int?,
+): Long? {
+    if (keyDurationMs != null && keyDurationMs > 0) {
+        return keyDurationMs
+    }
+    if (firstPtsUs != null && lastPtsUs != null) {
+        val frameMs = if (sampleRate != null && sampleRate > 0) {
+            1024 * 1000L / sampleRate
+        } else {
+            21L
+        }
+        return (lastPtsUs - firstPtsUs) / 1000 + frameMs
+    }
+    return null
+}
+
+/**
  * Clasifica un segmento a partir de sus medidas (plan §7.1). Pura:
  * no toca Android, testeable en JVM.
  *
@@ -176,6 +256,9 @@ fun classifySegment(
     expectedWidth: Int?,
     expectedHeight: Int?,
     expectedFps: Int?,
+    expectedAudio: Boolean? = null,
+    expectedSampleRate: Int? = null,
+    expectedChannels: Int? = null,
 ): SegmentVerification {
     val reason = when {
         !checks.extractorOpens -> "extractor_no_abre"
@@ -197,18 +280,116 @@ fun classifySegment(
         !checks.exoplayerReady -> "exoplayer_no_prepara"
         checks.exoplayerDurationMs != null &&
             checks.durationMs != null &&
-            abs(checks.exoplayerDurationMs - checks.durationMs) >
-                DURATION_TOLERANCE_MS -> "duracion_no_coincide"
+            abs(
+                checks.exoplayerDurationMs -
+                    (checks.referenceDurationMs ?: checks.durationMs),
+            ) > DURATION_TOLERANCE_MS -> "duracion_no_coincide"
         else -> null
     }
     if (reason != null) {
         return SegmentVerification(SegmentStatus.CORRUPT, checks, reason)
+    }
+    // Video válido: las reglas de audio (3.1.3, plan §7.3). Un fallo
+    // de audio con video válido es `partial` con el motivo de audio,
+    // nunca `corrupt`: el video sigue siendo utilizable.
+    val audioReason = audioFailureReason(
+        checks,
+        expectedAudio,
+        expectedSampleRate,
+        expectedChannels,
+        incomplete = false,
+    )
+    if (audioReason != null) {
+        return SegmentVerification(SegmentStatus.PARTIAL, checks, audioReason)
     }
     return if (closedCleanly) {
         SegmentVerification(SegmentStatus.READY, checks, null)
     } else {
         SegmentVerification(SegmentStatus.PARTIAL, checks, null)
     }
+}
+
+/**
+ * Tolerancias A/V iniciales (3.1.3, plan §7.4): 500 ms, a confirmar
+ * o estrechar con la medición del teléfono, nunca a ensanchar a
+ * ciegas (misma regla que el FPS en la ronda 3 de 3.1.2).
+ */
+private const val AV_OFFSET_TOLERANCE_MS = 500L
+private const val AV_DURATION_TOLERANCE_MS = 500L
+
+/**
+ * Motivo de fallo de audio, o `null` si el audio no tiene nada que
+ * objetar (plan §7.3, en orden). Solo se aplica cuando se espera
+ * audio (`expectedAudio == true`): con `false` (video-only) o `null`
+ * (recuperación, desconocido) el audio medido es solo diagnóstico —
+ * ni se exige ni se prohíbe nada.
+ *
+ * - `audio_formato_no_coincide` no está en la lista del plan §7.3:
+ *   es una extensión justificada de este commit. El plan lista
+ *   motivos pero no cubre el caso de un `sampleRate`/canales medido
+ *   distinto del esperado; clasificarlo como `sin_pista_audio` o
+ *   `audio_sin_muestras` mentiría (la pista existe y tiene
+ *   muestras) y como `duracion_audio_no_coincide` también (la
+ *   duración puede coincidir). Un formato distinto es un fallo de
+ *   audio real que debe distinguirse.
+ *
+ * - `incomplete = true` (camino `classifyIncomplete`, timeout o
+ *   error): solo se denuncian los defectos establecidos de forma
+ *   positiva por lo medido, que no dependen de haber leído el
+ *   archivo entero. `sin_pista_audio` solo si el escaneo de pistas
+ *   corrió (`hasAvcTrack`: la pista AVC solo se marca tras el
+ *   escaneo, así que `hasAudioTrack == false` es definitivo);
+ *   `audio_sin_muestras`, `duracion_audio_no_coincide` y
+ *   `audio_decode_incompleto` dependen de una lectura completa (una
+ *   lectura cortada subestima el audio y deja el decode a medias),
+ *   así que en este camino no se inventan y el motivo que sobrevive
+ *   es el del timeout/error. `audio_no_monotono`,
+ *   `audio_formato_no_coincide` y `audio_desincronizado` se miden
+ *   con el formato de la pista y los primeros PTS, que no dependen
+ *   de terminar la lectura.
+ */
+private fun audioFailureReason(
+    checks: VerificationChecks,
+    expectedAudio: Boolean?,
+    expectedSampleRate: Int?,
+    expectedChannels: Int?,
+    incomplete: Boolean,
+): String? {
+    if (expectedAudio != true) return null
+    if (!checks.hasAudioTrack) {
+        if (!incomplete || checks.hasAvcTrack) return "sin_pista_audio"
+        return null
+    }
+    if (checks.audioSampleCount == 0) {
+        if (incomplete) return null
+        return "audio_sin_muestras"
+    }
+    if (!checks.audioPtsMonotonic) return "audio_no_monotono"
+    val sampleRateMismatch = expectedSampleRate != null &&
+        checks.audioSampleRate != null &&
+        checks.audioSampleRate != expectedSampleRate
+    val channelsMismatch = expectedChannels != null &&
+        checks.audioChannels != null &&
+        checks.audioChannels != expectedChannels
+    if (sampleRateMismatch || channelsMismatch) {
+        return "audio_formato_no_coincide"
+    }
+    if (checks.avOffsetMs != null &&
+        abs(checks.avOffsetMs) > AV_OFFSET_TOLERANCE_MS
+    ) {
+        return "audio_desincronizado"
+    }
+    if (checks.avDurationDiffMs != null &&
+        abs(checks.avDurationDiffMs) > AV_DURATION_TOLERANCE_MS
+    ) {
+        if (incomplete) return null
+        return "duracion_audio_no_coincide"
+    }
+    if (!checks.audioDecodeOk) {
+        if (incomplete) return null
+        return "audio_decode_incompleto"
+    }
+    return null
 }
 
 /**
@@ -258,6 +439,12 @@ private const val DURATION_TOLERANCE_MS = 100L
  * son «no verificados a tiempo», no «fallidos». Tampoco usa
  * `exoplayerDurationMs`: sin confirmación de ExoPlayer no hay
  * contraste de duraciones que hacer.
+ *
+ * Audio (3.1.3): las mismas reglas sobre lo medido, con la salvedad
+ * de `audioFailureReason(incomplete = true)`: un fallo de audio solo
+ * se denuncia si está establecido de forma positiva por lo medido;
+ * si el audio no se midió a tiempo, el motivo que sobrevive es el
+ * del timeout/error, no un fallo de audio inventado.
  */
 fun classifyIncomplete(
     checks: VerificationChecks,
@@ -265,6 +452,9 @@ fun classifyIncomplete(
     expectedHeight: Int?,
     expectedFps: Int?,
     reason: String,
+    expectedAudio: Boolean? = null,
+    expectedSampleRate: Int? = null,
+    expectedChannels: Int? = null,
 ): SegmentVerification {
     val legibilityReason = when {
         !checks.extractorOpens -> "extractor_no_abre"
@@ -287,6 +477,16 @@ fun classifyIncomplete(
     if (legibilityReason != null) {
         return SegmentVerification(SegmentStatus.CORRUPT, checks, legibilityReason)
     }
+    val audioReason = audioFailureReason(
+        checks,
+        expectedAudio,
+        expectedSampleRate,
+        expectedChannels,
+        incomplete = true,
+    )
+    if (audioReason != null) {
+        return SegmentVerification(SegmentStatus.PARTIAL, checks, audioReason)
+    }
     return SegmentVerification(SegmentStatus.PARTIAL, checks, reason)
 }
 
@@ -296,6 +496,12 @@ interface SegmentVerifier {
      * La configuración esperada puede ser `null` (recuperación sin
      * sidecar): entonces la resolución y el FPS no se comprueban y el
      * segmento se clasifica solo por su legibilidad.
+     *
+     * `expectedAudio`: `true` = se espera pista de audio; `false` =
+     * modo video-only (sin audio esperado); `null` = desconocido
+     * (recuperación: medir lo que hay sin exigir audio).
+     * `expectedSampleRate`/`expectedChannels` solo se comprueban
+     * cuando `expectedAudio == true` y no son `null`.
      */
     suspend fun verify(
         file: File,
@@ -303,6 +509,9 @@ interface SegmentVerifier {
         expectedWidth: Int?,
         expectedHeight: Int?,
         expectedFps: Int?,
+        expectedAudio: Boolean? = null,
+        expectedSampleRate: Int? = null,
+        expectedChannels: Int? = null,
     ): SegmentVerification
 }
 
@@ -315,11 +524,14 @@ interface SegmentVerifier {
  * 1. `MediaExtractor` abre el archivo y lee TODAS las muestras (nunca
  *    un muestreo): cuenta muestras y keyframes, primer keyframe, PTS
  *    estrictamente crecientes, duración, resolución y `profile_idc`.
- * 2. Decodificador `MediaCodec` H.264: decodifica TODAS las muestras
- *    en orden, hasta EOS. Un segmento `ready` exige la decodificación
- *    completa, no solo la lectura.
+ *    Con audio (3.1.3), lee también la pista AAC en la misma pasada
+ *    y mide muestras, PTS, duración, formato y offset A/V.
+ * 2. Decodificadores `MediaCodec` H.264 y AAC: decodifican TODAS las
+ *    muestras en orden, hasta EOS. Un segmento `ready` exige la
+ *    decodificación completa, no solo la lectura.
  * 3. ExoPlayer (en el hilo principal) prepara el archivo y confirma
- *    su duración (±100 ms de la del extractor).
+ *    su duración (±100 ms de la de referencia: la pista más larga
+ *    cuando hay audio, la de video si no).
  *
  * No lanza por un archivo ilegible: lo mide y lo clasifica `corrupt`
  * con el motivo. Nunca modifica el original: la verificación es de
@@ -337,6 +549,9 @@ class DefaultSegmentVerifier(
         expectedWidth: Int?,
         expectedHeight: Int?,
         expectedFps: Int?,
+        expectedAudio: Boolean?,
+        expectedSampleRate: Int?,
+        expectedChannels: Int?,
     ): SegmentVerification {
         if (!file.isFile) {
             return SegmentVerification(
@@ -360,6 +575,9 @@ class DefaultSegmentVerifier(
                     expectedWidth,
                     expectedHeight,
                     expectedFps,
+                    expectedAudio,
+                    expectedSampleRate,
+                    expectedChannels,
                 )
             }
         } catch (e: TimeoutCancellationException) {
@@ -382,6 +600,9 @@ class DefaultSegmentVerifier(
                 expectedHeight,
                 expectedFps,
                 "verification_timeout",
+                expectedAudio,
+                expectedSampleRate,
+                expectedChannels,
             )
         } catch (e: Exception) {
             Transmiti2Logger.e(
@@ -400,6 +621,9 @@ class DefaultSegmentVerifier(
                 expectedHeight,
                 expectedFps,
                 "verification_error",
+                expectedAudio,
+                expectedSampleRate,
+                expectedChannels,
             )
         }
     }
@@ -450,19 +674,30 @@ class DefaultSegmentVerifier(
         withContext(Dispatchers.IO) {
             val extractor = MediaExtractor()
             var decoder: MediaCodec? = null
+            var audioDecoder: MediaCodec? = null
             var decodedFrames = 0
             var decodeOk = false
             try {
                 extractor.setDataSource(file.absolutePath)
                 partial.extractorOpens = true
                 var videoTrack = -1
+                var audioTrack = -1
+                var audioTrackFormat: MediaFormat? = null
                 for (i in 0 until extractor.trackCount) {
                     val format = extractor.getTrackFormat(i)
-                    val mime = format.getString(MediaFormat.KEY_MIME)
-                    if (mime == MediaFormat.MIMETYPE_VIDEO_AVC) {
-                        videoTrack = i
-                        trackFormat = format
-                        break
+                    when (format.getString(MediaFormat.KEY_MIME)) {
+                        MediaFormat.MIMETYPE_VIDEO_AVC -> {
+                            if (videoTrack < 0) {
+                                videoTrack = i
+                                trackFormat = format
+                            }
+                        }
+                        MediaFormat.MIMETYPE_AUDIO_AAC -> {
+                            if (audioTrack < 0) {
+                                audioTrack = i
+                                audioTrackFormat = format
+                            }
+                        }
                     }
                 }
                 if (videoTrack < 0 || trackFormat == null) {
@@ -484,7 +719,27 @@ class DefaultSegmentVerifier(
                         ?.takeIf { it.remaining() >= 2 }
                         ?.get(1)
                         ?.toInt()
+                // Audio (3.1.3): formato de la pista, si la hay. Sin
+                // pista de audio, `hasAudioTrack` queda en `false` y
+                // el resto de campos de audio en «no medido»: no se
+                // inventa ningún valor.
+                if (audioTrack >= 0 && audioTrackFormat != null) {
+                    partial.hasAudioTrack = true
+                    val audioFormat = audioTrackFormat!!
+                    partial.audioSampleRate = audioFormat
+                        .intOrNull(MediaFormat.KEY_SAMPLE_RATE)
+                        ?.takeIf { it > 0 }
+                    partial.audioChannels = audioFormat
+                        .intOrNull(MediaFormat.KEY_CHANNEL_COUNT)
+                        ?.takeIf { it > 0 }
+                    partial.audioDurationMs = audioFormat
+                        .longOrNull(MediaFormat.KEY_DURATION)
+                        ?.div(1000)
+                }
                 extractor.selectTrack(videoTrack)
+                if (audioTrack >= 0) {
+                    extractor.selectTrack(audioTrack)
+                }
                 val maxInputSize = (format.intOrNull(
                     MediaFormat.KEY_MAX_INPUT_SIZE,
                 ) ?: (1024 * 1024)).coerceAtLeast(1024)
@@ -505,11 +760,37 @@ class DefaultSegmentVerifier(
                     )
                     null
                 }
+                // Decodificador AAC (3.1.3): se alimenta en la misma
+                // pasada, con la misma regla de drenado sin espera de
+                // la ronda 5 (`drainDecoder`). Si no se puede crear,
+                // `audioDecodeOk` queda en `false`: no se inventa.
+                if (audioTrack >= 0 && audioTrackFormat != null) {
+                    audioDecoder = try {
+                        MediaCodec.createDecoderByType(
+                            MediaFormat.MIMETYPE_AUDIO_AAC,
+                        ).apply {
+                            configure(audioTrackFormat, null, null, 0)
+                            start()
+                        }
+                    } catch (e: Exception) {
+                        Transmiti2Logger.e(
+                            "verificacion: sin decodificador AAC: " +
+                                "${e.javaClass.simpleName}",
+                        )
+                        null
+                    }
+                }
                 var prevPtsUs = Long.MIN_VALUE
                 var firstPtsUs: Long? = null
                 var lastPtsUs: Long? = null
                 var fedSamples = 0
                 var eosSeen = false
+                // Audio (3.1.3): mismas medidas, por pista.
+                var prevAudioPtsUs = Long.MIN_VALUE
+                var fedAudioSamples = 0
+                var audioEosSeen = false
+                var audioDecodedFrames = 0
+                var audioDecodeOk = false
                 while (true) {
                     readBuffer.clear()
                     val sampleSize = extractor.readSampleData(
@@ -519,6 +800,42 @@ class DefaultSegmentVerifier(
                     if (sampleSize < 0) break
                     val ptsUs = extractor.sampleTime
                     val flags = extractor.sampleFlags
+                    // Una sola pasada, dos pistas: el extractor
+                    // entrega las muestras en orden de archivo
+                    // (entrelazadas por PTS) y cada una se despacha
+                    // por su índice de pista.
+                    if (extractor.sampleTrackIndex == audioTrack) {
+                        if (partial.audioSampleCount == 0) {
+                            partial.audioFirstPtsUs = ptsUs
+                        }
+                        if (ptsUs <= prevAudioPtsUs &&
+                            partial.audioSampleCount > 0
+                        ) {
+                            partial.audioPtsMonotonic = false
+                        }
+                        prevAudioPtsUs = ptsUs
+                        partial.audioLastPtsUs = ptsUs
+                        partial.audioSampleCount++
+                        // Alimentar al decodificador AAC con esta
+                        // muestra (mismas funciones que el video:
+                        // `queueSampleToDecoder` y `drainDecoder`
+                        // son agnósticas al codec).
+                        if (audioDecoder != null) {
+                            val queued = queueSampleToDecoder(
+                                audioDecoder,
+                                readBuffer,
+                                sampleSize,
+                                ptsUs,
+                                flags,
+                            )
+                            if (queued) fedAudioSamples++
+                            val drained = drainDecoder(audioDecoder, false)
+                            audioDecodedFrames += drained.first
+                            if (drained.second) audioEosSeen = true
+                        }
+                        extractor.advance()
+                        continue
+                    }
                     val isKeyframe = flags and
                         MediaCodec.BUFFER_FLAG_SYNC_FRAME != 0
                     if (partial.sampleCount == 0) {
@@ -568,6 +885,49 @@ class DefaultSegmentVerifier(
                     partial.sampleCount,
                     partial.durationMs,
                 )
+                // Medidas de audio (3.1.3), AQUÍ, dentro de la fase
+                // de E/S: el timeout salta en el retorno del
+                // `withContext` y una medida tomada después no
+                // existiría (ronda 4). La duración de audio es el
+                // tramo PTS + 1 trama; el offset y la diferencia de
+                // duraciones usan los PTS del archivo, ya rebajados
+                // al origen común por la sesión.
+                partial.audioDurationMs = effectiveAudioDurationMs(
+                    partial.audioDurationMs,
+                    partial.audioFirstPtsUs,
+                    partial.audioLastPtsUs,
+                    partial.audioSampleRate,
+                )
+                if (firstPtsUs != null &&
+                    partial.audioFirstPtsUs != null
+                ) {
+                    partial.avOffsetMs = avOffsetMs(
+                        firstPtsUs,
+                        partial.audioFirstPtsUs!!,
+                    )
+                }
+                if (partial.durationMs != null &&
+                    partial.audioDurationMs != null
+                ) {
+                    partial.avDurationDiffMs = avDurationDiffMs(
+                        partial.durationMs!!,
+                        partial.audioDurationMs!!,
+                    )
+                }
+                // Duración de referencia para ExoPlayer: la pista más
+                // larga (ExoPlayer reporta esa); sin audio, la de
+                // video como hoy.
+                partial.referenceDurationMs =
+                    if (partial.durationMs != null &&
+                        partial.audioDurationMs != null
+                    ) {
+                        maxOf(
+                            partial.durationMs!!,
+                            partial.audioDurationMs!!,
+                        )
+                    } else {
+                        partial.durationMs
+                    }
                 // EOS al decodificador y drenado final.
                 if (decoder != null) {
                     var eosQueued = false
@@ -598,6 +958,38 @@ class DefaultSegmentVerifier(
                 }
                 partial.decodeOk = decodeOk
                 partial.decodedFrames = decodedFrames
+                // EOS al decodificador AAC y drenado final (3.1.3).
+                // `audioDecodeOk` exige la decodificación completa
+                // del audio igual que el video: todas las muestras
+                // alimentadas y el EOS de salida visto.
+                if (audioDecoder != null) {
+                    var eosQueued = false
+                    try {
+                        val inputIndex = audioDecoder.dequeueInputBuffer(
+                            DECODER_TIMEOUT_US,
+                        )
+                        if (inputIndex >= 0) {
+                            audioDecoder.queueInputBuffer(
+                                inputIndex,
+                                0,
+                                0,
+                                0,
+                                MediaCodec.BUFFER_FLAG_END_OF_STREAM,
+                            )
+                            eosQueued = true
+                        }
+                    } catch (_: Exception) {
+                    }
+                    if (eosQueued) {
+                        val drained = drainDecoder(audioDecoder, true)
+                        audioDecodedFrames += drained.first
+                        if (drained.second) audioEosSeen = true
+                    }
+                    audioDecodeOk = audioEosSeen &&
+                        fedAudioSamples == partial.audioSampleCount
+                }
+                partial.audioDecodeOk = audioDecodeOk
+                partial.audioDecodedFrames = audioDecodedFrames
             } finally {
                 // Ronda 4, fix 2: la duración de la fase 1 se mide
                 // AQUÍ, dentro del bloque. El `finally` corre siempre
@@ -613,6 +1005,14 @@ class DefaultSegmentVerifier(
                 }
                 try {
                     decoder?.release()
+                } catch (_: Exception) {
+                }
+                try {
+                    audioDecoder?.stop()
+                } catch (_: Exception) {
+                }
+                try {
+                    audioDecoder?.release()
                 } catch (_: Exception) {
                 }
                 try {

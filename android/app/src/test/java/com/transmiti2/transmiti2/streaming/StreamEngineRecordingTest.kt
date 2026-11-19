@@ -117,13 +117,24 @@ class StreamEngineRecordingTest {
 
     /** Verificador falso (la sesión falsa nunca lo usa de verdad). */
     private class FakeVerifier : SegmentVerifier {
+        /** Última expectativa de audio recibida (3.1.3). */
+        var lastExpectedAudio: Boolean? = null
+        var lastExpectedSampleRate: Int? = null
+        var lastExpectedChannels: Int? = null
+
         override suspend fun verify(
             file: File,
             closedCleanly: Boolean,
             expectedWidth: Int?,
             expectedHeight: Int?,
             expectedFps: Int?,
+            expectedAudio: Boolean?,
+            expectedSampleRate: Int?,
+            expectedChannels: Int?,
         ): SegmentVerification {
+            lastExpectedAudio = expectedAudio
+            lastExpectedSampleRate = expectedSampleRate
+            lastExpectedChannels = expectedChannels
             return SegmentVerification(
                 SegmentStatus.READY,
                 VerificationChecks(
