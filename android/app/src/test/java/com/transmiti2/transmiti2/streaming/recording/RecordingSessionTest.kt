@@ -14,6 +14,10 @@ import com.transmiti2.transmiti2.streaming.Transmiti2Logger
 import com.transmiti2.transmiti2.streaming.VideoSize
 import java.io.File
 import java.nio.ByteBuffer
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -39,6 +43,17 @@ class RecordingSessionTest {
     private class FakeEncoder(
         override val config: VideoEncoderConfig,
     ) : VideoEncoderPort {
+        // Hilo propio ("encoder") como el real: TODAS las operaciones
+        // del muxer y los callbacks corren en él; las entradas del
+        // test (`configureAndStart`, `deliverSample`, `deliverError`)
+        // publican en él y esperan (el test sigue siendo síncrono).
+        // Sin hilo propio, la corutina del deadline de audio (2 s,
+        // hilo del temporizador) abriría el muxer en otro hilo y la
+        // guarda del muxer falso fallaría — en producción el `post`
+        // salta al hilo del encoder real.
+        private val executor = Executors.newSingleThreadExecutor { r ->
+            Thread(r, "FakeEncoder").apply { isDaemon = true }
+        }
         // Superficie ficticia no nula: la sesión solo la pasa a
         // `recreateSession` (nunca llama a métodos nativos sobre
         // ella). `Surface()` sin argumento NO existe en la API
@@ -62,7 +77,7 @@ class RecordingSessionTest {
             if (deliverFormatOnStart) {
                 val format = MediaFormat()
                 outputFormat = format
-                listener?.onOutputFormatChanged(format)
+                postAndWait { listener?.onOutputFormatChanged(format) }
             }
         }
 
@@ -73,7 +88,100 @@ class RecordingSessionTest {
 
         override fun signalEndOfInputStream() {
             if (deliverEosOnSignal) {
-                listener?.onEndOfStream()
+                post { listener?.onEndOfStream() }
+            }
+        }
+
+        override fun stopDrain() {
+            stopDrainCalls++
+        }
+
+        override fun post(block: () -> Unit) {
+            try {
+                executor.execute(block)
+            } catch (_: RejectedExecutionException) {
+                // Apagado en `tearDown`: se ignora (la sesión ya terminó).
+            }
+        }
+
+        override fun release() {
+            releaseCalls++
+        }
+
+        fun shutdown() {
+            executor.shutdownNow()
+        }
+
+        private fun postAndWait(block: () -> Unit) {
+            val done = CountDownLatch(1)
+            post {
+                try {
+                    block()
+                } finally {
+                    done.countDown()
+                }
+            }
+            check(done.await(5, TimeUnit.SECONDS)) {
+                "El hilo del encoder falso no procesó el bloque en 5 s."
+            }
+        }
+
+        fun deliverSample(ptsUs: Long, keyframe: Boolean) {
+            postAndWait {
+                val info = MediaCodec.BufferInfo().apply {
+                    offset = 0
+                    size = 10
+                    presentationTimeUs = ptsUs
+                    flags = if (keyframe) {
+                        MediaCodec.BUFFER_FLAG_SYNC_FRAME
+                    } else {
+                        0
+                    }
+                }
+                listener?.onSample(ByteBuffer.allocate(10), info)
+            }
+        }
+
+        fun deliverError() {
+            postAndWait {
+                listener?.onError(IllegalStateException("codec roto"))
+            }
+        }
+    }
+
+    /**
+     * Encoder de audio falso (3.1.3): entrega el formato y las
+     * muestras de forma síncrona en el hilo del test; la sesión los
+     * publica al hilo del encoder de video (falso) como en
+     * producción. Sin `AudioRecord` ni `MediaCodec` reales.
+     */
+    private class FakeAudioEncoder(
+        override val config: AudioEncoderConfig,
+    ) : AudioEncoderPort {
+        override var outputFormat: MediaFormat? = null
+        override var listener: AudioEncoderListener? = null
+        var configureCalls = 0
+        var releaseCalls = 0
+        var stopDrainCalls = 0
+        var eosCalls = 0
+        var deliverFormatOnStart = true
+        var deliverEosOnSignal = true
+        var configureError: Exception? = null
+
+        override fun configureAndStart() {
+            configureCalls++
+            configureError?.let { throw it }
+            if (deliverFormatOnStart) {
+                val format = MediaFormat()
+                outputFormat = format
+                listener?.onAudioFormatChanged(format)
+            }
+        }
+
+        override fun signalEndOfInputStream() {
+            eosCalls++
+            if (deliverEosOnSignal) {
+                listener?.onAudioEndOfStream()
             }
         }
 
@@ -89,22 +197,23 @@ class RecordingSessionTest {
             releaseCalls++
         }
 
-        fun deliverSample(ptsUs: Long, keyframe: Boolean) {
+        fun deliverSample(ptsUs: Long) {
             val info = MediaCodec.BufferInfo().apply {
                 offset = 0
                 size = 10
                 presentationTimeUs = ptsUs
-                flags = if (keyframe) {
-                    MediaCodec.BUFFER_FLAG_SYNC_FRAME
-                } else {
-                    0
-                }
+                flags = 0
             }
-            listener?.onSample(ByteBuffer.allocate(10), info)
+            listener?.onAudioSample(ByteBuffer.allocate(10), info)
         }
 
-        fun deliverError() {
-            listener?.onError(IllegalStateException("codec roto"))
+        fun deliverError(reason: String = "audio_dead_object") {
+            listener?.onAudioError(
+                RecordingException.audioError(
+                    "Micrófono perdido.",
+                    mapOf("reason" to reason),
+                ),
+            )
         }
     }
 
@@ -115,6 +224,9 @@ class RecordingSessionTest {
         private val guard = MuxerThreadGuard()
         val calls = mutableListOf<String>()
         val writtenPts = mutableListOf<Long>()
+        /** PTS escritos por pista (0 = video, 1 = audio, …). */
+        val writtenPtsByTrack = mutableMapOf<Int, MutableList<Long>>()
+        private var nextTrackIndex = 0
         var writeError: Exception? = null
         var started = false
         var stopped = false
@@ -123,7 +235,9 @@ class RecordingSessionTest {
         override fun addTrack(format: MediaFormat): Int {
             guard.check()
             calls += "addTrack"
-            return 0
+            val index = nextTrackIndex++
+            writtenPtsByTrack[index] = mutableListOf()
+            return index
         }
 
         override fun start() {
@@ -144,6 +258,8 @@ class RecordingSessionTest {
             guard.check()
             writeError?.let { throw it }
             writtenPts += bufferInfo.presentationTimeUs
+            writtenPtsByTrack.getOrPut(trackIndex) { mutableListOf() } +=
+                bufferInfo.presentationTimeUs
             calls += "write"
         }
 
@@ -277,9 +393,28 @@ class RecordingSessionTest {
         reason = null,
     )
 
+    /** Verificación `ready` con pista de audio medida (3.1.3). */
+    private fun readyVerificationWithAudio() = readyVerification().copy(
+        checks = readyVerification().checks.copy(
+            hasAudioTrack = true,
+            audioSampleCount = 2800,
+            audioDurationMs = 59800L,
+            audioSampleRate = 48000,
+            audioChannels = 1,
+            audioFirstPtsUs = 0L,
+            audioLastPtsUs = 59_800_000L,
+            audioPtsMonotonic = true,
+            audioDecodeOk = true,
+            audioDecodedFrames = 2800,
+            avOffsetMs = 150L,
+            avDurationDiffMs = 200L,
+        ),
+    )
+
     private lateinit var dir: File
     private lateinit var fileStore: RecordingFileStore
     private lateinit var fakeEncoder: FakeEncoder
+    private lateinit var fakeAudioEncoder: FakeAudioEncoder
     private lateinit var fakePreview: FakePreviewSession
     private lateinit var fakeVerifier: FakeVerifier
     private lateinit var muxers: MutableList<FakeSessionMuxer>
@@ -291,6 +426,7 @@ class RecordingSessionTest {
     private fun buildSession(
         formatTimeoutMs: Long = 5_000L,
         eosTimeoutMs: Long = 5_000L,
+        audioFormatTimeoutMs: Long = 2_000L,
     ): RecordingSession {
         return RecordingSession(
             scope = CoroutineScope(Dispatchers.Unconfined),
@@ -312,6 +448,11 @@ class RecordingSessionTest {
                     cameraSupportsSize = true,
                 )
             },
+            audioEncoderFactory = { fakeAudioEncoder },
+            audioCapabilityCheck = {
+                AudioSetup(fakeAudioEncoder.config, "OMX.google.aac.encoder")
+            },
+            audioFormatTimeoutMs = audioFormatTimeoutMs,
             freeSpaceBytes = { freeBytes },
             clockMs = { fixedClockMs },
             formatTimeoutMs = formatTimeoutMs,
@@ -338,6 +479,13 @@ class RecordingSessionTest {
                 bitrateBps = 2_500_000,
             ),
         )
+        fakeAudioEncoder = FakeAudioEncoder(
+            AudioEncoderConfig(
+                sampleRate = 48000,
+                channels = 1,
+                bitrateBps = 128_000,
+            ),
+        )
         previewConfig = PreviewConfig(
             cameraId = "0",
             size = VideoSize(1280, 720),
@@ -356,11 +504,13 @@ class RecordingSessionTest {
     @After
     fun tearDown() {
         Transmiti2Logger.sink = null
+        fakeEncoder.shutdown()
         dir.deleteRecursively()
     }
 
     private suspend fun startRecording(
         session: RecordingSession,
+        audioEnabled: Boolean = false,
     ): RecordingStartedInfo {
         return session.start(
             fakePreview,
@@ -368,6 +518,7 @@ class RecordingSessionTest {
             90,
             "match-1",
             null,
+            audioEnabled,
         )
     }
 
@@ -833,4 +984,287 @@ class RecordingSessionTest {
         assertEquals(30.0, map["fpsMeasured"])
         assertEquals(1801, map["sampleCount"])
     }
+
+    // --- Audio AAC + sincronización (3.1.3, plan §10.1) ---
+
+    @Test
+    fun `arranque con audio abre el muxer con 2 pistas y registra el audio en recording_started`() =
+        runBlocking {
+            val session = buildSession()
+            val info = startRecording(session, audioEnabled = true)
+            assertEquals(RecordingState.RECORDING, session.currentState())
+            assertTrue(info.audioEnabled)
+            assertEquals(48000, info.audioSampleRate)
+            assertEquals(1, info.audioChannels)
+            assertEquals("OMX.google.aac.encoder", info.audioEncoderName)
+            assertEquals(null, info.audioReason)
+            assertEquals(1, fakeAudioEncoder.configureCalls)
+            // Dos pistas en el muxer del segmento 0.
+            assertEquals(2, muxers[0].writtenPtsByTrack.size)
+            // El evento `recording_started` lleva los campos de audio.
+            val startedPayload = events.first {
+                it.first == StreamContract.EVENT_RECORDING_STARTED
+            }.second
+            assertEquals(true, startedPayload["audioEnabled"])
+            assertEquals(48000, startedPayload["audioSampleRate"])
+            assertEquals(1, startedPayload["audioChannels"])
+            // Video y audio se escriben cada uno en su pista (origen
+            // común 0: el primer video se guardó en el buffer hasta
+            // que llegó el primer audio).
+            fakeEncoder.deliverSample(0L, true)
+            fakeAudioEncoder.deliverSample(0L)
+            fakeAudioEncoder.deliverSample(21_333L)
+            fakeEncoder.deliverSample(33_333L, false)
+            assertEquals(
+                listOf(0L, 33_333L),
+                muxers[0].writtenPtsByTrack[0],
+            )
+            assertEquals(
+                listOf(0L, 21_333L),
+                muxers[0].writtenPtsByTrack[1],
+            )
+            val result = session.stop()
+            assertEquals("ready", result.status)
+            assertEquals(true, fakeVerifier.lastExpectedAudio)
+            assertEquals(48000, fakeVerifier.lastExpectedSampleRate)
+            assertEquals(1, fakeVerifier.lastExpectedChannels)
+        }
+
+    @Test
+    fun `espera de audio que expira degrada a video-only sin perder muestras`() =
+        runBlocking {
+            fakeAudioEncoder.deliverFormatOnStart = false
+            val session = buildSession(audioFormatTimeoutMs = 200L)
+            // `start()` espera al segmento: la espera expira a los
+            // 200 ms y el segmento se abre video-only.
+            val info = startRecording(session, audioEnabled = true)
+            assertEquals(RecordingState.RECORDING, session.currentState())
+            assertFalse(info.audioEnabled)
+            assertEquals("audio_format_timeout", info.audioReason)
+            assertEquals(null, info.audioSampleRate)
+            // El encoder de audio se liberó (nunca entregó su formato).
+            assertEquals(1, fakeAudioEncoder.releaseCalls)
+            // Una sola pista en el muxer.
+            assertEquals(1, muxers[0].writtenPtsByTrack.size)
+            // Las muestras de video llegan y se escriben (ninguna se tira).
+            fakeEncoder.deliverSample(0L, true)
+            fakeEncoder.deliverSample(33_333L, false)
+            fakeEncoder.deliverSample(66_666L, false)
+            assertEquals(
+                listOf(0L, 33_333L, 66_666L),
+                muxers[0].writtenPts,
+            )
+            val result = session.stop()
+            assertEquals("ready", result.status)
+            assertEquals(false, fakeVerifier.lastExpectedAudio)
+            assertFalse(result.audioEnabled)
+        }
+
+    @Test
+    fun `rotacion con audio reparte las muestras por la frontera del keyframe`() =
+        runBlocking {
+            val session = buildSession()
+            startRecording(session, audioEnabled = true)
+            // Video cada 1 s (keyframe cada 2 s) y audio 0,5 s después.
+            for (second in 0..62) {
+                fakeEncoder.deliverSample(
+                    second * 1_000_000L,
+                    second % 2 == 0,
+                )
+                fakeAudioEncoder.deliverSample(second * 1_000_000L + 500_000L)
+            }
+            // Vacía la cola del hilo del encoder (la última muestra de
+            // audio se publicó sin esperar).
+            fakeEncoder.deliverSample(63_000_000L, false)
+            assertEquals(2, muxers.size)
+            assertEquals(RecordingState.RECORDING, session.currentState())
+            // Segmento 0: video 0..59 s y audio 0,5..59,5 s.
+            assertEquals(
+                (0..59).map { it * 1_000_000L },
+                muxers[0].writtenPtsByTrack[0],
+            )
+            assertEquals(
+                (0..59).map { it * 1_000_000L + 500_000L },
+                muxers[0].writtenPtsByTrack[1],
+            )
+            // Segmento 1: keyframe en PTS 0 y audio desde 60,5 s.
+            assertEquals(
+                listOf(0L, 1_000_000L, 2_000_000L, 3_000_000L),
+                muxers[1].writtenPtsByTrack[0],
+            )
+            assertEquals(
+                listOf(500_000L, 1_500_000L, 2_500_000L),
+                muxers[1].writtenPtsByTrack[1],
+            )
+            val result = session.stop()
+            assertEquals(2, result.segments.size)
+            assertEquals("ready", result.status)
+        }
+
+    @Test
+    fun `muestra de audio tardia tras la rotacion se descarta y se cuenta`() =
+        runBlocking {
+            val session = buildSession()
+            startRecording(session, audioEnabled = true)
+            for (second in 0..62) {
+                fakeEncoder.deliverSample(
+                    second * 1_000_000L,
+                    second % 2 == 0,
+                )
+                fakeAudioEncoder.deliverSample(second * 1_000_000L + 500_000L)
+            }
+            // Vacía la cola: la rotación ya ocurrió (segmento 1).
+            fakeEncoder.deliverSample(63_000_000L, false)
+            val before = muxers[1].writtenPtsByTrack[1]?.size ?: 0
+            // Una muestra de audio del segmento 0 que llega tarde.
+            fakeAudioEncoder.deliverSample(59_500_000L)
+            fakeEncoder.deliverSample(64_000_000L, false)
+            assertEquals(before, muxers[1].writtenPtsByTrack[1]?.size)
+            val result = session.stop()
+            assertEquals(2, result.segments.size)
+            assertEquals(1, result.segments[1].audioGapSamples)
+        }
+
+    @Test
+    fun `parada con audio espera el EOS de ambas pistas y registra el audio verificado`() =
+        runBlocking {
+            fakeVerifier.result = readyVerificationWithAudio()
+            val session = buildSession()
+            startRecording(session, audioEnabled = true)
+            fakeEncoder.deliverSample(0L, true)
+            fakeAudioEncoder.deliverSample(0L)
+            fakeAudioEncoder.deliverSample(21_333L)
+            fakeEncoder.deliverSample(33_333L, false)
+            val result = session.stop()
+            assertEquals(1, fakeAudioEncoder.eosCalls)
+            assertEquals(1, fakeAudioEncoder.releaseCalls)
+            assertEquals("ready", result.status)
+            assertEquals(1, result.segments.size)
+            val segment = result.segments[0]
+            assertTrue(segment.hasAudio)
+            assertEquals(59800L, segment.audioDurationMs)
+            assertEquals(2800, segment.audioSampleCount)
+            assertEquals(48000, segment.audioSampleRate)
+            assertEquals(1, segment.audioChannels)
+            assertEquals(150L, segment.avOffsetMs)
+            assertEquals(200L, segment.avDurationDiffMs)
+            assertEquals(null, segment.audioReason)
+            assertTrue(result.audioEnabled)
+            // El mapa del evento `recording_segment` lleva los campos.
+            val segmentPayload = events.first {
+                it.first == StreamContract.EVENT_RECORDING_SEGMENT
+            }.second
+            assertEquals(true, segmentPayload["hasAudio"])
+            assertEquals(150L, segmentPayload["avOffsetMs"])
+        }
+
+    @Test
+    fun `perdida de audio en caliente el video continua y se emite recording_audio_lost`() =
+        runBlocking {
+            val session = buildSession()
+            startRecording(session, audioEnabled = true)
+            fakeEncoder.deliverSample(0L, true)
+            fakeAudioEncoder.deliverSample(0L)
+            fakeAudioEncoder.deliverSample(21_333L)
+            fakeEncoder.deliverSample(33_333L, false)
+            fakeAudioEncoder.deliverError()
+            assertTrue(
+                eventTypes().contains(
+                    StreamContract.EVENT_RECORDING_AUDIO_LOST,
+                ),
+            )
+            assertEquals(RecordingState.RECORDING, session.currentState())
+            // El video continúa tras la pérdida.
+            fakeEncoder.deliverSample(66_666L, false)
+            fakeEncoder.deliverSample(100_000L, false)
+            assertEquals(
+                listOf(0L, 33_333L, 66_666L, 100_000L),
+                muxers[0].writtenPtsByTrack[0],
+            )
+            val result = session.stop()
+            assertEquals("ready", result.status)
+            assertEquals(1, result.segments.size)
+            assertEquals("audio_dead_object", result.segments[0].audioReason)
+            assertEquals(true, fakeVerifier.lastExpectedAudio)
+        }
+
+    @Test
+    fun `rotacion tras la perdida recupera el audio en el segmento siguiente`() =
+        runBlocking {
+            val session = buildSession()
+            startRecording(session, audioEnabled = true)
+            fakeEncoder.deliverSample(0L, true)
+            fakeAudioEncoder.deliverSample(0L)
+            fakeAudioEncoder.deliverSample(21_333L)
+            fakeEncoder.deliverSample(1_000_000L, false)
+            // Pérdida a los ~2 s: el segmento 0 conserva su pista con
+            // las muestras que llegaron; la recreación arranca el
+            // encoder nuevo (mismo falso) para el segmento siguiente.
+            fakeAudioEncoder.deliverError()
+            // Las muestras del encoder nuevo a mitad de segmento se
+            // descartan (D7: reanudación solo en el siguiente).
+            for (second in 2..62) {
+                fakeEncoder.deliverSample(
+                    second * 1_000_000L,
+                    second % 2 == 0,
+                )
+                fakeAudioEncoder.deliverSample(second * 1_000_000L + 500_000L)
+            }
+            fakeEncoder.deliverSample(63_000_000L, false)
+            assertEquals(2, muxers.size)
+            // Segmento 0: solo las muestras de audio previas a la pérdida.
+            assertEquals(
+                listOf(0L, 21_333L),
+                muxers[0].writtenPtsByTrack[1],
+            )
+            // Segmento 1: recupera la pista con el encoder nuevo.
+            assertEquals(
+                listOf(500_000L, 1_500_000L, 2_500_000L),
+                muxers[1].writtenPtsByTrack[1],
+            )
+            val result = session.stop()
+            assertEquals(2, result.segments.size)
+            assertEquals("audio_dead_object", result.segments[0].audioReason)
+            assertEquals(null, result.segments[1].audioReason)
+        }
+
+    @Test
+    fun `video-only sin pedir audio es identico a 3_1_2`() =
+        runBlocking {
+            val session = buildSession()
+            val info = startRecording(session)
+            assertFalse(info.audioEnabled)
+            assertEquals(null, info.audioReason)
+            assertEquals(null, info.audioSampleRate)
+            assertEquals(0, fakeAudioEncoder.configureCalls)
+            assertEquals(1, muxers[0].writtenPtsByTrack.size)
+            val snapshot = session.statusSnapshot()
+            assertFalse(snapshot.audioEnabled)
+            assertFalse(snapshot.audioActive)
+            assertEquals(null, snapshot.audioReason)
+            fakeEncoder.deliverSample(0L, true)
+            fakeEncoder.deliverSample(33_333L, false)
+            val result = session.stop()
+            assertEquals("ready", result.status)
+            assertEquals(false, fakeVerifier.lastExpectedAudio)
+            assertFalse(result.audioEnabled)
+        }
+
+    @Test
+    fun `audio que falla al arrancar degrada a video-only`() =
+        runBlocking {
+            fakeAudioEncoder.configureError = RecordingException.audioError(
+                "Micrófono no disponible.",
+                mapOf("reason" to "audio_dead_object"),
+            )
+            val session = buildSession()
+            val info = startRecording(session, audioEnabled = true)
+            assertEquals(RecordingState.RECORDING, session.currentState())
+            assertFalse(info.audioEnabled)
+            assertEquals("audio_mic_unavailable", info.audioReason)
+            assertEquals(1, muxers[0].writtenPtsByTrack.size)
+            fakeEncoder.deliverSample(0L, true)
+            val result = session.stop()
+            assertEquals("ready", result.status)
+        }
 }

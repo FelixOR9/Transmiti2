@@ -1,5 +1,6 @@
 package com.transmiti2.transmiti2.streaming.recording
 
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.media.MediaCodec
@@ -18,6 +19,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -47,6 +49,15 @@ data class RecordingStartedInfo(
     val rotationDegrees: Int,
     val lowStorageWarning: Boolean,
     val cbrSupported: Boolean,
+    /** Audio efectivo de la grabación (3.1.3): `true` si lleva pista AAC. */
+    val audioEnabled: Boolean = false,
+    val audioSampleRate: Int? = null,
+    val audioChannels: Int? = null,
+    val audioEncoderName: String? = null,
+    /** Por qué es video-only aunque se pidiera audio (`null` si hay audio). */
+    val audioReason: String? = null,
+    /** Origen de timestamps de la cámara (`realtime`/`unknown`/null, §4). */
+    val timestampSource: String? = null,
 ) {
     fun toMap(): Map<String, Any?> = mapOf(
         "recordingId" to recordingId,
@@ -61,6 +72,12 @@ data class RecordingStartedInfo(
         "rotationDegrees" to rotationDegrees,
         "lowStorageWarning" to lowStorageWarning,
         "cbrSupported" to cbrSupported,
+        "audioEnabled" to audioEnabled,
+        "audioSampleRate" to audioSampleRate,
+        "audioChannels" to audioChannels,
+        "audioEncoderName" to audioEncoderName,
+        "audioReason" to audioReason,
+        "timestampSource" to timestampSource,
     )
 }
 
@@ -90,6 +107,18 @@ data class RecordingSegmentResult(
     val ioPhaseMs: Long? = null,
     val closedCleanly: Boolean,
     val reason: String?,
+    /** Audio (3.1.3, plan §8.1): lo que el verificador vio en la
+     * pista AAC del segmento; `audioGapSamples` cuenta las muestras
+     * de audio perdidas (tardías o descartadas por cola llena). */
+    val hasAudio: Boolean = false,
+    val audioDurationMs: Long? = null,
+    val audioSampleCount: Int? = null,
+    val audioSampleRate: Int? = null,
+    val audioChannels: Int? = null,
+    val avOffsetMs: Long? = null,
+    val avDurationDiffMs: Long? = null,
+    val audioReason: String? = null,
+    val audioGapSamples: Int = 0,
 ) {
     fun toMap(): Map<String, Any?> = mapOf(
         "recordingId" to recordingId,
@@ -109,6 +138,15 @@ data class RecordingSegmentResult(
         "ioPhaseMs" to ioPhaseMs,
         "closedCleanly" to closedCleanly,
         "reason" to reason,
+        "hasAudio" to hasAudio,
+        "audioDurationMs" to audioDurationMs,
+        "audioSampleCount" to audioSampleCount,
+        "audioSampleRate" to audioSampleRate,
+        "audioChannels" to audioChannels,
+        "avOffsetMs" to avOffsetMs,
+        "avDurationDiffMs" to avDurationDiffMs,
+        "audioReason" to audioReason,
+        "audioGapSamples" to audioGapSamples,
     )
 }
 
@@ -134,6 +172,9 @@ data class RecordingResult(
     val status: String,
     val errorCode: String?,
     val previewRestoreError: String?,
+    /** Audio de la grabación (3.1.3, plan §8.1): `true` si al menos
+     * un segmento lleva pista AAC. */
+    val audioEnabled: Boolean = false,
 ) {
     fun toMap(): Map<String, Any?> = mapOf(
         "recordingId" to recordingId,
@@ -144,6 +185,7 @@ data class RecordingResult(
         "status" to status,
         "errorCode" to errorCode,
         "previewRestoreError" to previewRestoreError,
+        "audioEnabled" to audioEnabled,
     )
 
     companion object {
@@ -178,6 +220,7 @@ data class RecordingResult(
                 status = status,
                 errorCode = errorCode,
                 previewRestoreError = previewRestoreError,
+                audioEnabled = segments.any { it.hasAudio },
             )
         }
     }
@@ -197,7 +240,28 @@ data class RecordingStatusSnapshot(
     /** Segmentos verificados hasta ahora (paso 6): la UI los recupera
      * al re-sincronizar sin haber visto los eventos. */
     val segments: List<RecordingSegmentResult> = emptyList(),
-)
+    /** Audio (3.1.3, plan §8.1): pedido con efecto, activo en el
+     * segmento actual y motivo cuando falta o se perdió. */
+    val audioEnabled: Boolean = false,
+    val audioActive: Boolean = false,
+    val audioReason: String? = null,
+) {
+    fun toMap(): Map<String, Any?> = mapOf(
+        "state" to state,
+        "recordingId" to recordingId,
+        "elapsedMs" to elapsedMs,
+        "segmentIndex" to segmentIndex,
+        "segmentDurationMs" to segmentDurationMs,
+        "width" to width,
+        "height" to height,
+        "fps" to fps,
+        "errorCode" to errorCode,
+        "segments" to segments.map { it.toMap() },
+        "audioEnabled" to audioEnabled,
+        "audioActive" to audioActive,
+        "audioReason" to audioReason,
+    )
+}
 
 /** Segmento interrumpido (`.tmp.mp4`) clasificado en la recuperación. */
 data class InterruptedSegmentInfo(
@@ -209,6 +273,18 @@ data class InterruptedSegmentInfo(
     val durationMs: Long?,
     val sizeBytes: Long,
     val reason: String?,
+)
+
+/**
+ * Configuración de audio decidida para una grabación (3.1.3): la
+ * configuración AAC elegida por la escalera (§2 D1) y el nombre del
+ * codificador AAC real. La produce `audioCapabilityCheck`; el nombre
+ * viene de `AudioEncoder.checkAacCapabilities()` (`AudioCapabilities`
+ * no lo lleva).
+ */
+data class AudioSetup(
+    val config: AudioEncoderConfig,
+    val encoderName: String,
 )
 
 /**
@@ -275,6 +351,26 @@ open class RecordingSession(
     /** Timeouts (inyectables para las unitarias; 5 s en producción). */
     private val formatTimeoutMs: Long = FORMAT_TIMEOUT_MS,
     private val eosTimeoutMs: Long = EOS_TIMEOUT_MS,
+    /**
+     * Fábrica del encoder de audio (3.1.3): por defecto el real
+     * (`AudioEncoder`); en las unitarias se sustituye por un falso
+     * (un `AudioRecord` real no existe en JVM).
+     */
+    private val audioEncoderFactory: (AudioEncoderConfig) -> AudioEncoderPort =
+        { AudioEncoder(it) },
+    /**
+     * Comprobación de capacidades de audio (3.1.3, §2 D1): mide las
+     * capacidades reales y decide la configuración AAC (escalera
+     * 48 kHz → 44,1 kHz) con el nombre del encoder. Por defecto la
+     * real; en las unitarias se sustituye.
+     */
+    private val audioCapabilityCheck: () -> AudioSetup = {
+        val caps = measureAudioCapabilities()
+        val config = chooseAudioConfig(caps)
+        AudioSetup(config, AudioEncoder.checkAacCapabilities().encoderName)
+    },
+    /** Espera del formato AAC desde el formato de video (2 s, §5.1). */
+    private val audioFormatTimeoutMs: Long = AUDIO_FORMAT_TIMEOUT_MS,
     private val freeSpaceBytes: () -> Long = {
         try {
             StatFs(fileStore.recordingsDir.absolutePath).availableBytes
@@ -328,6 +424,79 @@ open class RecordingSession(
     private var outputFormat: MediaFormat? = null
     private var formatDeferred: CompletableDeferred<MediaFormat>? = null
     private var eosDeferred: CompletableDeferred<Unit>? = null
+    /** El primer segmento queda abierto cuando lo permite la guarda
+     * de audio (o expira la espera); `start()` lo espera. */
+    private var segmentOpenDeferred: CompletableDeferred<Unit>? = null
+
+    // --- Audio (3.1.3, plan §4-§5) ---
+    /** Encoder AAC + `AudioRecord` (su propio hilo de lectura y su
+     * propio hilo de callback; nunca el hilo del encoder de video). */
+    private var audioEncoder: AudioEncoderPort? = null
+    private var audioConfig: AudioEncoderConfig? = null
+    private var audioEncoderName: String = ""
+    /** Formato de salida real del encoder AAC (con `csd-0`). */
+    @Volatile
+    private var audioFormat: MediaFormat? = null
+    private var audioEosDeferred: CompletableDeferred<Unit>? = null
+    /** Generación del encoder de audio vigente: cada (re)creación la
+     * incrementa; los callbacks de un encoder ya liberado se
+     * descartan por generación (el `HandlerThread` puede entregar
+     * mensajes encolados tras `release()`). */
+    @Volatile
+    private var audioGeneration: Int = 0
+    /** Audio pedido por la UI y con encoder creado (puede degradar a
+     * video-only: la espera expiró o el micrófono falló). */
+    private var audioExpected: Boolean = false
+    /** Motivo por el que la grabación es video-only aunque se pidiera
+     * audio (`audio_format_timeout`, `audio_mic_unavailable`). */
+    private var audioReason: String? = null
+    /** Pérdida de audio en caliente (D7): el video continúa; la
+     * recreación en segundo plano intenta recuperar el audio para el
+     * segmento siguiente, nunca a mitad de uno. */
+    @Volatile
+    private var audioLost: Boolean = false
+    private var audioLostReason: String? = null
+    private var audioLostSegmentIndex: Int? = null
+    /** Una recreación en segundo plano en curso (como mucho una por
+     * segmento: si también falla, se reintenta en la rotación). */
+    @Volatile
+    private var audioRecreateInFlight: Boolean = false
+    /** Segmento para el que ya se lanzó una recreación. */
+    private var audioRecreatedSegmentIndex: Int? = null
+    /** Espera del formato AAC expirada (2 s desde el formato de
+     * video) o forzada por el buffer pre-muxer lleno. */
+    @Volatile
+    private var audioFormatWaitExpired: Boolean = false
+    /** Origen de timestamps de la cámara (`realtime`/`unknown`/null). */
+    private var timestampSource: String? = null
+    /** Pista de audio del muxer del segmento actual (`-1` si no hay). */
+    private var audioTrackIndex: Int = -1
+    /** El segmento actual lleva pista de audio en el muxer (es la
+     * expectativa que usa la verificación). */
+    private var segmentAudioExpected: Boolean = false
+    /** Generación del encoder que abrió la pista de audio del
+     * segmento actual (`-1` si no hay pista). */
+    private var segmentAudioGeneration: Int = -1
+    private var segmentAudioSampleRate: Int? = null
+    private var segmentAudioChannels: Int? = null
+    /** Motivo de audio del segmento actual (video-only al abrir o
+     * pérdida en caliente durante el segmento). */
+    private var segmentAudioReason: String? = null
+    /** Origen común del segmento actual (`CLOCK_MONOTONIC`, µs):
+     * `min(primer PTS de video, primer PTS de audio)` (§4.2). */
+    private var segmentOriginUs: Long? = null
+    private var segmentFirstAudioPtsUs: Long? = null
+    private var segmentAudioSamples: Int = 0
+    private var segmentAudioLastPtsUs: Long? = null
+    /** Muestras de audio perdidas (tardías o descartadas por cola
+     * llena); > 5 en una rotación es `audio_gap` en el diagnóstico. */
+    private var segmentAudioGapSamples: Int = 0
+    /** Muestras de video antes de fijar el origen (copias en heap;
+     * acotado a 150; nunca se tira una muestra). */
+    private val preMuxerVideoBuffer = ArrayDeque<BufferedSample>()
+    /** Muestras de audio pendientes de escribir (solo las toca el
+     * hilo del encoder de video; acotado a 100). */
+    private val audioQueue = ArrayDeque<BufferedSample>()
 
     // --- Estado del segmento actual (confinado al hilo del encoder,
     // salvo los volátiles que lee el estado) ---
@@ -387,6 +556,9 @@ open class RecordingSession(
             segments = synchronized(segmentResults) {
                 segmentResults.sortedBy { it.index }.toList()
             },
+            audioEnabled = audioExpected,
+            audioActive = segmentAudioExpected && muxer != null,
+            audioReason = if (audioLost) audioLostReason else audioReason,
         )
     }
 
@@ -406,6 +578,9 @@ open class RecordingSession(
         rotationDegrees: Int,
         matchId: String?,
         cameraManager: CameraManager?,
+        /** Audio (3.1.3): `true` pide pista AAC; sin micrófono o con
+         * fallo de audio la grabación arranca video-only (D9). */
+        audioEnabled: Boolean = false,
     ): RecordingStartedInfo {
         val currentState = sessionMutex.withLock {
             when (state) {
@@ -445,8 +620,67 @@ open class RecordingSession(
         maxWriteLatencyMs = 0
         drainStopped = false
         rotationPending = false
+        // Audio (3.1.3): el estado se reinicia por grabación; el
+        // encoder de audio se crea después del de video (D4).
+        audioEncoder = null
+        audioConfig = null
+        audioEncoderName = ""
+        audioFormat = null
+        audioEosDeferred = null
+        audioExpected = false
+        audioReason = null
+        audioLost = false
+        audioLostReason = null
+        audioLostSegmentIndex = null
+        audioRecreateInFlight = false
+        audioRecreatedSegmentIndex = null
+        audioFormatWaitExpired = false
+        timestampSource = null
+        audioTrackIndex = -1
+        segmentAudioExpected = false
+        segmentAudioGeneration = -1
+        segmentAudioSampleRate = null
+        segmentAudioChannels = null
+        segmentAudioReason = null
+        segmentOriginUs = null
+        segmentFirstAudioPtsUs = null
+        segmentAudioSamples = 0
+        segmentAudioLastPtsUs = null
+        segmentAudioGapSamples = 0
+        preMuxerVideoBuffer.clear()
+        audioQueue.clear()
 
         try {
+            // Origen de timestamps de la cámara (§4): `realtime`
+            // (CLOCK_MONOTONIC) es la base que exige el plan; se
+            // registra en `recording_started` para el diagnóstico.
+            timestampSource = try {
+                val characteristics = cameraManager
+                    ?.getCameraCharacteristics(previewConfig.cameraId)
+                when (
+                    characteristics?.get(
+                        CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE,
+                    )
+                ) {
+                    CameraCharacteristics
+                        .SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME -> "realtime"
+                    CameraCharacteristics
+                        .SENSOR_INFO_TIMESTAMP_SOURCE_UNKNOWN -> "unknown"
+                    else -> null
+                }
+            } catch (_: Exception) {
+                null
+            }
+            Transmiti2Logger.d(
+                "recording: timestampSource=$timestampSource",
+            )
+            // Audio pedido: se marca la expectativa ANTES de crear el
+            // encoder de video, para que `maybeOpenSegment` (que corre
+            // al llegar el formato de video) espere al formato AAC.
+            if (audioEnabled) {
+                audioExpected = true
+            }
+
             // Almacenamiento: < 200 MB no se empieza; < 2 GB avisa.
             val free = freeSpaceBytes()
             if (free < MIN_FREE_BYTES_START) {
@@ -496,8 +730,14 @@ open class RecordingSession(
             encoder = created
             formatDeferred = CompletableDeferred()
             eosDeferred = CompletableDeferred()
+            segmentOpenDeferred = CompletableDeferred()
             created.listener = this
             created.configureAndStart()
+            // Audio (3.1.3, D4/D9): se crea tras el encoder de video;
+            // un fallo aquí nunca hace fallar el inicio (video-only).
+            if (audioExpected) {
+                tryStartAudio()
+            }
             val inputSurface: Surface = created.surface
                 ?: throw RecordingException.encoderError(
                     "Sin superficie de entrada del encoder.",
@@ -536,6 +776,19 @@ open class RecordingSession(
                     mapOf("stage" to "start"),
                 )
             }
+            // El primer segmento se abre en `maybeOpenSegment` (hilo
+            // del encoder): con audio, espera al formato AAC o a la
+            // expiración de 2 s; video-only abre de inmediato.
+            try {
+                withTimeout(formatTimeoutMs) {
+                    segmentOpenDeferred!!.await()
+                }
+            } catch (e: TimeoutCancellationException) {
+                throw RecordingException.encoderError(
+                    "El primer segmento no se abrió en 5 s.",
+                    mapOf("stage" to "start"),
+                )
+            }
             // La parada pudo llegar mientras se esperaba el formato
             // (el motor serializa, pero no se confía en ello).
             if (state != RecordingState.STARTING) {
@@ -546,6 +799,9 @@ open class RecordingSession(
             }
             outputFormat = format
             state = RecordingState.RECORDING
+            // Audio efectivo del inicio: el segmento 0 lleva pista AAC
+            // solo si el formato llegó y el muxer la añadió.
+            val effectiveAudio = audioExpected && audioFormat != null
             val info = RecordingStartedInfo(
                 recordingId = id,
                 matchId = matchId,
@@ -559,6 +815,24 @@ open class RecordingSession(
                 rotationDegrees = rotationDegrees,
                 lowStorageWarning = lowStorageWarning,
                 cbrSupported = caps.cbrSupported,
+                audioEnabled = effectiveAudio,
+                audioSampleRate = if (effectiveAudio) {
+                    audioConfig?.sampleRate
+                } else {
+                    null
+                },
+                audioChannels = if (effectiveAudio) {
+                    audioConfig?.channels
+                } else {
+                    null
+                },
+                audioEncoderName = if (effectiveAudio) {
+                    audioEncoderName.takeIf { it.isNotEmpty() }
+                } else {
+                    null
+                },
+                audioReason = audioReason,
+                timestampSource = timestampSource,
             )
             emitEvent(StreamContract.EVENT_RECORDING_STARTED, info.toMap())
             Transmiti2Logger.d("recording: iniciada $id")
@@ -601,6 +875,15 @@ open class RecordingSession(
         }
         encoder = null
         outputFormat = null
+        // Audio (3.1.3, §5.3): ningún camino de salida deja el
+        // micrófono abierto.
+        try {
+            audioEncoder?.release()
+        } catch (_: Exception) {
+        }
+        audioEncoder = null
+        audioFormat = null
+        audioEosDeferred = null
         // Solo se restaura la vista previa si se llegó a recrear la
         // sesión; si no, la sesión sigue siendo de solo vista previa.
         if (sessionRecreated) {
@@ -635,7 +918,9 @@ open class RecordingSession(
         outputFormat = format
         val deferred = formatDeferred
         try {
-            openSegment(segmentIndex)
+            // Con audio, el segmento se abre cuando llega el formato
+            // AAC (o expira la espera de 2 s); video-only abre ya.
+            maybeOpenSegment()
             deferred?.complete(format)
         } catch (e: Exception) {
             val error = when (e) {
@@ -650,6 +935,453 @@ open class RecordingSession(
                 )
             }
             deferred?.completeExceptionally(error)
+        }
+        // Espera del formato AAC acotada (2 s desde el formato de
+        // video, §5.1): si no llega, el segmento se abre video-only
+        // con motivo `audio_format_timeout`. Video-only no espera.
+        if (audioExpected) {
+            scope.launch {
+                delay(audioFormatTimeoutMs)
+                try {
+                    encoder?.post { onAudioFormatTimeout() }
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    // --- Audio (3.1.3, plan §4-§5) ---
+    // Todo lo de audio corre en el hilo del encoder de video salvo
+    // la creación (en `start()`, hilo del motor) y la recreación (en
+    // segundo plano). Los callbacks del encoder de audio llegan en su
+    // propio hilo: copian el buffer y publican (`post`) al hilo del
+    // encoder de video, que es el único que toca el muxer y las
+    // colas. La generación descarta callbacks de un encoder ya
+    // liberado.
+
+    /**
+     * Crea y arranca el encoder de audio (D4). Nunca lanza: un fallo
+     * (micrófono no disponible, sin codificador AAC, `AudioRecord`
+     * que no se inicializa) degrada a video-only con el motivo en
+     * `audioReason` y la grabación arranca (D9).
+     */
+    private fun tryStartAudio() {
+        try {
+            val setup = audioCapabilityCheck()
+            val created = audioEncoderFactory(setup.config)
+            audioGeneration++
+            created.listener = audioListenerFor(audioGeneration)
+            created.configureAndStart()
+            audioEncoder = created
+            audioConfig = setup.config
+            audioEncoderName = setup.encoderName
+            audioEosDeferred = CompletableDeferred()
+            Transmiti2Logger.d(
+                "recording: audio ${setup.config.sampleRate} Hz " +
+                    "${setup.config.channels}ch " +
+                    "${setup.config.bitrateBps} bps " +
+                    "(${setup.encoderName})",
+            )
+        } catch (e: Exception) {
+            // Micrófono no disponible o AAC que no arranca: video-only.
+            audioReason = "audio_mic_unavailable"
+            audioExpected = false
+            audioEncoder = null
+            audioConfig = null
+            audioEncoderName = ""
+            Transmiti2Logger.e(
+                "recording: sin audio (${e.javaClass.simpleName}): " +
+                    "video-only",
+            )
+            // El segmento ya no espera al formato AAC: se abre
+            // video-only en el hilo del encoder (si el formato de
+            // video aún no llegó, `onOutputFormatChanged` lo abre).
+            try {
+                encoder?.post { maybeOpenSegment() }
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    /** Listener del encoder de audio con la generación capturada. */
+    private fun audioListenerFor(generation: Int): AudioEncoderListener =
+        object : AudioEncoderListener {
+            override fun onAudioFormatChanged(format: MediaFormat) {
+                this@RecordingSession.onAudioFormatChanged(format, generation)
+            }
+
+            override fun onAudioSample(
+                buffer: ByteBuffer,
+                info: MediaCodec.BufferInfo,
+            ) {
+                this@RecordingSession.onAudioSample(buffer, info, generation)
+            }
+
+            override fun onAudioError(e: Exception) {
+                this@RecordingSession.onAudioError(e, generation)
+            }
+
+            override fun onAudioEndOfStream() {
+                this@RecordingSession.onAudioEndOfStream(generation)
+            }
+        }
+
+    /**
+     * Formato AAC recibido (hilo del encoder de audio): se guarda y
+     * se publica al hilo del encoder de video, que abre el segmento
+     * si la guarda lo permite. Un formato tardío (tras degradar a
+     * video-only) se ignora.
+     */
+    private fun onAudioFormatChanged(format: MediaFormat, generation: Int) {
+        if (generation != audioGeneration) return
+        if (!audioExpected) return
+        if (audioFormat != null) return
+        audioFormat = format
+        try {
+            encoder?.post { maybeOpenSegment() }
+        } catch (_: Exception) {
+        }
+    }
+
+    /**
+     * Muestra AAC (hilo del encoder de audio): el `ByteBuffer` solo
+     * es válido durante la llamada, así que se copia en heap y la
+     * copia se publica al hilo del encoder de video.
+     */
+    private fun onAudioSample(
+        buffer: ByteBuffer,
+        info: MediaCodec.BufferInfo,
+        generation: Int,
+    ) {
+        if (generation != audioGeneration) return
+        if (drainStopped) return
+        if (!audioExpected) return
+        val copy = copySampleBuffer(buffer, info)
+        val infoCopy = MediaCodec.BufferInfo().apply {
+            offset = 0
+            size = info.size
+            presentationTimeUs = info.presentationTimeUs
+            flags = info.flags
+        }
+        try {
+            encoder?.post {
+                onAudioSampleOnEncoderThread(copy, infoCopy, generation)
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    /** Copia en heap del rango válido de un buffer de salida. */
+    private fun copySampleBuffer(
+        buffer: ByteBuffer,
+        info: MediaCodec.BufferInfo,
+    ): ByteBuffer {
+        val dup = buffer.duplicate()
+        dup.position(info.offset)
+        dup.limit(info.offset + info.size)
+        return ByteBuffer.allocate(info.size).apply {
+            put(dup)
+            flip()
+        }
+    }
+
+    /** Copia de un `BufferInfo` (la clase no tiene `copy()`). */
+    private fun copyInfo(info: MediaCodec.BufferInfo): MediaCodec.BufferInfo =
+        MediaCodec.BufferInfo().apply {
+            offset = 0
+            size = info.size
+            presentationTimeUs = info.presentationTimeUs
+            flags = info.flags
+        }
+
+    /**
+     * Muestra AAC en el hilo del encoder de video: se encola (acotada
+     * a 100) y se vacía lo que ya se puede escribir. Una muestra de
+     * otra generación (encoder recreado a mitad de segmento) se
+     * descarta: el audio se reanuda solo en el segmento siguiente
+     * (D7). Una muestra tardía (PTS anterior a la frontera del
+     * segmento actual) también se descarta y se cuenta.
+     */
+    private fun onAudioSampleOnEncoderThread(
+        buffer: ByteBuffer,
+        info: MediaCodec.BufferInfo,
+        generation: Int,
+    ) {
+        if (drainStopped) return
+        if (!audioExpected) return
+        if (!segmentAudioExpected) return
+        if (generation != segmentAudioGeneration) return
+        val ptsUs = info.presentationTimeUs
+        val firstVideo = segmentFirstPtsUs
+        if (segmentIndex > 0 && firstVideo != null && ptsUs < firstVideo) {
+            // Pertenece a un segmento ya cerrado (llegó tras la
+            // rotación): se descarta y se cuenta (§5.2).
+            segmentAudioGapSamples++
+            return
+        }
+        if (segmentFirstAudioPtsUs == null) {
+            segmentFirstAudioPtsUs = ptsUs
+        }
+        if (audioQueue.size >= AUDIO_QUEUE_MAX_SAMPLES) {
+            // Cola llena: se descarta la más antigua (el origen ya
+            // está fijado por el primer PTS guardado).
+            audioQueue.removeFirst()
+            segmentAudioGapSamples++
+        }
+        audioQueue.addLast(BufferedSample(buffer, info))
+        maybeFixOrigin()
+        flushAudioQueue(null)
+    }
+
+    /**
+     * Error del encoder de audio o pérdida del micrófono (hilo del
+     * encoder de audio): se marca la pérdida, se emite
+     * `recording_audio_lost` y el video continúa (D7). La recreación
+     * en segundo plano intenta recuperar el audio para el segmento
+     * siguiente.
+     */
+    private fun onAudioError(e: Exception, generation: Int) {
+        if (generation != audioGeneration) return
+        if (audioLost) return
+        val reason = (e as? RecordingException)?.details?.get("reason")
+            as? String ?: "audio_encoder_error"
+        audioLost = true
+        audioLostReason = reason
+        audioLostSegmentIndex = segmentIndex
+        if (audioLostSegmentIndex == segmentIndex) {
+            segmentAudioReason = reason
+        }
+        // El formato del encoder muerto queda obsoleto: sin él, la
+        // rotación abre el segmento siguiente video-only (no con una
+        // pista vacía); la recreación pone el formato nuevo.
+        audioFormat = null
+        Transmiti2Logger.e(
+            "recording: audio perdido ($reason) en el segmento " +
+                "$segmentIndex; el video continúa",
+        )
+        emitEvent(
+            StreamContract.EVENT_RECORDING_AUDIO_LOST,
+            mapOf(
+                "recordingId" to recordingId,
+                "reason" to reason,
+                "segmentIndex" to segmentIndex,
+                "message" to (e.message ?: "Audio perdido."),
+            ),
+        )
+        launchAudioRecreation()
+    }
+
+    /** Fin del drenado de audio tras `signalEndOfInputStream`. */
+    private fun onAudioEndOfStream(generation: Int) {
+        if (generation != audioGeneration) return
+        audioEosDeferred?.complete(Unit)
+    }
+
+    /**
+     * Abre el segmento actual cuando la guarda lo permite (hilo del
+     * encoder de video): formato de video conocido Y (formato AAC
+     * conocido O video-only). Si el muxer ya está abierto, no hace
+     * nada. Completa `segmentOpenDeferred` al abrir el primer
+     * segmento (lo espera `start()`).
+     */
+    private fun maybeOpenSegment() {
+        if (muxer != null) return
+        if (outputFormat == null) return
+        if (audioExpected && audioFormat == null) return
+        try {
+            openSegment(segmentIndex)
+            if (segmentIndex == 0) {
+                segmentOpenDeferred?.complete(Unit)
+            }
+        } catch (e: Exception) {
+            if (segmentIndex == 0) {
+                segmentOpenDeferred?.completeExceptionally(e)
+            }
+            throw e
+        }
+    }
+
+    /**
+     * La espera del formato AAC expiró (2 s desde el formato de
+     * video): degradación a video-only con motivo
+     * `audio_format_timeout` (§5.1). El encoder de audio se libera
+     * (nunca entregó su formato; el micrófono no sirve para nada) y
+     * el segmento se abre video-only. Si el formato ya llegó, no
+     * hace nada.
+     */
+    private fun onAudioFormatTimeout() {
+        if (!audioExpected || audioFormat != null) return
+        audioFormatWaitExpired = true
+        audioReason = "audio_format_timeout"
+        Transmiti2Logger.d(
+            "recording: formato AAC no llegó en 2 s; video-only",
+        )
+        try {
+            audioEncoder?.release()
+        } catch (_: Exception) {
+        }
+        audioEncoder = null
+        audioFormat = null
+        audioEosDeferred = null
+        audioExpected = false
+        maybeOpenSegment()
+        maybeFixOrigin()
+    }
+
+    /**
+     * Fija el origen común del segmento actual (§4.2):
+     * `min(primer PTS de video, primer PTS de audio)`. Con pista de
+     * audio espera al primer PTS de audio salvo que la espera haya
+     * expirado (entonces fija desde video y las muestras de audio
+     * anteriores al origen se descartan como tardías). Video-only
+     * fija desde video, idéntico a 3.1.2. Al fijarlo vacía el buffer
+     * pre-muxer y la cola de audio.
+     */
+    private fun maybeFixOrigin() {
+        if (segmentOriginUs != null) return
+        val firstVideo = segmentFirstPtsUs ?: return
+        if (segmentAudioExpected) {
+            val firstAudio = segmentFirstAudioPtsUs
+            if (firstAudio == null && !audioFormatWaitExpired) return
+            segmentOriginUs = segmentOrigin(firstVideo, firstAudio)
+        } else {
+            segmentOriginUs = firstVideo
+        }
+        flushPreMuxerBuffer()
+        flushAudioQueue(null)
+    }
+
+    /** Vacía el buffer pre-muxer de video al muxer (origen fijado). */
+    private fun flushPreMuxerBuffer() {
+        if (segmentOriginUs == null) return
+        val target = muxer ?: return
+        if (trackIndex < 0) return
+        while (preMuxerVideoBuffer.isNotEmpty()) {
+            val sample = preMuxerVideoBuffer.removeFirst()
+            writeSample(
+                target,
+                sample.buffer,
+                sample.info,
+                sample.info.presentationTimeUs,
+            )
+        }
+    }
+
+    /**
+     * Vacía la cola de audio al muxer. Sin frontera escribe todo lo
+     * encolado; con frontera (`rotate()`), solo las muestras con PTS
+     * anterior a ella (el resto queda en cola para el segmento
+     * siguiente). Las muestras con PTS rebajado negativo (anteriores
+     * al origen) se descartan y se cuentan.
+     */
+    private fun flushAudioQueue(boundaryUs: Long?) {
+        val origin = segmentOriginUs ?: return
+        val target = muxer ?: return
+        if (audioTrackIndex < 0) return
+        while (audioQueue.isNotEmpty()) {
+            val head = audioQueue.first()
+            if (boundaryUs != null &&
+                !assignAudioToSegment(
+                    head.info.presentationTimeUs,
+                    boundaryUs,
+                )
+            ) {
+                break
+            }
+            audioQueue.removeFirst()
+            writeAudioSample(target, head.buffer, head.info, origin)
+        }
+    }
+
+    /** Escribe una muestra de audio en el muxer (PTS rebasado al origen). */
+    private fun writeAudioSample(
+        target: RecordingMuxer,
+        buffer: ByteBuffer,
+        info: MediaCodec.BufferInfo,
+        originUs: Long,
+    ) {
+        val rebasedPtsUs = info.presentationTimeUs - originUs
+        if (rebasedPtsUs < 0) {
+            // Anterior al origen (el origen se fijó desde video tras
+            // expirar la espera): se descarta y se cuenta.
+            segmentAudioGapSamples++
+            return
+        }
+        val rebased = MediaCodec.BufferInfo().apply {
+            offset = info.offset
+            size = info.size
+            presentationTimeUs = rebasedPtsUs
+            flags = info.flags
+        }
+        try {
+            target.writeSampleData(audioTrackIndex, buffer, rebased)
+        } catch (e: Exception) {
+            scheduleErrorStop(
+                RecordingException.muxerError(
+                    "Error al escribir audio en el muxer: ${e.message}",
+                    mapOf(
+                        "stage" to "writeAudioSample",
+                        "segmentIndex" to segmentIndex,
+                        "exceptionClass" to e.javaClass.simpleName,
+                    ),
+                ),
+            )
+            return
+        }
+        segmentAudioSamples++
+        segmentAudioLastPtsUs = info.presentationTimeUs
+    }
+
+    /**
+     * Recreación del audio en segundo plano tras una pérdida (D7):
+     * libera el encoder viejo, crea uno nuevo y lo arranca. Si tiene
+     * éxito, el segmento siguiente recupera la pista (el formato
+     * llega de forma asíncrona y `openSegment` lo añade); el segmento
+     * en curso no recibe muestras del encoder nuevo (la generación
+     * del segmento no coincide). Como mucho una por segmento: si
+     * también falla, se reintenta en la rotación.
+     */
+    private fun launchAudioRecreation() {
+        if (audioRecreateInFlight) return
+        if (audioRecreatedSegmentIndex == segmentIndex) return
+        if (state != RecordingState.RECORDING &&
+            state != RecordingState.ROTATING_SEGMENT
+        ) {
+            return
+        }
+        audioRecreateInFlight = true
+        audioRecreatedSegmentIndex = segmentIndex
+        scope.launch {
+            try {
+                try {
+                    audioEncoder?.release()
+                } catch (_: Exception) {
+                }
+                audioEncoder = null
+                audioFormat = null
+                val setup = audioCapabilityCheck()
+                val created = audioEncoderFactory(setup.config)
+                audioGeneration++
+                created.listener = audioListenerFor(audioGeneration)
+                created.configureAndStart()
+                audioEncoder = created
+                audioConfig = setup.config
+                audioEncoderName = setup.encoderName
+                audioEosDeferred = CompletableDeferred()
+                audioLost = false
+                audioLostReason = null
+                Transmiti2Logger.d(
+                    "recording: audio recreado " +
+                        "(${setup.config.sampleRate} Hz)",
+                )
+            } catch (e: Exception) {
+                Transmiti2Logger.e(
+                    "recording: no se pudo recrear el audio: " +
+                        "${e.javaClass.simpleName}",
+                )
+            } finally {
+                audioRecreateInFlight = false
+            }
         }
     }
 
@@ -676,6 +1408,15 @@ open class RecordingSession(
             created = muxerFactory(staging.absolutePath)
             created.setOrientationHint(rotationDegrees)
             trackIndex = created.addTrack(format)
+            // Pista de audio (3.1.3): el formato AAC retenido se
+            // reutiliza para CADA segmento nuevo (el encoder solo
+            // emite el `csd` una vez); sin formato, video-only.
+            val audioFormatNow = if (audioExpected) audioFormat else null
+            audioTrackIndex = if (audioFormatNow != null) {
+                created.addTrack(audioFormatNow)
+            } else {
+                -1
+            }
             created.start()
         } catch (e: Exception) {
             throw RecordingException.muxerError(
@@ -700,6 +1441,35 @@ open class RecordingSession(
         segmentPtsMonotonic = true
         segmentLastPtsUs = null
         rotationForced = false
+        // Audio del segmento (3.1.3): la expectativa de audio es
+        // tener pista en el muxer; la generación es la del encoder
+        // que la abrió (las muestras de otro encoder no entran).
+        segmentAudioExpected = audioTrackIndex >= 0
+        segmentAudioGeneration = if (segmentAudioExpected) {
+            audioGeneration
+        } else {
+            -1
+        }
+        segmentAudioSampleRate = if (segmentAudioExpected) {
+            audioConfig?.sampleRate
+        } else {
+            null
+        }
+        segmentAudioChannels = if (segmentAudioExpected) {
+            audioConfig?.channels
+        } else {
+            null
+        }
+        segmentAudioReason = if (segmentAudioExpected) {
+            null
+        } else {
+            audioReason
+        }
+        segmentOriginUs = null
+        segmentFirstAudioPtsUs = null
+        segmentAudioSamples = 0
+        segmentAudioLastPtsUs = null
+        segmentAudioGapSamples = 0
         // El alta en los metadatos es síncrona (la primera muestra del
         // segmento llega enseguida y la busca); la escritura del
         // sidecar puede ser asíncrona.
@@ -710,6 +1480,8 @@ open class RecordingSession(
                     fileName = staging.name,
                     firstEncoderPtsUs = null,
                     startWallMs = segmentStartWallMs,
+                    audioExpected = segmentAudioExpected,
+                    audioReason = segmentAudioReason,
                 ),
             )
         }
@@ -734,6 +1506,22 @@ open class RecordingSession(
                 profile = config.profile,
                 bitrateMode = config.bitrateMode,
                 segments = metadataSegments.toList(),
+                audioEnabled = audioExpected && audioConfig != null,
+                audioSampleRate = if (audioExpected) {
+                    audioConfig?.sampleRate
+                } else {
+                    null
+                },
+                audioChannels = if (audioExpected) {
+                    audioConfig?.channels
+                } else {
+                    null
+                },
+                audioEncoderName = if (audioExpected) {
+                    audioEncoderName.takeIf { it.isNotEmpty() }
+                } else {
+                    null
+                },
             )
         }
         try {
@@ -793,11 +1581,6 @@ open class RecordingSession(
         // Muestras tardías (tras `stopDrain`): se ignoran, no se
         // registran como errores (lección del spike, fix `542b2d95`).
         if (drainStopped) return
-        val currentMuxer = muxer
-        if (currentMuxer == null || trackIndex < 0) {
-            samplesBeforeMuxer++
-            return
-        }
         val ptsUs = info.presentationTimeUs
         val isKeyframe = info.flags and
             MediaCodec.BUFFER_FLAG_SYNC_FRAME != 0
@@ -856,21 +1639,45 @@ open class RecordingSession(
             // Aún sin keyframe: la muestra va al segmento actual.
         }
 
+        // Sin muxer o sin origen fijado: la muestra se guarda en el
+        // buffer pre-muxer (copia en heap, acotado a 150; nunca se
+        // tira una muestra). Con audio, el origen espera al primer
+        // PTS de audio; si el buffer se llena, se fija desde video
+        // (la espera del formato ya expiró a los 2 s si no llegó).
+        val currentMuxer = muxer
+        if (currentMuxer == null || segmentOriginUs == null) {
+            if (currentMuxer == null) samplesBeforeMuxer++
+            preMuxerVideoBuffer.addLast(
+                BufferedSample(copySampleBuffer(buffer, info), copyInfo(info)),
+            )
+            if (preMuxerVideoBuffer.size >= PRE_MUXER_VIDEO_MAX_SAMPLES) {
+                audioFormatWaitExpired = true
+            }
+            maybeFixOrigin()
+            return
+        }
+
         writeSample(currentMuxer, buffer, info, ptsUs)
+        // Tras cada muestra de video, las de audio debidas se
+        // escriben (las pistas quedan entrelazadas y la cola corta).
+        flushAudioQueue(null)
     }
 
-    /** Escribe una muestra en el muxer actual (PTS rebasado a 0). */
+    /** Escribe una muestra en el muxer actual (PTS rebasado al origen). */
     private fun writeSample(
         target: RecordingMuxer,
         buffer: ByteBuffer,
         info: MediaCodec.BufferInfo,
         ptsUs: Long,
     ) {
-        val firstPts = segmentFirstPtsUs ?: ptsUs
+        // Origen común del segmento (§4.2): video-only es el primer
+        // PTS de video (idéntico a 3.1.2); con audio es el mínimo de
+        // ambos primeros PTS.
+        val origin = segmentOriginUs ?: segmentFirstPtsUs ?: ptsUs
         val rebased = MediaCodec.BufferInfo().apply {
             offset = info.offset
             size = info.size
-            presentationTimeUs = ptsUs - firstPts
+            presentationTimeUs = ptsUs - origin
             flags = info.flags
         }
         val startedMs = System.currentTimeMillis()
@@ -911,6 +1718,12 @@ open class RecordingSession(
         forced: Boolean,
     ) {
         rotationForced = forced
+        // Audio (D5): la cola se vacía con la frontera = PTS del
+        // keyframe (las muestras anteriores van al segmento actual;
+        // el resto queda en cola para el siguiente) y el buffer de
+        // video al segmento actual, antes del cierre.
+        flushAudioQueue(boundaryUs = ptsUs)
+        flushPreMuxerBuffer()
         val closed = closeCurrentSegment(cleanly = true)
         if (closed != null) {
             verifyAsync(closed, closedCleanly = true)
@@ -936,13 +1749,24 @@ open class RecordingSession(
             )
             return
         }
+        // Si el audio se perdió y aún no se recuperó, se intenta la
+        // recreación para el segmento siguiente (como mucho una por
+        // segmento).
+        if (audioLost) {
+            launchAudioRecreation()
+        }
         // El keyframe que disparó la rotación es la primera muestra
-        // del segmento nuevo (PTS rebasado a 0).
+        // del segmento nuevo (PTS rebasado a 0). El origen del nuevo
+        // segmento es el PTS del keyframe: por construcción, el primer
+        // PTS de audio del segmento nuevo es >= frontera (§4.2).
         segmentFirstPtsUs = ptsUs
+        segmentOriginUs = ptsUs
         segmentFirstKeyframe = true
         segmentLastPtsUs = ptsUs
         segmentSamples = 1
         segmentKeyframes = 1
+        segmentFirstAudioPtsUs =
+            audioQueue.firstOrNull()?.info?.presentationTimeUs
         val newIndex = segmentIndex
         scope.launch {
             updateSegmentMetadata(newIndex) {
@@ -951,6 +1775,9 @@ open class RecordingSession(
         }
         val target = muxer
         if (target != null) {
+            // Las muestras de audio en cola (>= frontera) van al
+            // segmento nuevo antes que el keyframe.
+            flushAudioQueue(null)
             writeSample(target, buffer, info, ptsUs)
         }
     }
@@ -991,6 +1818,7 @@ open class RecordingSession(
         }
         muxer = null
         trackIndex = -1
+        audioTrackIndex = -1
         segmentStagingFile = null
         val final = fileStore.segmentFile(id, index)
         val renamed = if (closedCleanly) {
@@ -998,6 +1826,14 @@ open class RecordingSession(
         } else {
             false
         }
+        // Desplazamiento del primer PTS de audio respecto al origen
+        // común (ms): `null` sin audio o sin primer PTS.
+        val audioStartOffsetMs =
+            if (segmentFirstAudioPtsUs != null && segmentOriginUs != null) {
+                (segmentFirstAudioPtsUs!! - segmentOriginUs!!) / 1_000L
+            } else {
+                null
+            }
         return ClosedSegment(
             recordingId = id,
             index = index,
@@ -1010,6 +1846,12 @@ open class RecordingSession(
             firstSampleKeyframe = firstKeyframe,
             ptsMonotonic = monotonic,
             closedCleanly = closedCleanly && renamed,
+            audioExpected = segmentAudioExpected,
+            audioSampleRate = segmentAudioSampleRate,
+            audioChannels = segmentAudioChannels,
+            audioReason = segmentAudioReason,
+            audioStartOffsetMs = audioStartOffsetMs,
+            audioGapSamples = segmentAudioGapSamples,
         )
     }
 
@@ -1045,6 +1887,9 @@ open class RecordingSession(
                 config?.width,
                 config?.height,
                 config?.fps,
+                expectedAudio = closed.audioExpected,
+                expectedSampleRate = closed.audioSampleRate,
+                expectedChannels = closed.audioChannels,
             )
         }
         val result = RecordingSegmentResult(
@@ -1065,6 +1910,15 @@ open class RecordingSession(
             ioPhaseMs = verification.checks.ioPhaseMs,
             closedCleanly = closed.closedCleanly,
             reason = verification.reason,
+            hasAudio = verification.checks.hasAudioTrack,
+            audioDurationMs = verification.checks.audioDurationMs,
+            audioSampleCount = verification.checks.audioSampleCount,
+            audioSampleRate = verification.checks.audioSampleRate,
+            audioChannels = verification.checks.audioChannels,
+            avOffsetMs = verification.checks.avOffsetMs,
+            avDurationDiffMs = verification.checks.avDurationDiffMs,
+            audioReason = closed.audioReason,
+            audioGapSamples = closed.audioGapSamples,
         )
         synchronized(segmentResults) { segmentResults.add(result) }
         updateSegmentMetadata(closed.index) {
@@ -1072,6 +1926,11 @@ open class RecordingSession(
                 status = result.status.name.lowercase(),
                 durationMs = result.durationMs,
                 sizeBytes = result.sizeBytes,
+                hasAudio = result.hasAudio,
+                audioDurationMs = result.audioDurationMs,
+                audioSampleCount = result.audioSampleCount,
+                audioStartOffsetMs = closed.audioStartOffsetMs,
+                audioReason = result.audioReason,
             )
         }
         emitEvent(StreamContract.EVENT_RECORDING_SEGMENT, result.toMap())
@@ -1174,14 +2033,19 @@ open class RecordingSession(
         }
         var previewRestoreError: String? = null
         try {
-            // EOS al encoder y drenado final (5 s); si no llega, se
-            // detiene el drenado antes de soltar el muxer (lección del
-            // spike: nunca escribir tras cerrar el muxer).
+            // EOS a ambos encoders (audio primero: parar la captura)
+            // y drenado final (5 s en total); si no llega, se detiene
+            // el drenado antes de soltar el muxer (lección del spike:
+            // nunca escribir tras cerrar el muxer).
             var eosTimedOut = false
             try {
+                audioEncoder?.signalEndOfInputStream()
                 encoder?.signalEndOfInputStream()
                 withTimeout(eosTimeoutMs) {
                     eosDeferred?.await()
+                    if (audioEncoder != null) {
+                        audioEosDeferred?.await()
+                    }
                 }
             } catch (e: TimeoutCancellationException) {
                 eosTimedOut = true
@@ -1192,9 +2056,13 @@ open class RecordingSession(
             if (eosTimedOut) {
                 drainStopped = true
                 encoder?.stopDrain()
+                audioEncoder?.stopDrain()
             }
-            // Cierre del último segmento en el hilo del encoder.
+            // Cierre del último segmento en el hilo del encoder: la
+            // cola de audio y el buffer pre-muxer se vacían antes.
             val closed = runOnEncoderThread {
+                flushAudioQueue(null)
+                flushPreMuxerBuffer()
                 closeCurrentSegment(cleanly = true)
             }
             if (closed != null) {
@@ -1233,6 +2101,15 @@ open class RecordingSession(
             }
             encoder = null
             outputFormat = null
+            // Audio (3.1.3, §5.3): ningún camino de salida deja el
+            // micrófono abierto.
+            try {
+                audioEncoder?.release()
+            } catch (_: Exception) {
+            }
+            audioEncoder = null
+            audioFormat = null
+            audioEosDeferred = null
             drainStopped = false
             rotationPending = false
         }
@@ -1373,6 +2250,15 @@ open class RecordingSession(
         }
         encoder = null
         outputFormat = null
+        // Audio (3.1.3, §5.3): ningún camino de salida deja el
+        // micrófono abierto.
+        try {
+            audioEncoder?.release()
+        } catch (_: Exception) {
+        }
+        audioEncoder = null
+        audioFormat = null
+        audioEosDeferred = null
         sessionMutex.withLock { state = RecordingState.IDLE }
     }
 
@@ -1392,6 +2278,15 @@ open class RecordingSession(
 
         /** Si el keyframe pedido no llega en 5 s, rotación forzada. */
         const val ROTATION_FORCE_TIMEOUT_MS = 5_000L
+
+        /** Espera del formato AAC desde el formato de video (§5.1). */
+        const val AUDIO_FORMAT_TIMEOUT_MS = 2_000L
+
+        /** Muestras de video en el buffer pre-muxer (§5.1, ~5 s a 30 fps). */
+        const val PRE_MUXER_VIDEO_MAX_SAMPLES = 150
+
+        /** Muestras de audio en la cola pre-muxer (§5.1, ~2,1 s). */
+        const val AUDIO_QUEUE_MAX_SAMPLES = 100
     }
 }
 
@@ -1408,4 +2303,18 @@ private data class ClosedSegment(
     val firstSampleKeyframe: Boolean,
     val ptsMonotonic: Boolean,
     val closedCleanly: Boolean,
+    /** Audio (3.1.3): expectativa y configuración del segmento. */
+    val audioExpected: Boolean = false,
+    val audioSampleRate: Int? = null,
+    val audioChannels: Int? = null,
+    val audioReason: String? = null,
+    val audioStartOffsetMs: Long? = null,
+    val audioGapSamples: Int = 0,
+)
+
+/** Muestra copiada en heap (buffer + info) para el buffer pre-muxer
+ * de video y la cola de audio. */
+private data class BufferedSample(
+    val buffer: ByteBuffer,
+    val info: MediaCodec.BufferInfo,
 )

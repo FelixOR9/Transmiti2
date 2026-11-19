@@ -179,6 +179,8 @@ class StreamEngineRecordingTest {
         var lastStartConfig: PreviewConfig? = null
         var lastStartRotation: Int? = null
         var lastStartMatchId: String? = null
+        /** Último `audioEnabled` con el que se llamó a `start` (3.1.3). */
+        var lastStartAudioEnabled: Boolean? = null
         var startError: RecordingException? = null
         var stopResult: RecordingResult = RecordingResult.empty()
         var recoverResult: List<InterruptedSegmentInfo> = emptyList()
@@ -217,11 +219,13 @@ class StreamEngineRecordingTest {
             rotationDegrees: Int,
             matchId: String?,
             cameraManager: CameraManager?,
+            audioEnabled: Boolean,
         ): RecordingStartedInfo {
             startCalls++
             lastStartConfig = previewConfig
             lastStartRotation = rotationDegrees
             lastStartMatchId = matchId
+            lastStartAudioEnabled = audioEnabled
             startError?.let { throw it }
             fakeState = "recording"
             fakeRecordingId = startedInfo.recordingId
