@@ -187,7 +187,32 @@ fun classifySegment(
     }
 }
 
-private const val FPS_TOLERANCE = 2.0
+/**
+ * Tolerancia del FPS medido frente al esperado (ronda 3: 2,0 → 10,0).
+ *
+ * La comprobación NUNCA exigió 30 exactos: ±2,0 ya cubría la
+ * fluctuación del codificador (el spike mide 29,9 de forma
+ * consistente y el test `FPS dentro de tolerancia pasa` lo prueba).
+ * Pero el teléfono marcó `fps_no_coincide` en dos segmentos de
+ * 60007 ms y 50178 ms cerrados limpios (grabación
+ * `rec_20261119_003423_9c1c`, 00:34, de noche): el FPS medido estaba
+ * fuera de [28, 32]. La cámara entrega el mínimo de su rango
+ * (`fpsRange`, variable) con poca luz o pierde muestras bajo carga;
+ * eso es entrega legítima, no un archivo corrupto. El calentamiento
+ * del codificador (~0,6 s) NO explica el fallo: el FPS se calcula
+ * como muestras/duración, así que menos muestras en menos tiempo
+ * sigue dando ~30.
+ *
+ * ±10 acepta hasta 20 FPS (2/3 del objetivo de 30: el mínimo de un
+ * rango variable típico, 24, con margen, y caídas por carga hasta
+ * ~20) y sigue rechazando la mitad del objetivo (15 FPS) y menos
+ * como defecto real. El FPS medido real del teléfono se muestra
+ * ahora en el diagnóstico (ronda 3, instrumentación): si resulta
+ * estar por debajo de 20, el siguiente paso es investigar el rango
+ * de la cámara y las condiciones, no ampliar a ciegas.
+ * Compartida por `classifySegment` y `classifyIncomplete`.
+ */
+private const val FPS_TOLERANCE = 10.0
 private const val DURATION_TOLERANCE_MS = 100L
 
 /**

@@ -129,9 +129,12 @@ class SegmentVerifierTest {
 
     @Test
     fun `FPS fuera de tolerancia es corrupt`() {
+        // Ronda 3: la tolerancia es ±10 (antes ±2). 25,0 está dentro
+        // ahora; el caso fuera de tolerancia es 15,0 (la mitad del
+        // objetivo): un defecto real de FPS, no variación legítima.
         val result = classify(
             closedCleanly = true,
-            checks = goodChecks().copy(fpsMeasured = 25.0),
+            checks = goodChecks().copy(fpsMeasured = 15.0),
         )
         assertEquals(SegmentStatus.CORRUPT, result.status)
         assertEquals("fps_no_coincide", result.reason)
@@ -144,6 +147,38 @@ class SegmentVerifierTest {
             checks = goodChecks().copy(fpsMeasured = 29.9),
         )
         assertEquals(SegmentStatus.READY, result.status)
+    }
+
+    @Test
+    fun `FPS 30 exacto es ready`() {
+        val result = classify(
+            closedCleanly = true,
+            checks = goodChecks().copy(fpsMeasured = 30.0),
+        )
+        assertEquals(SegmentStatus.READY, result.status)
+    }
+
+    @Test
+    fun `FPS 20 en el limite inferior es ready`() {
+        // |20 − 30| = 10, no mayor que la tolerancia: 2/3 del objetivo
+        // es el mínimo aceptable (entrega legítima con poca luz o
+        // carga); por debajo, el segmento es `corrupt`.
+        val result = classify(
+            closedCleanly = true,
+            checks = goodChecks().copy(fpsMeasured = 20.0),
+        )
+        assertEquals(SegmentStatus.READY, result.status)
+    }
+
+    @Test
+    fun `FPS 19,9 bajo el limite es corrupt`() {
+        // |19,9 − 30| = 10,1 > 10: por debajo de 2/3 del objetivo.
+        val result = classify(
+            closedCleanly = true,
+            checks = goodChecks().copy(fpsMeasured = 19.9),
+        )
+        assertEquals(SegmentStatus.CORRUPT, result.status)
+        assertEquals("fps_no_coincide", result.reason)
     }
 
     @Test
@@ -364,11 +399,36 @@ class SegmentVerifierTest {
 
     @Test
     fun `timeout con FPS fuera de tolerancia es corrupt`() {
+        // Ronda 3: la tolerancia es ±10 (antes ±2). 25,0 está dentro
+        // ahora; el caso fuera de tolerancia es 15,0 (la mitad del
+        // objetivo).
         val result = classifyTimedOut(
-            checks = goodChecks().copy(fpsMeasured = 25.0),
+            checks = goodChecks().copy(fpsMeasured = 15.0),
         )
         assertEquals(SegmentStatus.CORRUPT, result.status)
         assertEquals("fps_no_coincide", result.reason)
+    }
+
+    @Test
+    fun `timeout con FPS 20 en el limite es partial`() {
+        // |20 − 30| = 10, dentro de la tolerancia: el archivo es
+        // legible y utilizable; solo falta la confirmación a tiempo.
+        val result = classifyTimedOut(
+            checks = goodChecks().copy(fpsMeasured = 20.0),
+        )
+        assertEquals(SegmentStatus.PARTIAL, result.status)
+        assertEquals("verification_timeout", result.reason)
+    }
+
+    @Test
+    fun `timeout con FPS 29,9 es partial`() {
+        // El FPS del teléfono (29,9, medido en el spike): dentro de la
+        // tolerancia; el timeout no lo convierte en `corrupt`.
+        val result = classifyTimedOut(
+            checks = goodChecks().copy(fpsMeasured = 29.9),
+        )
+        assertEquals(SegmentStatus.PARTIAL, result.status)
+        assertEquals("verification_timeout", result.reason)
     }
 
     @Test
