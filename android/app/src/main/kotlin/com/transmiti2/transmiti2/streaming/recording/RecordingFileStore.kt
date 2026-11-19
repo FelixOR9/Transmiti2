@@ -21,6 +21,22 @@ data class SegmentMetadata(
     val status: String? = null,
     val durationMs: Long? = null,
     val sizeBytes: Long? = null,
+    /**
+     * Campos de audio (3.1.3, plan §9/D12): `audioExpected` indica si
+     * el segmento debía llevar audio; `hasAudio` si lo lleva de
+     * verdad; `audioDurationMs`/`audioSampleCount` miden la pista de
+     * audio; `audioStartOffsetMs` es el desplazamiento del primer
+     * PTS de audio respecto al origen común del segmento; `audioReason`
+     * registra el motivo cuando el audio falta o se pierde.
+     * Video-only: `audioExpected = false`, `hasAudio = false` y el
+     * resto en `null`.
+     */
+    val audioExpected: Boolean = false,
+    val hasAudio: Boolean = false,
+    val audioDurationMs: Long? = null,
+    val audioSampleCount: Int? = null,
+    val audioStartOffsetMs: Long? = null,
+    val audioReason: String? = null,
 )
 
 /** Metadatos de una grabación para el sidecar JSON (`<id>.json`). */
@@ -36,13 +52,22 @@ data class RecordingMetadata(
     val profile: Int,
     val bitrateMode: Int,
     val segments: List<SegmentMetadata>,
+    /**
+     * Campos de audio a nivel de grabación (3.1.3, plan §9/D12):
+     * configuración AAC elegida cuando el audio está habilitado;
+     * `null` cuando la grabación es video-only.
+     */
+    val audioEnabled: Boolean = false,
+    val audioSampleRate: Int? = null,
+    val audioChannels: Int? = null,
+    val audioEncoderName: String? = null,
 ) {
     /** JSON manual (sin dependencias): solo los campos de texto se escapan. */
     fun toJson(): String {
         val segmentsJson = segments.joinToString(",") { s ->
-            """{"index":${s.index},"fileName":"${escapeJson(s.fileName)}","firstEncoderPtsUs":${s.firstEncoderPtsUs ?: "null"},"startWallMs":${s.startWallMs},"status":${s.status?.let { "\"$it\"" } ?: "null"},"durationMs":${s.durationMs ?: "null"},"sizeBytes":${s.sizeBytes ?: "null"}}"""
+            """{"index":${s.index},"fileName":"${escapeJson(s.fileName)}","firstEncoderPtsUs":${s.firstEncoderPtsUs ?: "null"},"startWallMs":${s.startWallMs},"status":${s.status?.let { "\"$it\"" } ?: "null"},"durationMs":${s.durationMs ?: "null"},"sizeBytes":${s.sizeBytes ?: "null"},"audioExpected":${s.audioExpected},"hasAudio":${s.hasAudio},"audioDurationMs":${s.audioDurationMs ?: "null"},"audioSampleCount":${s.audioSampleCount ?: "null"},"audioStartOffsetMs":${s.audioStartOffsetMs ?: "null"},"audioReason":${s.audioReason?.let { "\"${escapeJson(it)}\"" } ?: "null"}}"""
         }
-        return """{"recordingId":"${escapeJson(recordingId)}","matchId":${matchId?.let { "\"${escapeJson(it)}\"" } ?: "null"},"width":$width,"height":$height,"fps":$fps,"bitrateBps":$bitrateBps,"rotationDegrees":$rotationDegrees,"encoderName":"${escapeJson(encoderName)}","profile":$profile,"bitrateMode":$bitrateMode,"segments":[$segmentsJson]}"""
+        return """{"recordingId":"${escapeJson(recordingId)}","matchId":${matchId?.let { "\"${escapeJson(it)}\"" } ?: "null"},"width":$width,"height":$height,"fps":$fps,"bitrateBps":$bitrateBps,"rotationDegrees":$rotationDegrees,"encoderName":"${escapeJson(encoderName)}","profile":$profile,"bitrateMode":$bitrateMode,"audioEnabled":$audioEnabled,"audioSampleRate":${audioSampleRate ?: "null"},"audioChannels":${audioChannels ?: "null"},"audioEncoderName":${audioEncoderName?.let { "\"${escapeJson(it)}\"" } ?: "null"},"segments":[$segmentsJson]}"""
     }
 }
 

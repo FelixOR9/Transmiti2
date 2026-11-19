@@ -49,6 +49,17 @@ class RecordingException(
                 details,
             )
 
+        /**
+         * Fallo de micrófono/captura de audio (3.1.3): código
+         * `audio_unavailable`. Los fallos del codec AAC usan
+         * `encoderError` con `stage = "audio"`.
+         */
+        fun audioError(
+            message: String,
+            details: Map<String, Any?> = emptyMap(),
+        ): RecordingException =
+            RecordingException(StreamContract.AUDIO_UNAVAILABLE, message, details)
+
         fun stateError(
             message: String,
             details: Map<String, Any?> = emptyMap(),

@@ -72,6 +72,14 @@ object StreamContract {
     const val EVENT_RECORDING_STOPPED = "recording_stopped"
     const val EVENT_RECORDING_ERROR = "recording_error"
 
+    /**
+     * Evento de 3.1.3: se emite cuando el audio se pierde en caliente
+     * con el video en marcha (plan §2 D7); lleva `recordingId`,
+     * `reason`, `segmentIndex` y `message`. No es un error de
+     * grabación: el estado sigue siendo `recording`.
+     */
+    const val EVENT_RECORDING_AUDIO_LOST = "recording_audio_lost"
+
     // Códigos de error (nunca llevan la clave ni la URL dentro).
     const val NOT_AVAILABLE_IN_PHASE_3_0 = "not_available_in_phase_3_0"
 

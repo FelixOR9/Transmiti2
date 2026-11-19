@@ -160,6 +160,102 @@ class RecordingFileStoreTest {
     }
 
     @Test
+    fun `sidecar con audio guarda los campos de audio con sus valores`() {
+        val metadata = RecordingMetadata(
+            recordingId = "rec_20261119_134500_ab12",
+            matchId = "match-1",
+            width = 1280,
+            height = 720,
+            fps = 30,
+            bitrateBps = 2_500_000,
+            rotationDegrees = 90,
+            encoderName = "c2.qti.avc.encoder",
+            profile = 1,
+            bitrateMode = 2,
+            // "OMX.google.aac.encoder" es un nombre de encoder AAC
+            // plausible usado solo como valor de prueba, no real.
+            audioEnabled = true,
+            audioSampleRate = 48000,
+            audioChannels = 1,
+            audioEncoderName = "OMX.google.aac.encoder",
+            segments = listOf(
+                SegmentMetadata(
+                    index = 0,
+                    fileName = "rec_20261119_134500_ab12_seg000.mp4",
+                    firstEncoderPtsUs = 123456L,
+                    startWallMs = 1_792_000_000_000L,
+                    status = "ready",
+                    durationMs = 60_000L,
+                    sizeBytes = 18_000_000L,
+                    audioExpected = true,
+                    hasAudio = true,
+                    audioDurationMs = 59_800L,
+                    audioSampleCount = 2800,
+                    audioStartOffsetMs = 150L,
+                    audioReason = null,
+                ),
+            ),
+        )
+        store.writeSidecar(metadata)
+        val json = store.sidecarFile("rec_20261119_134500_ab12").readText()
+        assertTrue(json.contains("\"audioEnabled\":true"))
+        assertTrue(json.contains("\"audioSampleRate\":48000"))
+        assertTrue(json.contains("\"audioChannels\":1"))
+        assertTrue(json.contains("\"audioEncoderName\":\"OMX.google.aac.encoder\""))
+        assertTrue(json.contains("\"audioExpected\":true"))
+        assertTrue(json.contains("\"hasAudio\":true"))
+        assertTrue(json.contains("\"audioDurationMs\":59800"))
+        assertTrue(json.contains("\"audioSampleCount\":2800"))
+        assertTrue(json.contains("\"audioStartOffsetMs\":150"))
+        assertTrue(json.contains("\"audioReason\":null"))
+    }
+
+    @Test
+    fun `sidecar video-only lleva los campos de audio en falso o null`() {
+        val metadata = RecordingMetadata(
+            recordingId = "rec_20261119_134500_cd34",
+            matchId = null,
+            width = 1280,
+            height = 720,
+            fps = 30,
+            bitrateBps = 2_500_000,
+            rotationDegrees = 0,
+            encoderName = "c2.qti.avc.encoder",
+            profile = 1,
+            bitrateMode = 2,
+            segments = listOf(
+                SegmentMetadata(
+                    index = 0,
+                    fileName = "rec_20261119_134500_cd34_seg000.mp4",
+                    firstEncoderPtsUs = 123456L,
+                    startWallMs = 1_792_000_000_000L,
+                    status = "ready",
+                    durationMs = 60_000L,
+                    sizeBytes = 18_000_000L,
+                    audioExpected = false,
+                    hasAudio = false,
+                    audioDurationMs = null,
+                    audioSampleCount = null,
+                    audioStartOffsetMs = null,
+                    audioReason = null,
+                ),
+            ),
+        )
+        store.writeSidecar(metadata)
+        val json = store.sidecarFile("rec_20261119_134500_cd34").readText()
+        assertTrue(json.contains("\"audioEnabled\":false"))
+        assertTrue(json.contains("\"audioSampleRate\":null"))
+        assertTrue(json.contains("\"audioChannels\":null"))
+        assertTrue(json.contains("\"audioEncoderName\":null"))
+        assertTrue(json.contains("\"audioExpected\":false"))
+        assertTrue(json.contains("\"hasAudio\":false"))
+        assertTrue(json.contains("\"audioDurationMs\":null"))
+        assertTrue(json.contains("\"audioSampleCount\":null"))
+        assertTrue(json.contains("\"audioStartOffsetMs\":null"))
+        assertTrue(json.contains("\"audioReason\":null"))
+    }
+
+    @Test
     fun `sidecar escapa comillas en los textos`() {
         val metadata = RecordingMetadata(
             recordingId = "rec_\"x\"",
