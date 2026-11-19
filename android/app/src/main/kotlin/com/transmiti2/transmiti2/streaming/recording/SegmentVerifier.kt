@@ -664,7 +664,23 @@ class DefaultSegmentVerifier(
     }
 
     companion object {
-        const val VERIFY_TIMEOUT_MS = 30_000L
+        /**
+         * Timeout global de verificación por segmento (ronda 2: 30 s →
+         * 60 s). Evidencia del teléfono: la verificación completa de un
+         * segmento de 60 s (lectura + decodificación completa +
+         * ExoPlayer) no cabe en 30 s mientras el codificador sigue
+         * grabando; el de 3,8 s sí. 60 s es la duración del propio
+         * segmento y el intervalo de rotación: la decodificación
+         * completa corre a ~1× en tiempo real bajo carga, así que el
+         * presupuesto debe ser al menos la duración del contenido. Con
+         * las verificaciones serializadas, cada una dispone de ese
+         * presupuesto sin competir con la siguiente, y la cola no puede
+         * crecer sin control: cada verificación está acotada por el
+         * intervalo entre rotaciones. Si aun así salta, la ronda 2
+         * conserva las medidas (`partial` + duración) en vez de
+         * descartarlas, así que el timeout ya no es un acantilado.
+         */
+        const val VERIFY_TIMEOUT_MS = 60_000L
         const val DECODER_TIMEOUT_US = 100_000L
         const val DRAIN_TIMEOUT_MS = 5_000L
     }

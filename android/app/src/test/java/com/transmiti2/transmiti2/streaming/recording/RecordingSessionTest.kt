@@ -14,6 +14,7 @@ import com.transmiti2.transmiti2.streaming.Transmiti2Logger
 import com.transmiti2.transmiti2.streaming.VideoSize
 import java.io.File
 import java.nio.ByteBuffer
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -212,6 +213,11 @@ class RecordingSessionTest {
     ) : SegmentVerifier {
         var verifyCalls = 0
         var lastClosedCleanly: Boolean? = null
+        /** Retardo artificial por verificación (prueba de serie). */
+        var verifyDelayMs: Long = 0L
+        /** Concurrencia observada dentro de `verify()`. */
+        val currentConcurrent = AtomicInteger(0)
+        val maxConcurrent = AtomicInteger(0)
 
         override suspend fun verify(
             file: File,
@@ -222,7 +228,14 @@ class RecordingSessionTest {
         ): SegmentVerification {
             verifyCalls++
             lastClosedCleanly = closedCleanly
-            return result
+            val current = currentConcurrent.incrementAndGet()
+            maxConcurrent.updateAndGet { max -> maxOf(max, current) }
+            try {
+                if (verifyDelayMs > 0) delay(verifyDelayMs)
+                return result
+            } finally {
+                currentConcurrent.decrementAndGet()
+            }
         }
     }
 
@@ -685,6 +698,96 @@ class RecordingSessionTest {
             previewRestoreError = null,
         )
         assertEquals(65_000L, result.totalDurationMs)
+        assertEquals("partial", result.status)
+    }
+
+    @Test
+    fun `las verificaciones de rotacion no corren concurrentes`() =
+        runBlocking {
+            // Ronda 2: sin serialización, la verificación del segmento 0
+            // (300 ms) seguiría corriendo cuando la rotación del
+            // segmento 1 lanza la suya. Con el mutex, una a la vez.
+            fakeVerifier.verifyDelayMs = 300L
+            val session = buildSession()
+            startRecording(session)
+            // Muestras cada 1 s; keyframe cada 2 s → rotaciones a 60 s
+            // y a 120 s (segmentos 0 y 1) y parada con el segmento 2.
+            for (second in 0..122) {
+                fakeEncoder.deliverSample(
+                    second * 1_000_000L,
+                    second % 2 == 0,
+                )
+            }
+            val result = session.stop()
+            assertEquals(3, result.segments.size)
+            assertEquals(3, fakeVerifier.verifyCalls)
+            assertEquals(1, fakeVerifier.maxConcurrent.get())
+            assertEquals("ready", result.status)
+        }
+
+    @Test
+    fun `fromSegments suma la duracion de un segmento partial por timeout`() {
+        // Ronda 2: un segmento legible cuya verificación no terminó a
+        // tiempo es `partial` con su duración medida (no `corrupt` sin
+        // duración): el total debe sumarla. Es el caso del teléfono
+        // (`rec_20261118_233257_ffb1`): 60 + 60 + 3,8 s, no 3,8 s.
+        val segments = listOf(
+            RecordingSegmentResult(
+                recordingId = "rec_20261118_233257_ffb1",
+                index = 0,
+                fileName = "rec_20261118_233257_ffb1_seg000.mp4",
+                filePath = "/docs/recordings/rec_20261118_233257_ffb1_seg000.mp4",
+                status = SegmentStatus.PARTIAL,
+                durationMs = 60_000L,
+                sizeBytes = 18_750_000L,
+                sampleCount = 1800,
+                keyframeCount = 30,
+                firstSampleKeyframe = true,
+                ptsMonotonic = true,
+                profileIdc = 66,
+                closedCleanly = true,
+                reason = "verification_timeout",
+            ),
+            RecordingSegmentResult(
+                recordingId = "rec_20261118_233257_ffb1",
+                index = 1,
+                fileName = "rec_20261118_233257_ffb1_seg001.mp4",
+                filePath = "/docs/recordings/rec_20261118_233257_ffb1_seg001.mp4",
+                status = SegmentStatus.PARTIAL,
+                durationMs = 60_000L,
+                sizeBytes = 18_750_000L,
+                sampleCount = 1800,
+                keyframeCount = 30,
+                firstSampleKeyframe = true,
+                ptsMonotonic = true,
+                profileIdc = 66,
+                closedCleanly = true,
+                reason = "verification_timeout",
+            ),
+            RecordingSegmentResult(
+                recordingId = "rec_20261118_233257_ffb1",
+                index = 2,
+                fileName = "rec_20261118_233257_ffb1_seg002.mp4",
+                filePath = "/docs/recordings/rec_20261118_233257_ffb1_seg002.mp4",
+                status = SegmentStatus.READY,
+                durationMs = 3831L,
+                sizeBytes = 1_200_000L,
+                sampleCount = 114,
+                keyframeCount = 2,
+                firstSampleKeyframe = true,
+                ptsMonotonic = true,
+                profileIdc = 66,
+                closedCleanly = true,
+                reason = null,
+            ),
+        )
+        val result = RecordingResult.fromSegments(
+            recordingId = "rec_20261118_233257_ffb1",
+            segments = segments,
+            errorCode = null,
+            previewRestoreError = null,
+        )
+        assertEquals(123_831L, result.totalDurationMs)
         assertEquals("partial", result.status)
     }
 }

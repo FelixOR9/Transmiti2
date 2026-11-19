@@ -277,6 +277,19 @@ open class RecordingSession(
 
     private val sessionMutex = Mutex()
 
+    /**
+     * Serializa las verificaciones de segmentos (ronda 2): sin él,
+     * cada rotación lanza su verificación en `Dispatchers.IO` y dos
+     * pueden solaparse mientras el codificador sigue grabando (cada
+     * una decodifica un segmento completo y prepara ExoPlayer en el
+     * hilo principal). Con una a la vez, cada verificación dispone de
+     * todo el presupuesto sin competir con la siguiente. La
+     * recuperación (`recoverInterrupted`) llama al verificador
+     * directamente, pero solo corre en `idle`, así que no puede
+     * solaparse con una rotación.
+     */
+    private val verificationMutex = Mutex()
+
     @Volatile
     private var state: RecordingState = RecordingState.IDLE
     private var lastError: RecordingException? = null
@@ -1010,13 +1023,17 @@ open class RecordingSession(
         closedCleanly: Boolean,
     ): RecordingSegmentResult {
         val config = encoderConfig
-        val verification = segmentVerifier.verify(
-            closed.file,
-            closedCleanly,
-            config?.width,
-            config?.height,
-            config?.fps,
-        )
+        // Una verificación a la vez (ronda 2): el mutex solo cubre la
+        // llamada al verificador, no el registro del resultado.
+        val verification = verificationMutex.withLock {
+            segmentVerifier.verify(
+                closed.file,
+                closedCleanly,
+                config?.width,
+                config?.height,
+                config?.fps,
+            )
+        }
         val result = RecordingSegmentResult(
             recordingId = closed.recordingId,
             index = closed.index,
