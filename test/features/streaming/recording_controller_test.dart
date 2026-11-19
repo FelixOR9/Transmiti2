@@ -297,6 +297,37 @@ void main() {
       expect(recording.segmentDurationMs, 0);
     });
 
+    testWidgets('el segmento actual es el índice nativo 1-based', (
+      WidgetTester tester,
+    ) async {
+      await pumpController(tester);
+      await recording.start();
+      await tester.pump();
+
+      // Al iniciar, el segmento en curso es el nativo 0 → «1».
+      expect(recording.nativeSegmentIndex, 0);
+      expect(recording.currentSegmentDisplay, 1);
+      expect(recording.diagnosticText, contains('Segmento actual: 1'));
+
+      // Rotación: se cerró el segmento 0 y el 1 ya graba.
+      service.emitEvent(segmentEvent(0));
+      await tester.pump();
+      expect(recording.nativeSegmentIndex, 1);
+      expect(recording.currentSegmentDisplay, 2);
+      expect(recording.diagnosticText, contains('Segmento actual: 2'));
+      // La duración de Dart y la nativa (PTS) se muestran juntas.
+      expect(
+        recording.diagnosticText,
+        contains('Duración del segmento: 00:00 (nativa: 00:00)'),
+      );
+
+      service.emitEvent(segmentEvent(1));
+      await tester.pump();
+      expect(recording.nativeSegmentIndex, 2);
+      expect(recording.currentSegmentDisplay, 3);
+      expect(recording.diagnosticText, contains('Segmento actual: 3'));
+    });
+
     testWidgets('el diagnóstico muestra cada segmento con estado y motivo', (
       WidgetTester tester,
     ) async {
@@ -429,6 +460,10 @@ void main() {
       expect(recording.state, RecordingState.recording);
       expect(recording.recordingId, 'rec_20261118_120000_ab12');
       expect(recording.elapsedMs, 30000);
+      // El índice y la duración nativos vienen del snapshot (paso 3).
+      expect(recording.nativeSegmentIndex, 1);
+      expect(recording.nativeSegmentDurationMs, 5000);
+      expect(recording.currentSegmentDisplay, 2);
       expect(timers.length, 1);
     });
 

@@ -674,11 +674,12 @@ class _BroadcastScreenState extends State<BroadcastScreen> {
 
   /// Indicador de grabación activa (Fase B, 3.1.2): punto rojo +
   /// «GRABANDO» + tiempo transcurrido + segmento actual. `Wrap` para
-  /// que quepa en pantallas estrechas (360 px) sin desbordar.
+  /// que quepa en pantallas estrechas (360 px) sin desbordar. El
+  /// número de segmento es el del controlador (1-based, índice
+  /// nativo; fix duraciones 3.1.2, paso 3: antes era
+  /// `last.index + 1` de la lista parcial de Dart).
   Widget _recordingIndicator(TextTheme text) {
-    final int segmentIndex = _recording.segments.isEmpty
-        ? 0
-        : _recording.segments.last.index;
+    final int segmentNumber = _recording.currentSegmentDisplay ?? 1;
     return Wrap(
       crossAxisAlignment: WrapCrossAlignment.center,
       spacing: 12,
@@ -707,7 +708,7 @@ class _BroadcastScreenState extends State<BroadcastScreen> {
           style: text.bodyMedium,
         ),
         Text(
-          'Segmento ${segmentIndex + 1} · '
+          'Segmento $segmentNumber · '
           '${_formatDuration(_recording.segmentDurationMs)}',
           style: text.bodyMedium?.copyWith(color: AppColors.textMuted),
         ),

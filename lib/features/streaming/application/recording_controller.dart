@@ -196,6 +196,24 @@ class RecordingController extends ChangeNotifier {
   /// Instante en que empezó el segmento actual, para su duración.
   int? _segmentStartedAtMs;
 
+  /// Índice nativo (0-based) del segmento en curso, del motor
+  /// (`getRecordingStatus` / eventos). `null` si se desconoce.
+  /// (Fix duraciones 3.1.2, paso 3: la tarjeta mezclaba el conteo
+  /// de segmentos con el índice nativo + 1 del indicador.)
+  int? _nativeSegmentIndex;
+  int? get nativeSegmentIndex => _nativeSegmentIndex;
+
+  /// Duración nativa (PTS, ms) del segmento en curso. `null` si se
+  /// desconoce. Se muestra junto a la de Dart para compararlas.
+  int? _nativeSegmentDurationMs;
+  int? get nativeSegmentDurationMs => _nativeSegmentDurationMs;
+
+  /// Número de segmento actual para mostrar (1-based), o `null` si
+  /// se desconoce. Unifica tarjeta e indicador: antes la tarjeta
+  /// mostraba el conteo y el indicador `last.index + 1`.
+  int? get currentSegmentDisplay =>
+      _nativeSegmentIndex == null ? null : _nativeSegmentIndex! + 1;
+
   /// Tiempo transcurrido desde el inicio (ms). 0 sin grabación.
   int get elapsedMs {
     final int? started = _startedAtMs;
@@ -228,8 +246,13 @@ class RecordingController extends ChangeNotifier {
     text.writeln();
     text.writeln('Estado: ${_state.name}');
     text.writeln('Grabación: ${_recordingId ?? diag.recordingId ?? '—'}');
-    text.writeln('Segmento actual: ${_segments.length}');
-    text.writeln('Duración del segmento: ${_formatMs(segmentDurationMs)}');
+    text.writeln(
+      'Segmento actual: ${currentSegmentDisplay?.toString() ?? '—'}',
+    );
+    text.writeln(
+      'Duración del segmento: ${_formatMs(segmentDurationMs)} '
+      '(nativa: ${_nativeSegmentDurationMs == null ? '—' : _formatMs(_nativeSegmentDurationMs!)})',
+    );
     if (_errorCode != null) {
       text.writeln('Código de error: $_errorCode');
     }
@@ -351,6 +374,10 @@ class RecordingController extends ChangeNotifier {
     if (native == RecordingState.idle) {
       return;
     }
+    // Índice y duración nativos del snapshot (paso 3): la UI no
+    // sabía que grababa (o volvió tras un `detach`).
+    _nativeSegmentIndex = snapshot.segmentIndex;
+    _nativeSegmentDurationMs = snapshot.segmentDurationMs;
     if (_state == RecordingState.idle || _state == RecordingState.error) {
       _recordingId = snapshot.recordingId;
       _startedAtMs = _nowMs() - snapshot.elapsedMs;
@@ -439,6 +466,9 @@ class RecordingController extends ChangeNotifier {
     // en `idle`). Se fijan de nuevo al confirmarse el inicio.
     _startedAtMs = null;
     _segmentStartedAtMs = null;
+    // El primer segmento es el nativo 0 (paso 3).
+    _nativeSegmentIndex = 0;
+    _nativeSegmentDurationMs = 0;
     notifyListeners();
     // Notificaciones: mejor esfuerzo (la grabación no depende de
     // este permiso; sin él la notificación solo se ve en el
@@ -570,6 +600,19 @@ class RecordingController extends ChangeNotifier {
     _timer = null;
   }
 
+  /// Índice y duración nativos del último segmento verificado, desde
+  /// el resultado completo de una parada (paso 3). Sin segmentos, el
+  /// índice es desconocido.
+  void _applyStoppedNative(RecordingStoppedInfo stopped) {
+    if (stopped.segments.isNotEmpty) {
+      _nativeSegmentIndex = stopped.segments.last.index;
+      _nativeSegmentDurationMs = stopped.segments.last.durationMs;
+    } else {
+      _nativeSegmentIndex = null;
+      _nativeSegmentDurationMs = null;
+    }
+  }
+
   void _onEvent(Map<String, Object?> event) {
     final String? type = event['type'] as String?;
     switch (type) {
@@ -604,6 +647,17 @@ class RecordingController extends ChangeNotifier {
         }
         // Un segmento nuevo empieza ahora (rotación por keyframe).
         _segmentStartedAtMs = _nowMs();
+        // Índice nativo del segmento en curso (paso 3): el evento
+        // avisa de que el segmento `index` se cerró; si la parada
+        // está en curso, ese era el último; si no, el siguiente
+        // (index + 1) ya está grabando.
+        if (_state == RecordingState.stopping) {
+          _nativeSegmentIndex = segment.index;
+          _nativeSegmentDurationMs = segment.durationMs;
+        } else {
+          _nativeSegmentIndex = segment.index + 1;
+          _nativeSegmentDurationMs = 0;
+        }
         if (_state == RecordingState.rotating) {
           _state = RecordingState.recording;
         }
@@ -612,6 +666,7 @@ class RecordingController extends ChangeNotifier {
         final RecordingStoppedInfo stopped =
             RecordingStoppedInfo.fromMap(event);
         _lastStopped = stopped;
+        _applyStoppedNative(stopped);
         if (!_stopInitiated) {
           // Parada externa (notificación, cámara): la fila la
           // actualiza el evento, no `stop()`.
@@ -647,6 +702,7 @@ class RecordingController extends ChangeNotifier {
           final RecordingStoppedInfo stopped =
               RecordingStoppedInfo.fromMap(event);
           _lastStopped = stopped;
+          _applyStoppedNative(stopped);
           if (!_stopInitiated) {
             unawaited(
               _updateRowFromInfo(
