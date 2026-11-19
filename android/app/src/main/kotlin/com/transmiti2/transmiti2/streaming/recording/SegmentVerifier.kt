@@ -133,6 +133,21 @@ fun effectiveDurationMs(
 }
 
 /**
+ * FPS medido a partir de muestras y duración (ronda 4). Pura,
+ * testeable en JVM. La fórmula es la misma que usaba el cálculo
+ * dentro de `verifyInternal` (y que el spike: muestras/duración);
+ * como función pura se puede usar también desde los `catch` de
+ * `verify()` para recalcular el FPS desde lo acumulado (cinturón
+ * del fix 1). Sin muestras o sin duración válida no hay FPS.
+ */
+fun computeFpsMeasured(sampleCount: Int, durationMs: Long?): Double? {
+    if (durationMs != null && durationMs > 0 && sampleCount > 0) {
+        return sampleCount * 1000.0 / durationMs
+    }
+    return null
+}
+
+/**
  * Clasifica un segmento a partir de sus medidas (plan §7.1). Pura:
  * no toca Android, testeable en JVM.
  *
@@ -299,7 +314,8 @@ interface SegmentVerifier {
  *
  * No lanza por un archivo ilegible: lo mide y lo clasifica `corrupt`
  * con el motivo. Nunca modifica el original: la verificación es de
- * solo lectura. Timeout global 30 s por segmento.
+ * solo lectura. Timeout global 60 s por segmento (ronda 2: 30 s →
+ * 60 s).
  */
 class DefaultSegmentVerifier(
     private val context: Context,
@@ -341,6 +357,15 @@ class DefaultSegmentVerifier(
             Transmiti2Logger.e(
                 "verificacion: timeout verificando ${file.name}",
             )
+            // Cinturón (ronda 4, fix 1): recalcular el FPS desde lo
+            // acumulado por si la excepción escapó antes de la línea
+            // de dentro del bloque. Idempotente cuando ya está
+            // fijado; `null` si no hay medidas (correcto: sin
+            // medidas no hay FPS).
+            partial.fpsMeasured = computeFpsMeasured(
+                partial.sampleCount,
+                partial.durationMs,
+            )
             classifyIncomplete(
                 partial.toChecks(),
                 expectedWidth,
@@ -352,6 +377,11 @@ class DefaultSegmentVerifier(
             Transmiti2Logger.e(
                 "verificacion: error verificando ${file.name}: " +
                     "${e.javaClass.simpleName} ${e.message}",
+            )
+            // Cinturón (ronda 4, fix 1): como arriba.
+            partial.fpsMeasured = computeFpsMeasured(
+                partial.sampleCount,
+                partial.durationMs,
             )
             classifyIncomplete(
                 partial.toChecks(),
@@ -393,9 +423,12 @@ class DefaultSegmentVerifier(
         // Cada medida se escribe en `partial` en cuanto se toma: si el
         // timeout salta en la fase 2 (o una excepción posterior), lo ya
         // medido sobrevive (ronda 2). Esta fase no tiene puntos de
-        // suspensión — solo llamadas bloqueantes — así que el timeout no
-        // puede interrumpirla a mitad: o completa, o la excepción la
-        // corta antes de medir.
+        // suspensión EN SU INTERIOR — solo llamadas bloqueantes — pero
+        // el retorno del `withContext` SÍ es un punto de suspensión:
+        // el timeout puede saltar justo ahí, antes de cualquier línea
+        // posterior al bloque (ronda 4, diagnóstico `fps_no_coincide`
+        // §3: así quedó `fpsMeasured` en `null`). Por eso cada medida
+        // que deba sobrevivir al timeout se fija DENTRO del bloque.
         withContext(Dispatchers.IO) {
             val extractor = MediaExtractor()
             var decoder: MediaCodec? = null
@@ -504,6 +537,19 @@ class DefaultSegmentVerifier(
                     firstPtsUs,
                     lastPtsUs,
                 )
+                // Ronda 4, fix 1: el FPS se calcula AQUÍ, dentro de la
+                // fase de E/S, cuando duración y muestras ya son
+                // finales. Antes se calculaba después del
+                // `withContext` y el timeout saltaba en su retorno
+                // antes de esa línea: `fpsMeasured` quedaba en `null`
+                // y la comprobación fallaba por la rama del nulo con
+                // `fps_no_coincide`. Con el cálculo dentro, un timeout
+                // en el borde deja el FPS fijado y `classifyIncomplete`
+                // lo usa (→ `partial` con `verification_timeout`).
+                partial.fpsMeasured = computeFpsMeasured(
+                    partial.sampleCount,
+                    partial.durationMs,
+                )
                 // EOS al decodificador y drenado final.
                 if (decoder != null) {
                     var eosQueued = false
@@ -549,14 +595,9 @@ class DefaultSegmentVerifier(
                 }
             }
         }
-        partial.fpsMeasured =
-            if (partial.durationMs != null && partial.durationMs!! > 0 &&
-                partial.sampleCount > 0
-            ) {
-                partial.sampleCount * 1000.0 / partial.durationMs!!
-            } else {
-                null
-            }
+        // (Ronda 4, fix 1: el FPS ya se calculó dentro de la fase de
+        // E/S, con `computeFpsMeasured`; no se recalcula aquí para no
+        // dejar dos fuentes del mismo valor.)
 
         // 2. ExoPlayer: prepara y confirma la duración.
         val (exoplayerReady, exoplayerDurationMs) = withContext(

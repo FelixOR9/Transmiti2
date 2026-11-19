@@ -269,6 +269,36 @@ class SegmentVerifierTest {
         assertNull(effectiveDurationMs(0L, null, null))
     }
 
+    // --- `computeFpsMeasured` (ronda 4, fix 1). La función pura que
+    // `verifyInternal` usa dentro de la fase de E/S y los `catch` de
+    // `verify()` para recalcular desde lo acumulado.
+
+    @Test
+    fun `1800 muestras en 60000 ms son 30,0 FPS`() {
+        assertEquals(30.0, computeFpsMeasured(1800, 60_000L)!!, 0.001)
+    }
+
+    @Test
+    fun `1794 muestras en 60000 ms son 29,9 FPS, el caso del spike`() {
+        assertEquals(29.9, computeFpsMeasured(1794, 60_000L)!!, 0.001)
+    }
+
+    @Test
+    fun `el caso del telefono, 1801 muestras en 60007 ms son 30,01 FPS`() {
+        assertEquals(30.01, computeFpsMeasured(1801, 60_007L)!!, 0.01)
+    }
+
+    @Test
+    fun `sin muestras no hay FPS`() {
+        assertNull(computeFpsMeasured(0, 60_000L))
+    }
+
+    @Test
+    fun `sin duracion no hay FPS`() {
+        assertNull(computeFpsMeasured(1800, null))
+        assertNull(computeFpsMeasured(1800, 0L))
+    }
+
     // --- `classifyIncomplete` (ronda 2: timeout / error con medidas
     // parciales). El teléfono mostró `seg0/seg1: corrupt —ms
     // motivo=verification_timeout cerradoLimpio=sí`: la verificación no
@@ -404,6 +434,25 @@ class SegmentVerifierTest {
         // objetivo).
         val result = classifyTimedOut(
             checks = goodChecks().copy(fpsMeasured = 15.0),
+        )
+        assertEquals(SegmentStatus.CORRUPT, result.status)
+        assertEquals("fps_no_coincide", result.reason)
+    }
+
+    @Test
+    fun `timeout sin FPS medido es corrupt con fps_no_coincide`() {
+        // Ronda 4, diagnóstico `fps_no_coincide` §3: el FPS se
+        // calculaba DESPUÉS del `withContext` y el timeout saltaba
+        // en su retorno, así que `fpsMeasured` quedaba en `null` y
+        // la comprobación fallaba por la rama del nulo aunque todo
+        // lo demás estuviera medido (duración 60007 ms, 1801
+        // muestras). El fix 1 calcula el FPS dentro de la fase de
+        // E/S para que este caso no se dé en un timeout en el borde;
+        // la rama del nulo sigue existiendo para cuando de verdad no
+        // hay medidas (sin muestras o sin duración, los tests de
+        // arriba la cubren con otro motivo anterior en el orden).
+        val result = classifyTimedOut(
+            checks = goodChecks().copy(fpsMeasured = null),
         )
         assertEquals(SegmentStatus.CORRUPT, result.status)
         assertEquals("fps_no_coincide", result.reason)
