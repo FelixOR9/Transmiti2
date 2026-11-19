@@ -684,6 +684,26 @@ class DefaultSegmentVerifier(
      * Drena las salidas disponibles del decodificador. Con
      * `hastaEos`, espera al EOS de salida (timeout 5 s). Devuelve
      * `(frames decodificados, EOS de salida visto)`.
+     *
+     * Ronda 5: el drenado por muestra (`hastaEos = false`) NO
+     * espera — `dequeueOutputBuffer` con timeout 0
+     * (`drainTimeoutUs`). Antes esperaba `DECODER_TIMEOUT_US`
+     * (100 ms) en cada llamada: como el bucle solo sale con
+     * `INFO_TRY_AGAIN_LATER`, la ÚLTIMA espera de cada llamada
+     * agotaba el timeout completo para un frame que aún no estaba
+     * listo, y como se llama una vez por muestra, eso era
+     * ~100 ms por muestra — 1800 muestras × ~110 ms ≈ 199 s de
+     * fase 1 en el teléfono (grabación
+     * `rec_20261119_021559_a602`: fase=199.0s/200.5s/19.8s, un
+     * coste plano de ~110 ms por muestra en los tres segmentos).
+     * El decodificador sigue trabajando de forma asíncrona: los
+     * frames que aún no están listos se recogen en el drenado de
+     * una muestra posterior, y el drenado final hasta EOS (que SÍ
+     * espera, acotado por `DRAIN_TIMEOUT_MS`) vacía la cola y
+     * confirma el EOS. Sin espera por muestra no hay bucle
+     * ocupado: cada llamada hace como mucho (frames disponibles
+     * + 1) sondeos no bloqueantes y el bucle exterior está
+     * acotado por el número de muestras del archivo.
      */
     private fun drainDecoder(
         decoder: MediaCodec,
@@ -694,7 +714,7 @@ class DefaultSegmentVerifier(
         val deadlineMs = System.currentTimeMillis() + DRAIN_TIMEOUT_MS
         while (true) {
             val outputIndex = try {
-                decoder.dequeueOutputBuffer(info, DECODER_TIMEOUT_US)
+                decoder.dequeueOutputBuffer(info, drainTimeoutUs(hastaEos))
             } catch (_: Exception) {
                 return frames to false
             }
@@ -784,8 +804,48 @@ class DefaultSegmentVerifier(
          * descartarlas, así que el timeout ya no es un acantilado.
          */
         const val VERIFY_TIMEOUT_MS = 60_000L
+        /**
+         * Espera máxima del decodificador en cada `dequeue` que
+         * bloquea (ronda 5): `dequeueInputBuffer` al alimentar
+         * (`queueSampleToDecoder`) y al encolar el EOS, y
+         * `dequeueOutputBuffer` en el drenado final hasta EOS.
+         * NO se aplica al drenado por muestra: ahí
+         * `drainTimeoutUs(false)` es 0 (sondeo no bloqueante).
+         *
+         * Por qué no se baja a 10 ms: la espera de entrada solo
+         * se paga si no hay buffer libre, y es la válvula de
+         * seguridad que evita perder muestras — si agotara el
+         * timeout, la muestra se descarta (`queued = false`) y
+         * `fedSamples < sampleCount` → `decodeOk = false` → el
+         * segmento nunca puede ser `ready` (`decode_incompleto`).
+         * Bajarla a 10 ms bajo carga (el codificador sigue
+         * grabando el siguiente segmento) cambiaría un fallo por
+         * otro. La espera que dominaba el coste (~100 ms por
+         * muestra, garantizada por construcción en el drenado) se
+         * elimina en `drainTimeoutUs`, no aquí.
+         */
         const val DECODER_TIMEOUT_US = 100_000L
         const val DRAIN_TIMEOUT_MS = 5_000L
+
+        /**
+         * Timeout de `dequeueOutputBuffer` en `drainDecoder`
+         * (ronda 5). Pura, testeable en JVM.
+         *
+         * - Drenado por muestra (`hastaEos = false`): 0 — sondeo
+         *   no bloqueante. El bucle de `drainDecoder` solo sale
+         *   con `INFO_TRY_AGAIN_LATER`, así que con un timeout
+         *   positivo la última espera de cada llamada agotaba el
+         *   timeout completo (~100 ms por muestra, 199 s de fase 1
+         *   para 1800 muestras en el teléfono). Con 0, cada llamada
+         *   vacía la cola disponible y vuelve; los frames que aún
+         *   no están listos los recoge el drenado de una muestra
+         *   posterior.
+         * - Drenado final (`hastaEos = true`):
+         *   `DECODER_TIMEOUT_US` — ahí sí hay que esperar al EOS
+         *   de salida, acotado por `DRAIN_TIMEOUT_MS`.
+         */
+        fun drainTimeoutUs(hastaEos: Boolean): Long =
+            if (hastaEos) DECODER_TIMEOUT_US else 0L
     }
 }
 

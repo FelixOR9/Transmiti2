@@ -512,4 +512,54 @@ class SegmentVerifierTest {
         assertEquals(SegmentStatus.PARTIAL, result.status)
         assertEquals("verification_timeout", result.reason)
     }
+
+    // --- `drainTimeoutUs` (ronda 5). El timeout de
+    // `dequeueOutputBuffer` en `drainDecoder`. Antes, el drenado por
+    // muestra esperaba 100 ms en cada llamada y el bucle solo salía
+    // con `INFO_TRY_AGAIN_LATER`: la última espera agotaba el
+    // timeout completo por muestra — 1800 muestras × ~110 ms ≈ 199 s
+    // de fase 1 en el teléfono (grabación
+    // `rec_20261119_021559_a602`: fase=199.0s/200.5s/19.8s). El
+    // drenado por muestra ahora sondea sin esperar; el final hasta
+    // EOS sigue esperando, acotado por `DRAIN_TIMEOUT_MS`.
+
+    @Test
+    fun `el drenado por muestra no espera (timeout 0)`() {
+        assertEquals(0L, DefaultSegmentVerifier.drainTimeoutUs(false))
+    }
+
+    @Test
+    fun `el drenado final hasta EOS espera 100 ms`() {
+        assertEquals(
+            100_000L,
+            DefaultSegmentVerifier.drainTimeoutUs(true),
+        )
+    }
+
+    @Test
+    fun `el timeout del decodificador sigue en 100 ms para la entrada`() {
+        // Válvula de seguridad de `dequeueInputBuffer` (y del
+        // encolado del EOS): si se bajara a 10 ms, bajo carga una
+        // muestra podría descartarse y `fedSamples < sampleCount`
+        // → `decodeOk = false` → el segmento nunca sería `ready`.
+        // La espera que dominaba el coste se elimina en el drenado,
+        // no en esta constante.
+        assertEquals(
+            100_000L,
+            DefaultSegmentVerifier.DECODER_TIMEOUT_US,
+        )
+    }
+
+    @Test
+    fun `1800 muestras drenadas sin esperar suman 0 ms de espera`() {
+        // Cota del peor caso con el drenado no bloqueante: la
+        // espera acumulada del drenado por muestra es 0. Con el
+        // timeout anterior (100 ms) eran 1800 × 100 ms = 180 s de
+        // pura espera — la fase 1 medida en el teléfono (199 s).
+        // La decodificación real y el drenado final hasta EOS
+        // quedan fuera de esta cota (acotado por `DRAIN_TIMEOUT_MS`).
+        val esperaTotalMs =
+            1800L * DefaultSegmentVerifier.drainTimeoutUs(false) / 1000
+        assertEquals(0L, esperaTotalMs)
+    }
 }
