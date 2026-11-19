@@ -267,6 +267,79 @@ void main() {
       expect(recording.segments[0].status, 'ready');
     });
 
+    testWidgets('la segunda grabación resetea el tiempo al iniciar', (
+      WidgetTester tester,
+    ) async {
+      await pumpController(tester);
+      await recording.start();
+      await tester.pump();
+
+      now += 60000;
+      expect(recording.elapsedMs, 60000);
+      expect(recording.segmentDurationMs, 60000);
+
+      await recording.stop();
+      await tester.pump();
+
+      // Al llegar a `idle` el contador ya no corre (paso 2): el
+      // diagnóstico en `idle` mostraba el tiempo de la grabación
+      // anterior creciendo sin parar.
+      expect(recording.elapsedMs, 0);
+      expect(recording.segmentDurationMs, 0);
+
+      now += 30000;
+      await recording.start();
+      await tester.pump();
+
+      // La segunda grabación empieza en 0 aunque la primera duró 60 s
+      // y aunque pasaron 30 s más entre ambas.
+      expect(recording.elapsedMs, 0);
+      expect(recording.segmentDurationMs, 0);
+    });
+
+    testWidgets('el diagnóstico muestra cada segmento con estado y motivo', (
+      WidgetTester tester,
+    ) async {
+      await pumpController(tester);
+      await recording.start();
+      await tester.pump();
+
+      service.emitEvent(segmentEvent(0));
+      await tester.pump();
+      final Map<String, Object?> corrupt = segmentEvent(1)
+        ..['status'] = 'corrupt'
+        ..['durationMs'] = null
+        ..['reason'] = 'duracion_no_valida';
+      service.emitEvent(corrupt);
+      await tester.pump();
+
+      final String? text = recording.diagnosticText;
+      expect(text, isNotNull);
+      expect(text, contains('Segmentos verificados: 2'));
+      expect(
+        text,
+        contains('seg0: ready 60000ms motivo=— cerradoLimpio=sí'),
+      );
+      expect(
+        text,
+        contains(
+          'seg1: corrupt —ms motivo=duracion_no_valida cerradoLimpio=sí',
+        ),
+      );
+
+      await recording.stop();
+      await tester.pump();
+
+      // El resumen de la parada (en este grupo, desde los eventos de
+      // Dart: 2 segmentos; el paso 5 lo construirá desde el método).
+      expect(
+        recording.diagnosticText,
+        contains(
+          'Última parada: estado=ready duración total=12000ms segmentos=2',
+        ),
+      );
+    });
+
     testWidgets(
       'la parada externa por evento actualiza la fila sin llamar a stop()',
       (WidgetTester tester) async {

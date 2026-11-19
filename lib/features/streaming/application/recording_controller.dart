@@ -256,7 +256,37 @@ class RecordingController extends ChangeNotifier {
         'Recuperados: ${_lastRecovery.length} segmento(s) interrumpido(s)',
       );
     }
-    text.write('Segmentos verificados: ${_segments.length}');
+    // Segmentos verificados, uno por línea, con su estado, su duración
+    // medida y su motivo (fix duraciones 3.1.2, paso 1: sin esto, el
+    // motivo de `corrupt` es invisible en el teléfono). Y el resumen
+    // de la última parada (del evento o del método, ya completo).
+    final List<String> tail = <String>[];
+    tail.add('Segmentos verificados: ${_segments.length}');
+    if (_segments.isNotEmpty) {
+      tail.add('Segmentos:');
+      for (final RecordingSegmentInfo segment in _segments) {
+        tail.add(
+          'seg${segment.index}: ${segment.status} '
+          '${segment.durationMs?.toString() ?? '—'}ms '
+          'motivo=${segment.reason ?? '—'} '
+          'cerradoLimpio=${segment.closedCleanly ? 'sí' : 'no'}',
+        );
+      }
+    }
+    if (_lastStopped != null) {
+      tail.add(
+        'Última parada: estado=${_lastStopped!.status} '
+        'duración total=${_lastStopped!.totalDurationMs}ms '
+        'segmentos=${_lastStopped!.segments.length}',
+      );
+    }
+    for (int i = 0; i < tail.length; i++) {
+      if (i == tail.length - 1) {
+        text.write(tail[i]);
+      } else {
+        text.writeln(tail[i]);
+      }
+    }
     return text.toString();
   }
 
@@ -403,6 +433,12 @@ class RecordingController extends ChangeNotifier {
     _diagnostics = null;
     _lastStopped = null;
     _segments.clear();
+    // Relojes a cero: una segunda grabación en la misma sesión no debe
+    // heredar el tiempo de la anterior (fix duraciones 3.1.2, paso 2:
+    // la base nunca se limpiaba y el contador corría en vista previa y
+    // en `idle`). Se fijan de nuevo al confirmarse el inicio.
+    _startedAtMs = null;
+    _segmentStartedAtMs = null;
     notifyListeners();
     // Notificaciones: mejor esfuerzo (la grabación no depende de
     // este permiso; sin él la notificación solo se ve en el
@@ -482,6 +518,10 @@ class RecordingController extends ChangeNotifier {
         status: info.status,
       );
       _state = RecordingState.idle;
+      // Relojes a cero al llegar a `idle`: el diagnóstico en `idle`
+      // no debe seguir contando (fix duraciones 3.1.2, paso 2).
+      _startedAtMs = null;
+      _segmentStartedAtMs = null;
       _stopTimer();
       notifyListeners();
     } on StreamingException catch (e) {
@@ -539,8 +579,11 @@ class RecordingController extends ChangeNotifier {
         _recordingId = info.recordingId;
         _startedInfo = info;
         _diagnostics = RecordingDiagnostics.fromStarted(info);
-        _startedAtMs ??= _nowMs();
-        _segmentStartedAtMs ??= _nowMs();
+        // Asignación directa (no `??=`): el inicio de una grabación
+        // fija su propia base; si la base anterior no se limpió, no
+        // debe reutilizarse (fix duraciones 3.1.2, paso 2).
+        _startedAtMs = _nowMs();
+        _segmentStartedAtMs = _nowMs();
         if (_state == RecordingState.starting ||
             _state == RecordingState.idle) {
           _state = RecordingState.recording;
@@ -585,6 +628,11 @@ class RecordingController extends ChangeNotifier {
           );
         }
         _state = RecordingState.idle;
+        // Relojes a cero al llegar a `idle` (paso 2; igual que en
+        // `stop()`: la grabación terminó y el diagnóstico no debe
+        // seguir contando).
+        _startedAtMs = null;
+        _segmentStartedAtMs = null;
         _stopTimer();
         notifyListeners();
       case StreamContract.eventRecordingError:
@@ -614,6 +662,11 @@ class RecordingController extends ChangeNotifier {
           }
         }
         _state = RecordingState.error;
+        // Relojes a cero: la grabación terminó con error (la parada
+        // con error emite este evento y detiene el motor); el
+        // diagnóstico no debe seguir contando (paso 2).
+        _startedAtMs = null;
+        _segmentStartedAtMs = null;
         _stopTimer();
         notifyListeners();
     }
