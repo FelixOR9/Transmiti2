@@ -22,6 +22,7 @@ class SegmentVerifierTest {
         ptsMonotonic = true,
         durationMs = 60_000L,
         fpsMeasured = 30.0,
+        ioPhaseMs = 60_000L,
         profileIdc = 66,
         decodeOk = true,
         decodedFrames = 1800,
@@ -478,6 +479,20 @@ class SegmentVerifierTest {
         )
         assertEquals(SegmentStatus.PARTIAL, result.status)
         assertEquals("verification_timeout", result.reason)
+    }
+
+    @Test
+    fun `la duracion de la fase 1 sobrevive en las medidas clasificadas`() {
+        // Ronda 4, fix 2: `ioPhaseMs` viaja en `VerificationChecks`
+        // (de `PartialChecks.toChecks()` a la tarjeta, vía
+        // `RecordingSegmentResult` en la ronda 4 grupo C). Sin ella
+        // la próxima decisión (¿la fase 1 cabe en 60 s?) no tendría
+        // dato en el teléfono.
+        val result = classifyTimedOut(
+            checks = goodChecks().copy(ioPhaseMs = 61_234L),
+        )
+        assertEquals(SegmentStatus.PARTIAL, result.status)
+        assertEquals(61_234L, result.checks.ioPhaseMs)
     }
 
     @Test

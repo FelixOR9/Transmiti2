@@ -50,6 +50,10 @@ data class VerificationChecks(
     val ptsMonotonic: Boolean,
     val durationMs: Long?,
     val fpsMeasured: Double?,
+    // Duración de la fase 1 (extractor + decodificación completa),
+    // en ms (ronda 4, fix 2). `null` si la fase no se midió (la
+    // verificación no llegó a esa fase).
+    val ioPhaseMs: Long?,
     val profileIdc: Int?,
     val decodeOk: Boolean,
     val decodedFrames: Int,
@@ -84,6 +88,10 @@ private class PartialChecks {
     var ptsMonotonic = true
     var durationMs: Long? = null
     var fpsMeasured: Double? = null
+    // Ronda 4, fix 2: duración de la fase 1 en ms (ver
+    // `VerificationChecks.ioPhaseMs`). Se fija en el `finally` de
+    // dentro del bloque de E/S.
+    var ioPhaseMs: Long? = null
     var profileIdc: Int? = null
     var decodeOk = false
     var decodedFrames = 0
@@ -101,6 +109,7 @@ private class PartialChecks {
         ptsMonotonic = ptsMonotonic,
         durationMs = durationMs,
         fpsMeasured = fpsMeasured,
+        ioPhaseMs = ioPhaseMs,
         profileIdc = profileIdc,
         decodeOk = decodeOk,
         decodedFrames = decodedFrames,
@@ -355,7 +364,8 @@ class DefaultSegmentVerifier(
             }
         } catch (e: TimeoutCancellationException) {
             Transmiti2Logger.e(
-                "verificacion: timeout verificando ${file.name}",
+                "verificacion: timeout verificando ${file.name} " +
+                    "(fase E/S ${partial.ioPhaseMs}ms)",
             )
             // Cinturón (ronda 4, fix 1): recalcular el FPS desde lo
             // acumulado por si la excepción escapó antes de la línea
@@ -376,7 +386,8 @@ class DefaultSegmentVerifier(
         } catch (e: Exception) {
             Transmiti2Logger.e(
                 "verificacion: error verificando ${file.name}: " +
-                    "${e.javaClass.simpleName} ${e.message}",
+                    "${e.javaClass.simpleName} ${e.message} " +
+                    "(fase E/S ${partial.ioPhaseMs}ms)",
             )
             // Cinturón (ronda 4, fix 1): como arriba.
             partial.fpsMeasured = computeFpsMeasured(
@@ -404,6 +415,7 @@ class DefaultSegmentVerifier(
         ptsMonotonic = false,
         durationMs = null,
         fpsMeasured = null,
+        ioPhaseMs = null,
         profileIdc = null,
         decodeOk = false,
         decodedFrames = 0,
@@ -429,6 +441,12 @@ class DefaultSegmentVerifier(
         // posterior al bloque (ronda 4, diagnóstico `fps_no_coincide`
         // §3: así quedó `fpsMeasured` en `null`). Por eso cada medida
         // que deba sobrevivir al timeout se fija DENTRO del bloque.
+        // Ronda 4, fix 2: inicio de la fase 1. La duración se fija
+        // en el `finally` de dentro del bloque, no después de él:
+        // el timeout salta en el retorno del `withContext` y una
+        // medida tomada después no existiría justo en el caso que
+        // hay que diagnosticar.
+        val ioStartMs = System.currentTimeMillis()
         withContext(Dispatchers.IO) {
             val extractor = MediaExtractor()
             var decoder: MediaCodec? = null
@@ -581,6 +599,14 @@ class DefaultSegmentVerifier(
                 partial.decodeOk = decodeOk
                 partial.decodedFrames = decodedFrames
             } finally {
+                // Ronda 4, fix 2: la duración de la fase 1 se mide
+                // AQUÍ, dentro del bloque. El `finally` corre siempre
+                // que el bloque termina — también si una excepción
+                // escapa de dentro — y corre ANTES del retorno del
+                // `withContext`, que es donde salta el timeout. Una
+                // medida tomada después del bloque no existiría en
+                // ese caso.
+                partial.ioPhaseMs = System.currentTimeMillis() - ioStartMs
                 try {
                     decoder?.stop()
                 } catch (_: Exception) {
@@ -598,6 +624,17 @@ class DefaultSegmentVerifier(
         // (Ronda 4, fix 1: el FPS ya se calculó dentro de la fase de
         // E/S, con `computeFpsMeasured`; no se recalcula aquí para no
         // dejar dos fuentes del mismo valor.)
+
+        // Ronda 4, fix 2: duración de la fase 1 en logcat. En el
+        // camino normal `partial.ioPhaseMs` ya se fijó en el
+        // `finally` de dentro del bloque; aquí solo se registra para
+        // la próxima decisión (si la fase 1 sigue pasando de 60 s,
+        // el timeout la corta en el borde y lo dirá el log del
+        // `catch` de `verify()`).
+        Transmiti2Logger.d(
+            "verificacion: fase E/S ${file.name} " +
+                "${partial.ioPhaseMs}ms",
+        )
 
         // 2. ExoPlayer: prepara y confirma la duración.
         val (exoplayerReady, exoplayerDurationMs) = withContext(

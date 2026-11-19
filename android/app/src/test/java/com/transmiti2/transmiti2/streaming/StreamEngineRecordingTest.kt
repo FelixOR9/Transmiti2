@@ -137,6 +137,7 @@ class StreamEngineRecordingTest {
                     ptsMonotonic = true,
                     durationMs = 12_000,
                     fpsMeasured = 30.0,
+                    ioPhaseMs = 12_000L,
                     profileIdc = 66,
                     decodeOk = true,
                     decodedFrames = 360,

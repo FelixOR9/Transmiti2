@@ -252,6 +252,7 @@ class RecordingSessionTest {
             ptsMonotonic = true,
             durationMs = 3000L,
             fpsMeasured = 30.0,
+            ioPhaseMs = 3000L,
             profileIdc = 66,
             decodeOk = true,
             decodedFrames = 100,
