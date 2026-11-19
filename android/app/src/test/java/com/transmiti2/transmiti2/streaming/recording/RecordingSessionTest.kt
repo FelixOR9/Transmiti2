@@ -159,6 +159,9 @@ class RecordingSessionTest {
         override val config: AudioEncoderConfig,
     ) : AudioEncoderPort {
         override var outputFormat: MediaFormat? = null
+        /** Contador de entradas descartadas (instrumentación 3.1.3):
+         * el test lo fija para comprobar que `stop()` lo propaga. */
+        override var droppedInputBuffers: Int = 0
         override var listener: AudioEncoderListener? = null
         var configureCalls = 0
         var releaseCalls = 0
@@ -1266,5 +1269,127 @@ class RecordingSessionTest {
             fakeEncoder.deliverSample(0L, true)
             val result = session.stop()
             assertEquals("ready", result.status)
+        }
+
+    // --- Instrumentación de audio (3.1.3, ronda de diagnóstico) ---
+
+    @Test
+    fun `toMap lleva audioStartOffsetMs con valor y con null`() {
+        // Con valor: el offset viaja en el evento `recording_segment`.
+        val withOffset = RecordingSegmentResult(
+            recordingId = "rec_20261119_151552_e2e0",
+            index = 0,
+            fileName = "rec_20261119_151552_e2e0_seg000.mp4",
+            filePath = "/docs/rec_20261119_151552_e2e0_seg000.mp4",
+            status = SegmentStatus.PARTIAL,
+            durationMs = 30_625L,
+            sizeBytes = 9_500_000L,
+            sampleCount = 918,
+            keyframeCount = 15,
+            firstSampleKeyframe = true,
+            ptsMonotonic = true,
+            profileIdc = 66,
+            closedCleanly = true,
+            reason = "sin_pista_audio",
+            audioStartOffsetMs = 500L,
+        )
+        assertEquals(500L, withOffset.toMap()["audioStartOffsetMs"])
+        // Sin audio: la clave existe con `null` (nunca se inventa un
+        // número); Dart lo dibuja como `—`.
+        val withoutAudio = withOffset.copy(audioStartOffsetMs = null)
+        val map = withoutAudio.toMap()
+        assertTrue(map.containsKey("audioStartOffsetMs"))
+        assertEquals(null, map["audioStartOffsetMs"])
+    }
+
+    @Test
+    fun `verifyAndRecord copia audioStartOffsetMs del segmento cerrado`() =
+        runBlocking {
+            val session = buildSession()
+            startRecording(session, audioEnabled = true)
+            // Primer video en 0 y primer audio 500 ms después: el
+            // origen común es 0 y el offset es 500 ms.
+            fakeEncoder.deliverSample(0L, true)
+            fakeAudioEncoder.deliverSample(500_000L)
+            fakeEncoder.deliverSample(33_333L, false)
+            val result = session.stop()
+            assertEquals("ready", result.status)
+            assertEquals(1, result.segments.size)
+            assertEquals(500L, result.segments[0].audioStartOffsetMs)
+            val segmentPayload = events.first {
+                it.first == StreamContract.EVENT_RECORDING_SEGMENT
+            }.second
+            assertEquals(500L, segmentPayload["audioStartOffsetMs"])
+        }
+
+    @Test
+    fun `verifyAndRecord deja audioStartOffsetMs en null sin audio`() =
+        runBlocking {
+            val session = buildSession()
+            startRecording(session)
+            fakeEncoder.deliverSample(0L, true)
+            fakeEncoder.deliverSample(33_333L, false)
+            val result = session.stop()
+            assertEquals("ready", result.status)
+            assertEquals(1, result.segments.size)
+            assertEquals(null, result.segments[0].audioStartOffsetMs)
+        }
+
+    @Test
+    fun `fromSegments y toMap llevan droppedInputBuffers con valor y por defecto`() {
+        val segment = RecordingSegmentResult(
+            recordingId = "rec_20261119_151552_e2e0",
+            index = 0,
+            fileName = "rec_20261119_151552_e2e0_seg000.mp4",
+            filePath = "/docs/rec_20261119_151552_e2e0_seg000.mp4",
+            status = SegmentStatus.READY,
+            durationMs = 3_000L,
+            sizeBytes = 900_000L,
+            sampleCount = 90,
+            keyframeCount = 2,
+            firstSampleKeyframe = true,
+            ptsMonotonic = true,
+            profileIdc = 66,
+            closedCleanly = true,
+            reason = null,
+        )
+        val withDropped = RecordingResult.fromSegments(
+            recordingId = "rec_20261119_151552_e2e0",
+            segments = listOf(segment),
+            errorCode = null,
+            previewRestoreError = null,
+            droppedInputBuffers = 7,
+        )
+        assertEquals(7, withDropped.droppedInputBuffers)
+        assertEquals(7, withDropped.toMap()["droppedInputBuffers"])
+        // Sin pasar el parámetro, el defecto es 0.
+        val byDefault = RecordingResult.fromSegments(
+            recordingId = "rec_20261119_151552_e2e0",
+            segments = listOf(segment),
+            errorCode = null,
+            previewRestoreError = null,
+        )
+        assertEquals(0, byDefault.droppedInputBuffers)
+        assertEquals(0, byDefault.toMap()["droppedInputBuffers"])
+    }
+
+    @Test
+    fun `stop propaga droppedInputBuffers del encoder de audio`() =
+        runBlocking {
+            val session = buildSession()
+            startRecording(session, audioEnabled = true)
+            fakeEncoder.deliverSample(0L, true)
+            fakeAudioEncoder.deliverSample(0L)
+            fakeEncoder.deliverSample(33_333L, false)
+            // El contador se lee al parar, antes de liberar el
+            // encoder: fijarlo justo antes de `stop()`.
+            fakeAudioEncoder.droppedInputBuffers = 7
+            val result = session.stop()
+            assertEquals("ready", result.status)
+            assertEquals(7, result.droppedInputBuffers)
+            val stoppedPayload = events.first {
+                it.first == StreamContract.EVENT_RECORDING_STOPPED
+            }.second
+            assertEquals(7, stoppedPayload["droppedInputBuffers"])
         }
 }

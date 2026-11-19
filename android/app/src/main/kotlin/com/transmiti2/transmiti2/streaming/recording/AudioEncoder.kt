@@ -195,6 +195,9 @@ interface AudioEncoderListener {
 interface AudioEncoderPort {
     val config: AudioEncoderConfig
     val outputFormat: MediaFormat?
+    /** Buffers de entrada descartados porque la cola del codec
+     * estaba llena (instrumentación 3.1.3: lo lee la sesión al parar). */
+    val droppedInputBuffers: Int
     var listener: AudioEncoderListener?
     fun configureAndStart()
     fun signalEndOfInputStream()
@@ -248,8 +251,12 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
 
     /** Buffers de entrada descartados porque la cola del codec estaba llena (diagnóstico). */
     @Volatile
-    var droppedInputBuffers: Int = 0
+    override var droppedInputBuffers: Int = 0
         private set
+
+    /** Primera muestra AAC ya registrada en log (se resetea por arranque). */
+    @Volatile
+    private var firstAudioSampleLogged = false
 
     override var listener: AudioEncoderListener? = null
 
@@ -274,6 +281,7 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
     override fun configureAndStart() {
         check(!released.get()) { "AudioEncoder ya liberado." }
         config.validate()
+        firstAudioSampleLogged = false
         val minBuffer = AudioRecord.getMinBufferSize(
             config.sampleRate,
             AudioFormat.CHANNEL_IN_MONO,
@@ -433,6 +441,14 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
             val isEos = info.flags and
                 MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
             if (!isConfig && info.size > 0) {
+                if (!firstAudioSampleLogged) {
+                    firstAudioSampleLogged = true
+                    Transmiti2Logger.d(
+                        "recording: primera muestra AAC " +
+                            "size=${info.size} " +
+                            "ptsUs=${info.presentationTimeUs}",
+                    )
+                }
                 val buffer = codec.getOutputBuffer(index)
                 if (buffer != null) {
                     listener?.onAudioSample(buffer, info)

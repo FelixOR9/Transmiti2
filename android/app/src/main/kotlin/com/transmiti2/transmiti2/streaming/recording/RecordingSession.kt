@@ -119,6 +119,10 @@ data class RecordingSegmentResult(
     val avDurationDiffMs: Long? = null,
     val audioReason: String? = null,
     val audioGapSamples: Int = 0,
+    /** Desplazamiento del primer PTS de audio respecto al origen
+     * común del segmento (ms, instrumentación 3.1.3): `null` si
+     * ninguna muestra de audio llegó a la sesión (H1). */
+    val audioStartOffsetMs: Long? = null,
 ) {
     fun toMap(): Map<String, Any?> = mapOf(
         "recordingId" to recordingId,
@@ -147,6 +151,7 @@ data class RecordingSegmentResult(
         "avDurationDiffMs" to avDurationDiffMs,
         "audioReason" to audioReason,
         "audioGapSamples" to audioGapSamples,
+        "audioStartOffsetMs" to audioStartOffsetMs,
     )
 }
 
@@ -175,6 +180,10 @@ data class RecordingResult(
     /** Audio de la grabación (3.1.3, plan §8.1): `true` si al menos
      * un segmento lleva pista AAC. */
     val audioEnabled: Boolean = false,
+    /** Buffers de entrada AAC descartados por cola llena
+     * (instrumentación 3.1.3): leído del encoder al parar, antes de
+     * liberarlo. */
+    val droppedInputBuffers: Int = 0,
 ) {
     fun toMap(): Map<String, Any?> = mapOf(
         "recordingId" to recordingId,
@@ -186,6 +195,7 @@ data class RecordingResult(
         "errorCode" to errorCode,
         "previewRestoreError" to previewRestoreError,
         "audioEnabled" to audioEnabled,
+        "droppedInputBuffers" to droppedInputBuffers,
     )
 
     companion object {
@@ -204,6 +214,7 @@ data class RecordingResult(
             segments: List<RecordingSegmentResult>,
             errorCode: String?,
             previewRestoreError: String?,
+            droppedInputBuffers: Int = 0,
         ): RecordingResult {
             val status = when {
                 segments.isEmpty() -> "corrupt"
@@ -221,6 +232,7 @@ data class RecordingResult(
                 errorCode = errorCode,
                 previewRestoreError = previewRestoreError,
                 audioEnabled = segments.any { it.hasAudio },
+                droppedInputBuffers = droppedInputBuffers,
             )
         }
     }
@@ -1121,6 +1133,10 @@ open class RecordingSession(
         }
         if (segmentFirstAudioPtsUs == null) {
             segmentFirstAudioPtsUs = ptsUs
+            Transmiti2Logger.d(
+                "recording: primera muestra de audio " +
+                    "seg $segmentIndex ptsUs=$ptsUs",
+            )
         }
         if (audioQueue.size >= AUDIO_QUEUE_MAX_SAMPLES) {
             // Cola llena: se descarta la más antigua (el origen ya
@@ -1919,6 +1935,7 @@ open class RecordingSession(
             avDurationDiffMs = verification.checks.avDurationDiffMs,
             audioReason = closed.audioReason,
             audioGapSamples = closed.audioGapSamples,
+            audioStartOffsetMs = closed.audioStartOffsetMs,
         )
         synchronized(segmentResults) { segmentResults.add(result) }
         updateSegmentMetadata(closed.index) {
@@ -2032,6 +2049,10 @@ open class RecordingSession(
             state = RecordingState.STOPPING
         }
         var previewRestoreError: String? = null
+        // Buffers de entrada AAC descartados (instrumentación
+        // 3.1.3): se capturan en el `finally`, antes de liberar el
+        // encoder de audio (tras `release()` ya no se puede leer).
+        var droppedAtStop = 0
         try {
             // EOS a ambos encoders (audio primero: parar la captura)
             // y drenado final (5 s en total); si no llega, se detiene
@@ -2095,6 +2116,9 @@ open class RecordingSession(
                 )
             }
         } finally {
+            // Antes de liberar el encoder de audio: su contador de
+            // entradas descartadas muere con él.
+            droppedAtStop = audioEncoder?.droppedInputBuffers ?: 0
             try {
                 encoder?.release()
             } catch (_: Exception) {
@@ -2122,6 +2146,7 @@ open class RecordingSession(
             segments = segments,
             errorCode = errorCode,
             previewRestoreError = previewRestoreError,
+            droppedInputBuffers = droppedAtStop,
         )
         sessionMutex.withLock {
             lastResult = result
@@ -2147,7 +2172,12 @@ open class RecordingSession(
         Transmiti2Logger.d(
             "recording: detenida $idAtStop (${result.status}, " +
                 "${segments.size} segmentos, " +
-                "${result.totalDurationMs}ms)",
+                "${result.totalDurationMs}ms, " +
+                "muestrasAudio=" +
+                segments.sumOf { it.audioSampleCount ?: 0 } +
+                " huecosAudio=" +
+                segments.sumOf { it.audioGapSamples } +
+                " descartadasEntradaAAC=$droppedAtStop)",
         )
         return result
     }
