@@ -119,6 +119,7 @@ void main() {
         'firstSampleKeyframe': true,
         'ptsMonotonic': true,
         'profileIdc': 66,
+        'fpsMeasured': 29.9,
         'closedCleanly': true,
         'reason': null,
       };
@@ -349,12 +350,16 @@ void main() {
       expect(text, contains('Segmentos verificados: 2'));
       expect(
         text,
-        contains('seg0: ready 60000ms motivo=— cerradoLimpio=sí'),
+        contains(
+          'seg0: ready 60000ms motivo=— cerradoLimpio=sí fps=29.9 '
+          'muestras=1800',
+        ),
       );
       expect(
         text,
         contains(
-          'seg1: corrupt —ms motivo=duracion_no_valida cerradoLimpio=sí',
+          'seg1: corrupt —ms motivo=duracion_no_valida cerradoLimpio=sí '
+          'fps=29.9 muestras=1800',
         ),
       );
 

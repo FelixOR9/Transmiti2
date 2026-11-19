@@ -283,6 +283,8 @@ class RecordingController extends ChangeNotifier {
     // medida y su motivo (fix duraciones 3.1.2, paso 1: sin esto, el
     // motivo de `corrupt` es invisible en el teléfono). Y el resumen
     // de la última parada (del evento o del método, ya completo).
+    // Ronda 3: la línea añade el FPS medido y las muestras, para
+    // decidir la tolerancia con evidencia en el teléfono.
     final List<String> tail = <String>[];
     tail.add('Segmentos verificados: ${_segments.length}');
     if (_segments.isNotEmpty) {
@@ -292,7 +294,9 @@ class RecordingController extends ChangeNotifier {
           'seg${segment.index}: ${segment.status} '
           '${segment.durationMs?.toString() ?? '—'}ms '
           'motivo=${segment.reason ?? '—'} '
-          'cerradoLimpio=${segment.closedCleanly ? 'sí' : 'no'}',
+          'cerradoLimpio=${segment.closedCleanly ? 'sí' : 'no'} '
+          'fps=${segment.fpsMeasured?.toStringAsFixed(1) ?? '—'} '
+          'muestras=${segment.sampleCount?.toString() ?? '—'}',
         );
       }
     }

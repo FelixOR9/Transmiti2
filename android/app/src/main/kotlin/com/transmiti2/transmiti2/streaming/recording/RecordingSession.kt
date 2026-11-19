@@ -78,6 +78,9 @@ data class RecordingSegmentResult(
     val firstSampleKeyframe: Boolean?,
     val ptsMonotonic: Boolean?,
     val profileIdc: Int?,
+    /** FPS medido por el verificador (ronda 3): se muestra en el
+     * diagnóstico para decidir la tolerancia con evidencia. */
+    val fpsMeasured: Double? = null,
     val closedCleanly: Boolean,
     val reason: String?,
 ) {
@@ -94,6 +97,7 @@ data class RecordingSegmentResult(
         "firstSampleKeyframe" to firstSampleKeyframe,
         "ptsMonotonic" to ptsMonotonic,
         "profileIdc" to profileIdc,
+        "fpsMeasured" to fpsMeasured,
         "closedCleanly" to closedCleanly,
         "reason" to reason,
     )
@@ -1047,6 +1051,7 @@ open class RecordingSession(
             firstSampleKeyframe = closed.firstSampleKeyframe,
             ptsMonotonic = closed.ptsMonotonic,
             profileIdc = verification.checks.profileIdc,
+            fpsMeasured = verification.checks.fpsMeasured,
             closedCleanly = closed.closedCleanly,
             reason = verification.reason,
         )

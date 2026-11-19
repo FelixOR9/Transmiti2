@@ -387,6 +387,9 @@ class RecordingSegmentInfo {
     this.firstSampleKeyframe,
     this.ptsMonotonic,
     this.profileIdc,
+    /// FPS medido por el verificador (ronda 3): se muestra en el
+    /// diagnóstico para decidir la tolerancia con evidencia.
+    this.fpsMeasured,
     this.closedCleanly = false,
     this.reason,
   });
@@ -405,6 +408,7 @@ class RecordingSegmentInfo {
   final bool? firstSampleKeyframe;
   final bool? ptsMonotonic;
   final int? profileIdc;
+  final double? fpsMeasured;
   final bool closedCleanly;
   final String? reason;
 
@@ -422,6 +426,7 @@ class RecordingSegmentInfo {
       firstSampleKeyframe: map['firstSampleKeyframe'] as bool?,
       ptsMonotonic: map['ptsMonotonic'] as bool?,
       profileIdc: (map['profileIdc'] as num?)?.toInt(),
+      fpsMeasured: (map['fpsMeasured'] as num?)?.toDouble(),
       closedCleanly: map['closedCleanly'] as bool? ?? false,
       reason: map['reason'] as String?,
     );
