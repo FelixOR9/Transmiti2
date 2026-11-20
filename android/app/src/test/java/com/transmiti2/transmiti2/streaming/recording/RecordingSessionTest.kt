@@ -1267,15 +1267,41 @@ class RecordingSessionTest {
     @Test
     fun `audio que falla al arrancar degrada a video-only`() =
         runBlocking {
+            // Fallo genérico sin motivo en `details`: el motivo sigue
+            // siendo `audio_mic_unavailable` (grupo F, ronda 3).
             fakeAudioEncoder.configureError = RecordingException.audioError(
                 "Micrófono no disponible.",
-                mapOf("reason" to "audio_dead_object"),
             )
             val session = buildSession()
             val info = startRecording(session, audioEnabled = true)
             assertEquals(RecordingState.RECORDING, session.currentState())
             assertFalse(info.audioEnabled)
             assertEquals("audio_mic_unavailable", info.audioReason)
+            assertEquals(1, muxers[0].writtenPtsByTrack.size)
+            fakeEncoder.deliverSample(0L, true)
+            val result = session.stop()
+            assertEquals("ready", result.status)
+        }
+
+    @Test
+    fun `audio que no arranca degrada a video-only con audio_capture_not_started`() =
+        runBlocking {
+            // Grupo F (ronda 3): la captura que no arranca trae su
+            // motivo en `details["reason"]` y `tryStartAudio` lo
+            // propaga (no `audio_mic_unavailable`); la grabación
+            // arranca video-only (regla de oro).
+            fakeAudioEncoder.configureError = RecordingException.audioError(
+                "La captura de audio no arrancó (estado=1).",
+                mapOf(
+                    "reason" to "audio_capture_not_started",
+                    "recordingState" to 1,
+                ),
+            )
+            val session = buildSession()
+            val info = startRecording(session, audioEnabled = true)
+            assertEquals(RecordingState.RECORDING, session.currentState())
+            assertFalse(info.audioEnabled)
+            assertEquals("audio_capture_not_started", info.audioReason)
             assertEquals(1, muxers[0].writtenPtsByTrack.size)
             fakeEncoder.deliverSample(0L, true)
             val result = session.stop()

@@ -1,0 +1,218 @@
+package com.transmiti2.transmiti2.streaming.recording
+
+import android.media.MediaCodec
+import java.nio.ByteBuffer
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * Drenado de entrada AAC (ronda 3 de audio 3.1.3, grupo F):
+ * `AudioInputFeed` puro en JVM, con un `InputBufferSink` falso que
+ * simula el callback (`onInputBufferAvailable`). El codec y el
+ * `AudioRecord` reales solo se verifican en el teléfono.
+ */
+class AudioInputFeedTest {
+
+    private data class QueuedInput(
+        val index: Int,
+        val size: Int,
+        val ptsUs: Long,
+        val flags: Int,
+    )
+
+    private class FakeSink(
+        var nullBufferIndexes: Set<Int> = emptySet(),
+    ) : InputBufferSink {
+        val queued = mutableListOf<QueuedInput>()
+        val buffers = mutableMapOf<Int, ByteBuffer>()
+
+        override fun getInputBuffer(index: Int): ByteBuffer? {
+            if (index in nullBufferIndexes) return null
+            return ByteBuffer.allocate(8192).also { buffers[index] = it }
+        }
+
+        override fun queueInputBuffer(
+            index: Int,
+            offset: Int,
+            size: Int,
+            presentationTimeUs: Long,
+            flags: Int,
+        ) {
+            queued += QueuedInput(index, size, presentationTimeUs, flags)
+        }
+
+        /** Bytes copiados en el buffer del índice (tras encolarlo). */
+        fun copiedBytes(index: Int, size: Int): ByteArray {
+            val buffer = buffers.getValue(index)
+            buffer.flip()
+            val out = ByteArray(size)
+            buffer.get(out)
+            return out
+        }
+    }
+
+    private fun frame(firstByte: Byte, ptsUs: Long) = PcmFrame(
+        bytes = ByteArray(4096) { firstByte },
+        size = 4096,
+        ptsUs = ptsUs,
+        samples = 2048,
+    )
+
+    @Test
+    fun `tramas en orden con su PTS y su contenido`() {
+        val sink = FakeSink()
+        val feed = AudioInputFeed(sink)
+        assertTrue(feed.offerFrame(frame(1, 0L)))
+        assertTrue(feed.offerFrame(frame(2, 21_333L)))
+        assertTrue(feed.offerFrame(frame(3, 42_666L)))
+        feed.onInputBufferAvailable(0)
+        feed.onInputBufferAvailable(1)
+        feed.onInputBufferAvailable(2)
+        assertEquals(
+            listOf(
+                QueuedInput(0, 4096, 0L, 0),
+                QueuedInput(1, 4096, 21_333L, 0),
+                QueuedInput(2, 4096, 42_666L, 0),
+            ),
+            sink.queued,
+        )
+        assertTrue(sink.copiedBytes(0, 4096).all { it == 1.toByte() })
+        assertTrue(sink.copiedBytes(1, 4096).all { it == 2.toByte() })
+        assertTrue(sink.copiedBytes(2, 4096).all { it == 3.toByte() })
+        assertEquals(0, feed.droppedInputBuffers)
+    }
+
+    @Test
+    fun `EOS solo tras la ultima trama`() {
+        val sink = FakeSink()
+        val feed = AudioInputFeed(sink)
+        feed.offerFrame(frame(1, 0L))
+        feed.offerFrame(frame(2, 21_333L))
+        feed.requestEos()
+        feed.onInputBufferAvailable(0)
+        // Solo la primera trama: el EOS espera a que se vacíe la cola.
+        assertEquals(listOf(QueuedInput(0, 4096, 0L, 0)), sink.queued)
+        feed.onInputBufferAvailable(1)
+        assertEquals(QueuedInput(1, 4096, 21_333L, 0), sink.queued[1])
+        feed.onInputBufferAvailable(2)
+        assertEquals(3, sink.queued.size)
+        assertEquals(
+            QueuedInput(
+                2,
+                0,
+                0L,
+                MediaCodec.BUFFER_FLAG_END_OF_STREAM,
+            ),
+            sink.queued[2],
+        )
+        assertEquals(0, feed.droppedInputBuffers)
+    }
+
+    @Test
+    fun `EOS con la cola vacia se encola en cuanto hay buffer libre`() {
+        val sink = FakeSink()
+        val feed = AudioInputFeed(sink)
+        feed.requestEos()
+        feed.onInputBufferAvailable(7)
+        assertEquals(
+            listOf(
+                QueuedInput(
+                    7,
+                    0,
+                    0L,
+                    MediaCodec.BUFFER_FLAG_END_OF_STREAM,
+                ),
+            ),
+            sink.queued,
+        )
+    }
+
+    @Test
+    fun `EOS no se repite`() {
+        val sink = FakeSink()
+        val feed = AudioInputFeed(sink)
+        feed.requestEos()
+        feed.onInputBufferAvailable(0)
+        feed.onInputBufferAvailable(1)
+        feed.onInputBufferAvailable(2)
+        assertEquals(1, sink.queued.size)
+        assertEquals(
+            MediaCodec.BUFFER_FLAG_END_OF_STREAM,
+            sink.queued[0].flags,
+        )
+    }
+
+    @Test
+    fun `getInputBuffer nulo se cuenta y el buffer se devuelve vacio`() {
+        val sink = FakeSink(nullBufferIndexes = setOf(5))
+        val feed = AudioInputFeed(sink)
+        feed.offerFrame(frame(1, 0L))
+        feed.onInputBufferAvailable(5)
+        // El índice se devuelve encolándolo vacío, nunca se pierde.
+        assertEquals(listOf(QueuedInput(5, 0, 0L, 0)), sink.queued)
+        assertEquals(1, feed.droppedInputBuffers)
+        // La trama siguiente fluye con normalidad.
+        feed.offerFrame(frame(2, 21_333L))
+        feed.onInputBufferAvailable(6)
+        assertEquals(QueuedInput(6, 4096, 21_333L, 0), sink.queued[1])
+        assertEquals(1, feed.droppedInputBuffers)
+    }
+
+    @Test
+    fun `cola llena descarta la trama nueva y la cuenta`() {
+        val sink = FakeSink()
+        val feed = AudioInputFeed(sink, maxFrames = 2)
+        assertTrue(feed.offerFrame(frame(1, 0L)))
+        assertTrue(feed.offerFrame(frame(2, 21_333L)))
+        assertFalse(feed.offerFrame(frame(3, 42_666L)))
+        assertEquals(1, feed.droppedInputBuffers)
+        feed.onInputBufferAvailable(0)
+        feed.onInputBufferAvailable(1)
+        assertEquals(
+            listOf(
+                QueuedInput(0, 4096, 0L, 0),
+                QueuedInput(1, 4096, 21_333L, 0),
+            ),
+            sink.queued,
+        )
+    }
+
+    @Test
+    fun `sin tramas no se encola nada`() {
+        val sink = FakeSink()
+        val feed = AudioInputFeed(sink)
+        feed.onInputBufferAvailable(0)
+        feed.onInputBufferAvailable(1)
+        feed.drain()
+        assertTrue(sink.queued.isEmpty())
+        assertEquals(0, feed.droppedInputBuffers)
+    }
+
+    @Test
+    fun `un buffer libre espera a la trama siguiente`() {
+        // En producción es el `post` del lector tras encolar la trama
+        // el que pide el drenado; aquí se llama a `drain()` directo.
+        val sink = FakeSink()
+        val feed = AudioInputFeed(sink)
+        feed.onInputBufferAvailable(0)
+        assertTrue(sink.queued.isEmpty())
+        feed.offerFrame(frame(1, 0L))
+        feed.drain()
+        assertEquals(listOf(QueuedInput(0, 4096, 0L, 0)), sink.queued)
+    }
+
+    @Test
+    fun `clear vacia la cola y resetea el EOS`() {
+        val sink = FakeSink()
+        val feed = AudioInputFeed(sink)
+        feed.offerFrame(frame(1, 0L))
+        feed.requestEos()
+        feed.clear()
+        assertFalse(feed.eosRequested)
+        feed.onInputBufferAvailable(0)
+        assertTrue(sink.queued.isEmpty())
+        assertEquals(0, feed.droppedInputBuffers)
+    }
+}

@@ -265,8 +265,36 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
     @Volatile
     private var stopRequested = false
 
-    @Volatile
-    private var eosRequested = false
+    /**
+     * Feed de entrada AAC por `onInputBufferAvailable` (ronda 3 de
+     * audio 3.1.3, grupo F): el hilo lector encola tramas PCM y el
+     * drenado, que corre SOLO en el hilo del callback, las entrega
+     * al codec con los buffers que el callback pone a disposición.
+     * El sumidero lee `codec` en cada llamada: es `null` antes de
+     * `configureAndStart` y tras `release()`.
+     */
+    private val inputFeed = AudioInputFeed(
+        object : InputBufferSink {
+            override fun getInputBuffer(index: Int): ByteBuffer? =
+                codec?.getInputBuffer(index)
+
+            override fun queueInputBuffer(
+                index: Int,
+                offset: Int,
+                size: Int,
+                presentationTimeUs: Long,
+                flags: Int,
+            ) {
+                codec?.queueInputBuffer(
+                    index,
+                    offset,
+                    size,
+                    presentationTimeUs,
+                    flags,
+                )
+            }
+        },
+    )
 
     /** Ancla de PTS (ns, `CLOCK_MONOTONIC`): instante de la primera lectura con éxito. */
     @Volatile
@@ -276,10 +304,13 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
     @Volatile
     private var samplesFedSinceAnchor: Long = 0
 
-    /** Buffers de entrada descartados porque la cola del codec estaba llena (diagnóstico). */
-    @Volatile
-    override var droppedInputBuffers: Int = 0
-        private set
+    /**
+     * Buffers de entrada descartados (diagnóstico 3.1.3): trama
+     * nueva con la cola PCM llena, o `getInputBuffer == null`. Lo
+     * posee el feed; lo lee la sesión al parar.
+     */
+    override val droppedInputBuffers: Int
+        get() = inputFeed.droppedInputBuffers
 
     /**
      * Instrumentación ronda 3 (grupo I): estado del micrófono justo
@@ -419,7 +450,11 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
                         codec: MediaCodec,
                         index: Int,
                     ) {
-                        // Entrada por buffers: la alimenta el hilo de lectura.
+                        // Grupo F: el callback entrega los buffers de
+                        // entrada; el drenado corre en este hilo
+                        // (nunca en el hilo lector).
+                        if (released.get()) return
+                        inputFeed.onInputBufferAvailable(index)
                     }
 
                     override fun onOutputBufferAvailable(
@@ -486,6 +521,23 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
             // queda en `STOPPED` y solo este valor lo distingue de
             // un HAL que no entrega tramas (H1-A vs H1-B).
             recordingStateAtStart = record.recordingState
+            // Grupo F (F3): si la captura no arrancó, el fallo es
+            // `audio_capture_not_started` (distinto de
+            // `audio_mic_unavailable`): `configureAndStart` lanza y
+            // la sesión degrada a video-only con ese motivo. El
+            // `catch (RecordingException)` de abajo limpia y
+            // re-lanza sin tocar ese flujo.
+            if (record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                throw RecordingException.audioError(
+                    "La captura de audio no arrancó " +
+                        "(estado=${record.recordingState}).",
+                    mapOf(
+                        "stage" to "configureAndStart",
+                        "reason" to "audio_capture_not_started",
+                        "recordingState" to record.recordingState,
+                    ),
+                )
+            }
             val reader = Thread(
                 { readLoop() },
                 "Transmiti2AudioReader",
@@ -556,9 +608,11 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
 
     /**
      * Hilo de lectura PCM (prioridad de audio). Lee 2048 muestras
-     * (4096 bytes = 2 tramas AAC) por `read()` y alimenta el codec
-     * con el PTS calculado desde el ancla. `read()` bloquea; este
-     * hilo nunca es el principal ni el del encoder de video.
+     * (4096 bytes = 2 tramas AAC) por `read()` y encola cada trama
+     * con el PTS calculado desde el ancla; el drenado (hilo del
+     * callback del codec, grupo F) la entrega al codec. `read()`
+     * bloquea; este hilo nunca es el principal ni el del encoder de
+     * video, y nunca llama a `queueInputBuffer`.
      *
      * Pérdida de audio (plan §6 D7): un código de error de `read()`
      * (`ERROR_DEAD_OBJECT`, `ERROR_INVALID_OPERATION`, `ERROR`) o 10
@@ -603,7 +657,26 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
                     if (anchorNs == null) {
                         anchorFrom(record)
                     }
-                    feedPcm(pcm, read)
+                    // Grupo F: el PTS se calcula aquí igual que antes
+                    // (ancla + `samplesFedSinceAnchor`); solo cambia
+                    // dónde se consume la trama: se encola una COPIA
+                    // (el buffer `pcm` se reutiliza en cada `read()`)
+                    // y el drenado del hilo del callback la entrega
+                    // al codec. El `post` por trama (~23/s) es barato.
+                    val anchor = anchorNs
+                    if (anchor != null) {
+                        val ptsUs = audioPtsUs(
+                            anchor,
+                            samplesFedSinceAnchor,
+                            config.sampleRate,
+                        )
+                        val samples = (read / 2).toLong()
+                        samplesFedSinceAnchor += samples
+                        inputFeed.offerFrame(
+                            PcmFrame(pcm.copyOf(read), read, ptsUs, samples),
+                        )
+                        callbackHandler.post { drainInput() }
+                    }
                 }
                 read == 0 -> {
                     zeroReads++
@@ -639,8 +712,8 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
                 }
             }
         }
-        if (eosRequested) {
-            queueEos()
+        if (inputFeed.eosRequested) {
+            callbackHandler.post { drainInput() }
         }
     }
 
@@ -673,71 +746,35 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
         samplesFedSinceAnchor = 0
     }
 
-    /** Alimenta un buffer PCM al codec con su PTS desde el ancla. */
-    private fun feedPcm(pcm: ByteArray, bytesRead: Int) {
-        val currentCodec = codec ?: return
-        val anchor = anchorNs ?: return
-        val ptsUs = audioPtsUs(
-            anchor,
-            samplesFedSinceAnchor,
-            config.sampleRate,
-        )
-        samplesFedSinceAnchor += (bytesRead / 2).toLong()
-        val index = try {
-            currentCodec.dequeueInputBuffer(INPUT_TIMEOUT_US)
-        } catch (_: Exception) {
-            -1
-        }
-        if (index < 0) {
-            droppedInputBuffers++
-            return
-        }
-        try {
-            val input = currentCodec.getInputBuffer(index) ?: return
-            input.clear()
-            input.put(pcm, 0, bytesRead)
-            currentCodec.queueInputBuffer(index, 0, bytesRead, ptsUs, 0)
-        } catch (_: Exception) {
-            droppedInputBuffers++
-        }
-    }
-
-    /** Encola un buffer de entrada vacío con flag EOS. */
-    private fun queueEos() {
-        val currentCodec = codec ?: return
-        try {
-            val index = currentCodec.dequeueInputBuffer(INPUT_TIMEOUT_US)
-            if (index >= 0) {
-                currentCodec.queueInputBuffer(
-                    index,
-                    0,
-                    0,
-                    0,
-                    MediaCodec.BUFFER_FLAG_END_OF_STREAM,
-                )
-            }
-        } catch (_: Exception) {
-        }
+    /**
+     * Drena el feed de entrada AAC. SOLO en el hilo del callback:
+     * `onInputBufferAvailable` lo llama directo; el lector y
+     * `signalEndOfInputStream()` lo piden con
+     * `callbackHandler.post`. Nunca se llama a `queueInputBuffer`
+     * desde el hilo lector.
+     */
+    private fun drainInput() {
+        if (released.get()) return
+        inputFeed.drain()
     }
 
     /**
      * Pide el fin de la entrada: para la captura (el hilo de lectura
-     * sale del `read()` bloqueante) y encola el EOS al codec. La
-     * entrada por buffers no admite `MediaCodec.signalEndOfInputStream`
-     * (solo para entrada por superficie): el EOS se encola como
-     * buffer vacío con `BUFFER_FLAG_END_OF_STREAM`.
+     * sale del `read()` bloqueante) y pide el EOS al feed, que lo
+     * encola en el hilo del callback cuando la cola PCM se vacía.
+     * La entrada por buffers no admite
+     * `MediaCodec.signalEndOfInputStream` (solo para entrada por
+     * superficie): el EOS se encola como buffer vacío con
+     * `BUFFER_FLAG_END_OF_STREAM`.
      */
     override fun signalEndOfInputStream() {
-        eosRequested = true
+        inputFeed.requestEos()
         stopRequested = true
         try {
             audioRecord?.stop()
         } catch (_: Exception) {
         }
-        val reader = readerThread
-        if (reader == null || !reader.isAlive) {
-            queueEos()
-        }
+        callbackHandler.post { drainInput() }
     }
 
     /**
@@ -767,7 +804,7 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
     override fun release() {
         if (!released.compareAndSet(false, true)) return
         stopRequested = true
-        eosRequested = false
+        inputFeed.clear()
         try {
             audioRecord?.stop()
         } catch (_: Exception) {
@@ -820,9 +857,6 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
     }
 
     companion object {
-        /** Espera al encolar la entrada de audio (µs). */
-        private const val INPUT_TIMEOUT_US = 10_000L
-
         /** Espera máxima al hilo de lectura en `release()` (ms). */
         private const val READER_JOIN_TIMEOUT_MS = 2_000L
 

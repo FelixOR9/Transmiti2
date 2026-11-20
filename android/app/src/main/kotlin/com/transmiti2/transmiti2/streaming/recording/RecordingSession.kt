@@ -1046,7 +1046,13 @@ open class RecordingSession(
             )
         } catch (e: Exception) {
             // Micrófono no disponible o AAC que no arranca: video-only.
-            audioReason = "audio_mic_unavailable"
+            // Grupo F (ronda 3): el motivo viaja en `details["reason"]`
+            // cuando el fallo lo trae (p. ej.
+            // `audio_capture_not_started` si la captura no arrancó);
+            // otros fallos siguen con `audio_mic_unavailable`. Mismo
+            // patrón que `onAudioError`.
+            audioReason = (e as? RecordingException)?.details?.get("reason")
+                as? String ?: "audio_mic_unavailable"
             audioExpected = false
             audioEncoder = null
             audioConfig = null
