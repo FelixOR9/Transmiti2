@@ -186,6 +186,12 @@ data class RecordingResult(
      * liberarlo. */
     val droppedInputBuffers: Int = 0,
     /**
+     * Capacidad del buffer de entrada AAC en bytes (ronda U): leída
+     * del encoder al parar, antes de liberarlo (como
+     * `droppedInputBuffers`). `null` si nunca se drenó un buffer.
+     */
+    val inputBufferCapacityBytes: Int? = null,
+    /**
      * Instrumentación ronda 3 de audio 3.1.3 (grupo I): estado del
      * micrófono y contadores del hilo lector, leídos del encoder al
      * parar, antes de liberarlo (como `droppedInputBuffers`).
@@ -214,6 +220,7 @@ data class RecordingResult(
         "previewRestoreError" to previewRestoreError,
         "audioEnabled" to audioEnabled,
         "droppedInputBuffers" to droppedInputBuffers,
+        "inputBufferCapacityBytes" to inputBufferCapacityBytes,
         "micStateAtStart" to micStateAtStart,
         "micStateAtStop" to micStateAtStop,
         "audioReadCount" to audioReadCount,
@@ -240,6 +247,7 @@ data class RecordingResult(
             errorCode: String?,
             previewRestoreError: String?,
             droppedInputBuffers: Int = 0,
+            inputBufferCapacityBytes: Int? = null,
             micStateAtStart: Int? = null,
             micStateAtStop: Int? = null,
             audioReadCount: Int = 0,
@@ -265,6 +273,7 @@ data class RecordingResult(
                 previewRestoreError = previewRestoreError,
                 audioEnabled = segments.any { it.hasAudio },
                 droppedInputBuffers = droppedInputBuffers,
+                inputBufferCapacityBytes = inputBufferCapacityBytes,
                 micStateAtStart = micStateAtStart,
                 micStateAtStop = micStateAtStop,
                 audioReadCount = audioReadCount,
@@ -1064,8 +1073,10 @@ open class RecordingSession(
             // El segmento ya no espera al formato AAC: se abre
             // video-only en el hilo del encoder (si el formato de
             // video aún no llegó, `onOutputFormatChanged` lo abre).
+            // Ronda U: la apertura va por `maybeOpenSegmentPosted`
+            // para que un fallo no mate el hilo del encoder.
             try {
-                encoder?.post { maybeOpenSegment() }
+                encoder?.post { maybeOpenSegmentPosted() }
             } catch (_: Exception) {
             }
         }
@@ -1106,7 +1117,9 @@ open class RecordingSession(
         if (audioFormat != null) return
         audioFormat = format
         try {
-            encoder?.post { maybeOpenSegment() }
+            // Ronda U: la apertura va por `maybeOpenSegmentPosted`
+            // para que un fallo no mate el hilo del encoder.
+            encoder?.post { maybeOpenSegmentPosted() }
         } catch (_: Exception) {
         }
     }
@@ -1275,6 +1288,43 @@ open class RecordingSession(
     }
 
     /**
+     * Abre el segmento desde un `post` al hilo del encoder (ronda U):
+     * un fallo de apertura no debe matar el hilo. El segmento 0 ya
+     * deja la excepción en `segmentOpenDeferred` (la convierte
+     * `start()` en evento de error); en un segmento posterior no hay
+     * deferred, así que se para la grabación con error. Devuelve
+     * `false` si la apertura falló.
+     */
+    private fun maybeOpenSegmentPosted(): Boolean {
+        return try {
+            maybeOpenSegment()
+            true
+        } catch (e: Exception) {
+            Transmiti2Logger.e(
+                "recording: no se pudo abrir el segmento " +
+                    "$segmentIndex " +
+                    "(${e.javaClass.simpleName}): ${e.message}",
+            )
+            if (segmentIndex != 0) {
+                scheduleErrorStop(
+                    when (e) {
+                        is RecordingException -> e
+                        else -> RecordingException.muxerError(
+                            "No se pudo abrir el segmento: ${e.message}",
+                            mapOf(
+                                "stage" to "openSegment",
+                                "segmentIndex" to segmentIndex,
+                                "exceptionClass" to e.javaClass.simpleName,
+                            ),
+                        )
+                    },
+                )
+            }
+            false
+        }
+    }
+
+    /**
      * La espera del formato AAC expiró (2 s desde el formato de
      * video): degradación a video-only con motivo
      * `audio_format_timeout` (§5.1). El encoder de audio se libera
@@ -1297,7 +1347,9 @@ open class RecordingSession(
         audioFormat = null
         audioEosDeferred = null
         audioExpected = false
-        maybeOpenSegment()
+        // Ronda U: si la apertura falla, no se sigue con
+        // `maybeFixOrigin` (como antes, la excepción lo saltaba).
+        if (!maybeOpenSegmentPosted()) return
         maybeFixOrigin()
     }
 
@@ -2110,8 +2162,10 @@ open class RecordingSession(
         // 3.1.3): se capturan en el `finally`, antes de liberar el
         // encoder de audio (tras `release()` ya no se puede leer).
         // Ronda 3 (grupo I): igual para el estado del micrófono y
-        // los contadores del lector.
+        // los contadores del lector. Ronda U: igual para la capacidad
+        // del buffer de entrada AAC.
         var droppedAtStop = 0
+        var inputBufferCapacityAtStop: Int? = null
         var micStateAtStart: Int? = null
         var micStateAtStop: Int? = null
         var readCountAtStop = 0
@@ -2189,6 +2243,8 @@ open class RecordingSession(
             // aquí (`elapsedRealtime()` ahora − instante guardado).
             val audioEncoderAtStop = audioEncoder
             droppedAtStop = audioEncoderAtStop?.droppedInputBuffers ?: 0
+            inputBufferCapacityAtStop =
+                audioEncoderAtStop?.inputBufferCapacityBytes
             micStateAtStart = audioEncoderAtStop?.recordingStateAtStart
             micStateAtStop = audioEncoderAtStop?.recordingState
             readCountAtStop = audioEncoderAtStop?.readCount ?: 0
@@ -2227,6 +2283,7 @@ open class RecordingSession(
             errorCode = errorCode,
             previewRestoreError = previewRestoreError,
             droppedInputBuffers = droppedAtStop,
+            inputBufferCapacityBytes = inputBufferCapacityAtStop,
             micStateAtStart = micStateAtStart,
             micStateAtStop = micStateAtStop,
             audioReadCount = readCountAtStop,

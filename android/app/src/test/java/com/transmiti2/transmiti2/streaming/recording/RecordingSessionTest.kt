@@ -52,8 +52,20 @@ class RecordingSessionTest {
         // guarda del muxer falso fallaría — en producción el `post`
         // salta al hilo del encoder real.
         private val executor = Executors.newSingleThreadExecutor { r ->
-            Thread(r, "FakeEncoder").apply { isDaemon = true }
+            Thread(r, "FakeEncoder").apply {
+                isDaemon = true
+                // Ronda U: las excepciones no capturadas de los
+                // bloques `post` se registran aquí (sin esto, el
+                // executor reemplaza el hilo muerto en silencio y
+                // el test no distinguiría el cierre).
+                uncaughtExceptionHandler =
+                    Thread.UncaughtExceptionHandler { _, e ->
+                        synchronized(uncaught) { uncaught += e }
+                    }
+            }
         }
+        /** Excepciones no capturadas del hilo del encoder (ronda U). */
+        val uncaught = mutableListOf<Throwable>()
         // Superficie ficticia no nula: la sesión solo la pasa a
         // `recreateSession` (nunca llama a métodos nativos sobre
         // ella). `Surface()` sin argumento NO existe en la API
@@ -189,10 +201,17 @@ class RecordingSessionTest {
             configureCalls++
             configureError?.let { throw it }
             if (deliverFormatOnStart) {
-                val format = MediaFormat()
-                outputFormat = format
-                listener?.onAudioFormatChanged(format)
+                deliverFormat()
             }
+        }
+
+        /** Entrega el formato AAC al listener (ronda U: el test lo
+         * llama tras el inicio para reproducir el orden real en el
+         * que el formato de video llega antes que el AAC). */
+        fun deliverFormat() {
+            val format = MediaFormat()
+            outputFormat = format
+            listener?.onAudioFormatChanged(format)
         }
 
         override fun signalEndOfInputStream() {
@@ -444,6 +463,7 @@ class RecordingSessionTest {
         formatTimeoutMs: Long = 5_000L,
         eosTimeoutMs: Long = 5_000L,
         audioFormatTimeoutMs: Long = 2_000L,
+        muxerFactory: ((String) -> RecordingMuxer)? = null,
     ): RecordingSession {
         return RecordingSession(
             scope = CoroutineScope(Dispatchers.Unconfined),
@@ -453,7 +473,7 @@ class RecordingSessionTest {
                 synchronized(events) { events += type to payload }
             },
             encoderFactory = { fakeEncoder },
-            muxerFactory = { path ->
+            muxerFactory = muxerFactory ?: { path ->
                 FakeSessionMuxer(path).also { muxers += it }
             },
             capabilityCheck = { _, _, _, _ ->
@@ -1203,6 +1223,90 @@ class RecordingSessionTest {
             assertEquals(1, result.segments.size)
             assertEquals("audio_dead_object", result.segments[0].audioReason)
             assertEquals(true, fakeVerifier.lastExpectedAudio)
+        }
+
+    @Test
+    fun `perdida de audio por error de entrada degrada con motivo audio_input_error`() =
+        runBlocking {
+            // Ronda U: el motivo nuevo de la guarda del callback AAC
+            // viaja como los demás motivos de `onAudioError`.
+            val session = buildSession()
+            startRecording(session, audioEnabled = true)
+            fakeEncoder.deliverSample(0L, true)
+            fakeAudioEncoder.deliverSample(0L)
+            fakeAudioEncoder.deliverError("audio_input_error")
+            assertTrue(
+                eventTypes().contains(
+                    StreamContract.EVENT_RECORDING_AUDIO_LOST,
+                ),
+            )
+            assertEquals(RecordingState.RECORDING, session.currentState())
+            fakeEncoder.deliverSample(33_333L, false)
+            val result = session.stop()
+            assertEquals("ready", result.status)
+            assertEquals("audio_input_error", result.segments[0].audioReason)
+        }
+
+    @Test
+    fun `apertura de segmento fallida via post no mata el hilo del encoder`() =
+        runBlocking {
+            // Ronda U (H3): `maybeOpenSegment` re-lanza tras
+            // `completeExceptionally`; dentro de un `post` eso mataba
+            // el hilo del encoder. La guarda lo convierte en error
+            // de inicio sin matar el hilo.
+            val session = buildSession(
+                audioFormatTimeoutMs = 10_000L,
+                muxerFactory = {
+                    throw RecordingException.muxerError(
+                        "Muxer roto.",
+                        mapOf("stage" to "openSegment"),
+                    )
+                },
+            )
+            fakeAudioEncoder.deliverFormatOnStart = false
+            // `start()` espera el formato AAC; se entrega desde otro
+            // hilo cuando la sesión ya asignó el listener, como en
+            // producción. Sin `async`: la excepción del `Deferred`
+            // reaparecía al cerrar `runBlocking` aunque `await()` la
+            // consumiera, y JUnit la reportaba como fallo del test.
+            val deliverer = Thread {
+                while (fakeAudioEncoder.listener == null) {
+                    Thread.sleep(10)
+                }
+                fakeAudioEncoder.deliverFormat()
+            }
+            deliverer.start()
+            // `assertFailsWith` no acepta un lambda suspend: se
+            // captura la excepción con `runCatching`.
+            val thrown = runCatching {
+                startRecording(session, audioEnabled = true)
+            }.exceptionOrNull()
+            deliverer.join()
+            assertTrue(
+                thrown is RecordingException &&
+                    thrown.code == StreamContract.MUXER_ERROR,
+            )
+            assertTrue(
+                eventTypes().contains(
+                    StreamContract.EVENT_RECORDING_ERROR,
+                ),
+            )
+            assertEquals(RecordingState.ERROR, session.currentState())
+            assertTrue(fakeEncoder.uncaught.isEmpty())
+        }
+
+    @Test
+    fun `stop propaga la capacidad del buffer de entrada AAC`() =
+        runBlocking {
+            // Ronda U: la capacidad se captura al parar, antes de
+            // liberar el encoder (como `droppedInputBuffers`).
+            fakeAudioEncoder.inputBufferCapacityBytes = 2048
+            val session = buildSession()
+            startRecording(session, audioEnabled = true)
+            fakeEncoder.deliverSample(0L, true)
+            val result = session.stop()
+            assertEquals(2048, result.inputBufferCapacityBytes)
+            assertEquals(2048, result.toMap()["inputBufferCapacityBytes"])
         }
 
     @Test
