@@ -579,6 +579,71 @@ class StreamEngineRecordingTest {
         }
 
     @Test
+    fun `stopRecording lleva los contadores de audio al resultado del metodo`() =
+        runBlocking {
+            // Grupo V (V1, camino real): el resultado del método
+            // debe llevar los mismos 11 campos de instrumentación
+            // de audio que el evento `recording_stopped`. Si el
+            // motor soltara uno, Dart sobrescribiría el valor real
+            // del evento con el defecto (diagnóstico ronda 3, §2):
+            // este test rompe antes que el teléfono.
+            val fixture = Fixture()
+            fixture.recording.stopResult =
+                RecordingResult.fromSegments(
+                    recordingId = "rec_20261118_120000_ab12",
+                    segments = listOf(
+                        RecordingSegmentResult(
+                            recordingId = "rec_20261118_120000_ab12",
+                            index = 0,
+                            fileName = "rec_20261118_120000_ab12_seg000.mp4",
+                            filePath = "/docs/recordings/" +
+                                "rec_20261118_120000_ab12_seg000.mp4",
+                            status = SegmentStatus.READY,
+                            durationMs = 12_000,
+                            sizeBytes = 3_750_000,
+                            sampleCount = 360,
+                            keyframeCount = 6,
+                            firstSampleKeyframe = true,
+                            ptsMonotonic = true,
+                            profileIdc = 66,
+                            closedCleanly = true,
+                            reason = null,
+                        ),
+                    ),
+                    errorCode = null,
+                    previewRestoreError = null,
+                    droppedInputBuffers = 7,
+                    inputBufferCapacityBytes = 2048,
+                    micStateAtStart = 3,
+                    micStateAtStop = 1,
+                    audioReadCount = 42,
+                    audioLastReadCode = 4096,
+                    audioLastReadOkAgeMs = 12_345L,
+                    audioReaderAlive = true,
+                    audioEos = true,
+                    audioReaderNoData2s = true,
+                    eosTimedOut = true,
+                )
+            val engine = fixture.engine()
+            engine.startPreview()
+            engine.startRecording(RecordingOptions())
+
+            val info = engine.stopRecording()
+
+            assertEquals(7, info.droppedInputBuffers)
+            assertEquals(2048, info.inputBufferCapacityBytes)
+            assertEquals(3, info.micStateAtStart)
+            assertEquals(1, info.micStateAtStop)
+            assertEquals(42, info.audioReadCount)
+            assertEquals(4096, info.audioLastReadCode)
+            assertEquals(12_345L, info.audioLastReadOkAgeMs)
+            assertEquals(true, info.audioReaderAlive)
+            assertEquals(true, info.audioEos)
+            assertEquals(true, info.audioReaderNoData2s)
+            assertEquals(true, info.eosTimedOut)
+        }
+
+    @Test
     fun `stopRecording desde IDLE es idempotente`() = runBlocking {
         val fixture = Fixture()
         val engine = fixture.engine()

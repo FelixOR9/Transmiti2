@@ -61,6 +61,29 @@ data class RecordingInfo(
      * los devuelve para que la UI no dependa de haber recibido todos
      * los eventos `recording_segment` (fix duraciones 3.1.2, paso 5). */
     val segments: List<RecordingSegmentResult> = emptyList(),
+    /**
+     * Instrumentación de audio 3.1.3 (grupos I/U y Grupo V): los
+     * mismos 9 campos de `RecordingResult` (buffers descartados,
+     * capacidad del buffer AAC, estado del micrófono, contadores
+     * del lector y EOS de audio) más los 2 del Grupo V
+     * (`audioReaderNoData2s`: el watchdog disparó a los 2 s sin
+     * lecturas; `eosTimedOut`: la espera de EOS agotó los 5 s).
+     * Sin ellos, el resultado del método sobrescribía en Dart los
+     * valores reales del evento `recording_stopped` con los
+     * defectos (diagnóstico ronda 3, §2): el método debe llevar
+     * exactamente los mismos campos que el evento.
+     */
+    val droppedInputBuffers: Int = 0,
+    val inputBufferCapacityBytes: Int? = null,
+    val micStateAtStart: Int? = null,
+    val micStateAtStop: Int? = null,
+    val audioReadCount: Int = 0,
+    val audioLastReadCode: Int? = null,
+    val audioLastReadOkAgeMs: Long? = null,
+    val audioReaderAlive: Boolean = false,
+    val audioEos: Boolean = false,
+    val audioReaderNoData2s: Boolean = false,
+    val eosTimedOut: Boolean = false,
 )
 
 /** Estados de una sesión de transmisión (para las fases 3.1 en adelante). */

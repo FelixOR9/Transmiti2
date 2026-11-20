@@ -98,6 +98,43 @@ internal fun mapStartPreviewError(
 }
 
 /**
+ * Mapa del resultado de `stopRecording` para el canal de métodos.
+ * Función pura de nivel superior (como `mapStartPreviewError`):
+ * lleva los mismos campos que el evento `recording_stopped`
+ * (Grupo V, V1). Si falta uno, Dart sobrescribe el valor real del
+ * evento con el defecto (diagnóstico ronda 3, §2). Es `internal`
+ * para que el test del camino real la ejerza directamente: un campo
+ * que se suelte aquí debe romper el test, no solo el teléfono.
+ * Un `null` viaja como `null` y Dart lo muestra como `—`: nunca se
+ * inventa un valor.
+ */
+internal fun recordingInfoMap(info: RecordingInfo): Map<String, Any?> {
+    return mapOf(
+        "recordingId" to info.recordingId,
+        "filePath" to info.filePath,
+        "durationMs" to info.durationMs,
+        "sizeBytes" to info.sizeBytes,
+        "status" to info.status,
+        // Segmentos verificados (paso 5): la confirmación de la
+        // parada ya no depende de los eventos recibidos.
+        "segments" to info.segments.map { it.toMap() },
+        // Instrumentación de audio 3.1.3 (grupos I/U y Grupo V):
+        // los mismos campos que `RecordingResult.toMap()`.
+        "droppedInputBuffers" to info.droppedInputBuffers,
+        "inputBufferCapacityBytes" to info.inputBufferCapacityBytes,
+        "micStateAtStart" to info.micStateAtStart,
+        "micStateAtStop" to info.micStateAtStop,
+        "audioReadCount" to info.audioReadCount,
+        "audioLastReadCode" to info.audioLastReadCode,
+        "audioLastReadOkAgeMs" to info.audioLastReadOkAgeMs,
+        "audioReaderAlive" to info.audioReaderAlive,
+        "audioEos" to info.audioEos,
+        "audioReaderNoData2s" to info.audioReaderNoData2s,
+        "eosTimedOut" to info.eosTimedOut,
+    )
+}
+
+/**
  * Manejador del canal `com.transmiti2.transmiti2/streaming`.
  *
  * Fase 3.0: responde `getStatus` y `checkPermissions` (solo lectura, sin
@@ -427,19 +464,6 @@ class StreamChannelHandler(
                 failRecording(result, e)
             }
         }
-    }
-
-    private fun recordingInfoMap(info: RecordingInfo): Map<String, Any> {
-        return mapOf(
-            "recordingId" to info.recordingId,
-            "filePath" to info.filePath,
-            "durationMs" to info.durationMs,
-            "sizeBytes" to info.sizeBytes,
-            "status" to info.status,
-            // Segmentos verificados (paso 5): la confirmación de la
-            // parada ya no depende de los eventos recibidos.
-            "segments" to info.segments.map { it.toMap() },
-        )
     }
 
     /**

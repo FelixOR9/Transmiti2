@@ -587,6 +587,21 @@ class StreamEngineImpl(
             sizeBytes = result.totalSizeBytes,
             status = result.status,
             segments = result.segments,
+            // Grupo V (V1): el resultado del método lleva los
+            // mismos campos de instrumentación de audio que el
+            // evento `recording_stopped`; sin ellos Dart
+            // sobrescribía los valores reales con los defectos.
+            droppedInputBuffers = result.droppedInputBuffers,
+            inputBufferCapacityBytes = result.inputBufferCapacityBytes,
+            micStateAtStart = result.micStateAtStart,
+            micStateAtStop = result.micStateAtStop,
+            audioReadCount = result.audioReadCount,
+            audioLastReadCode = result.audioLastReadCode,
+            audioLastReadOkAgeMs = result.audioLastReadOkAgeMs,
+            audioReaderAlive = result.audioReaderAlive,
+            audioEos = result.audioEos,
+            audioReaderNoData2s = result.audioReaderNoData2s,
+            eosTimedOut = result.eosTimedOut,
         )
     }
 

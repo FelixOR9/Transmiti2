@@ -188,6 +188,9 @@ class RecordingSessionTest {
         override var lastReadCode: Int? = null
         override var lastSuccessfulReadElapsedMs: Long? = null
         override var isReaderAlive: Boolean = false
+        /** Flag del watchdog (Grupo V, V3): el test lo fija para
+         * comprobar que `stop()` lo propaga al `RecordingResult`. */
+        override var readerNoData2s: Boolean = false
         override var listener: AudioEncoderListener? = null
         var configureCalls = 0
         var releaseCalls = 0
@@ -1547,6 +1550,8 @@ class RecordingSessionTest {
             audioLastReadOkAgeMs = 12_345L,
             audioReaderAlive = true,
             audioEos = true,
+            audioReaderNoData2s = true,
+            eosTimedOut = true,
         )
         assertEquals(3, withValues.micStateAtStart)
         assertEquals(3, withValues.micStateAtStop)
@@ -1555,6 +1560,8 @@ class RecordingSessionTest {
         assertEquals(12_345L, withValues.audioLastReadOkAgeMs)
         assertEquals(true, withValues.audioReaderAlive)
         assertEquals(true, withValues.audioEos)
+        assertEquals(true, withValues.audioReaderNoData2s)
+        assertEquals(true, withValues.eosTimedOut)
         val withMap = withValues.toMap()
         assertEquals(3, withMap["micStateAtStart"])
         assertEquals(3, withMap["micStateAtStop"])
@@ -1563,6 +1570,8 @@ class RecordingSessionTest {
         assertEquals(12_345L, withMap["audioLastReadOkAgeMs"])
         assertEquals(true, withMap["audioReaderAlive"])
         assertEquals(true, withMap["audioEos"])
+        assertEquals(true, withMap["audioReaderNoData2s"])
+        assertEquals(true, withMap["eosTimedOut"])
         // Sin pasar los parámetros, los defectos son null/0/false.
         val byDefault = RecordingResult.fromSegments(
             recordingId = "rec_20261119_151552_e2e0",
@@ -1577,9 +1586,13 @@ class RecordingSessionTest {
         assertEquals(null, byDefault.audioLastReadOkAgeMs)
         assertEquals(false, byDefault.audioReaderAlive)
         assertEquals(false, byDefault.audioEos)
+        assertEquals(false, byDefault.audioReaderNoData2s)
+        assertEquals(false, byDefault.eosTimedOut)
         assertEquals(null, byDefault.toMap()["micStateAtStart"])
         assertEquals(0, byDefault.toMap()["audioReadCount"])
         assertEquals(false, byDefault.toMap()["audioEos"])
+        assertEquals(false, byDefault.toMap()["audioReaderNoData2s"])
+        assertEquals(false, byDefault.toMap()["eosTimedOut"])
     }
 
     @Test
@@ -1604,6 +1617,8 @@ class RecordingSessionTest {
             fakeAudioEncoder.lastReadCode = null
             fakeAudioEncoder.lastSuccessfulReadElapsedMs = null
             fakeAudioEncoder.isReaderAlive = true
+            // Grupo V (V3): el watchdog disparó en este arranque.
+            fakeAudioEncoder.readerNoData2s = true
             val result = session.stop()
             assertEquals("ready", result.status)
             assertEquals(3, result.micStateAtStart)
@@ -1614,6 +1629,9 @@ class RecordingSessionTest {
             assertEquals(true, result.audioReaderAlive)
             // El falso entrega el EOS al parar: `audioEos` es `true`.
             assertEquals(true, result.audioEos)
+            assertEquals(true, result.audioReaderNoData2s)
+            // El EOS llegó sin agotar los 5 s: `eosTimedOut` es `false`.
+            assertEquals(false, result.eosTimedOut)
             val stoppedPayload = events.first {
                 it.first == StreamContract.EVENT_RECORDING_STOPPED
             }.second
@@ -1624,5 +1642,7 @@ class RecordingSessionTest {
             assertEquals(null, stoppedPayload["audioLastReadOkAgeMs"])
             assertEquals(true, stoppedPayload["audioReaderAlive"])
             assertEquals(true, stoppedPayload["audioEos"])
+            assertEquals(true, stoppedPayload["audioReaderNoData2s"])
+            assertEquals(false, stoppedPayload["eosTimedOut"])
         }
 }

@@ -1,5 +1,7 @@
 package com.transmiti2.transmiti2.streaming
 
+import com.transmiti2.transmiti2.streaming.recording.RecordingSegmentResult
+import com.transmiti2.transmiti2.streaming.recording.SegmentStatus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
@@ -236,5 +238,92 @@ class StreamChannelHandlerErrorMappingTest {
             "camera_disabled_by_system",
             StreamContract.CAMERA_DISABLED_BY_SYSTEM,
         )
+    }
+
+    @Test
+    fun `recordingInfoMap lleva los 11 campos de audio al metodo`() {
+        // Grupo V (V1, camino real): el mapa del método debe llevar
+        // los mismos 11 campos de instrumentación de audio que el
+        // evento `recording_stopped`. Es la función que los soltó
+        // en las rondas 3/U (diagnóstico ronda 3, §2): si un campo
+        // vuelve a faltar aquí, este test rompe antes que el
+        // teléfono. Los valores son distintivos a propósito (ningún
+        // defecto coincide con ellos).
+        val info = RecordingInfo(
+            recordingId = "rec_20261120_135244_c8a2",
+            filePath = "/docs/recordings/rec_20261120_135244_c8a2_seg000.mp4",
+            durationMs = 76_898,
+            sizeBytes = 9_999_999,
+            status = "partial",
+            segments = listOf(
+                RecordingSegmentResult(
+                    recordingId = "rec_20261120_135244_c8a2",
+                    index = 0,
+                    fileName = "rec_20261120_135244_c8a2_seg000.mp4",
+                    filePath = "/docs/recordings/" +
+                        "rec_20261120_135244_c8a2_seg000.mp4",
+                    status = SegmentStatus.PARTIAL,
+                    durationMs = 60_053,
+                    sizeBytes = 7_000_000,
+                    sampleCount = 1797,
+                    keyframeCount = 30,
+                    firstSampleKeyframe = true,
+                    ptsMonotonic = true,
+                    profileIdc = 66,
+                    closedCleanly = true,
+                    reason = "sin_pista_audio",
+                ),
+            ),
+            droppedInputBuffers = 7,
+            inputBufferCapacityBytes = 2048,
+            micStateAtStart = 3,
+            micStateAtStop = 1,
+            audioReadCount = 42,
+            audioLastReadCode = 4096,
+            audioLastReadOkAgeMs = 12_345L,
+            audioReaderAlive = true,
+            audioEos = true,
+            audioReaderNoData2s = true,
+            eosTimedOut = true,
+        )
+        val map = recordingInfoMap(info)
+        assertEquals("rec_20261120_135244_c8a2", map["recordingId"])
+        assertEquals("partial", map["status"])
+        assertEquals(7, map["droppedInputBuffers"])
+        assertEquals(2048, map["inputBufferCapacityBytes"])
+        assertEquals(3, map["micStateAtStart"])
+        assertEquals(1, map["micStateAtStop"])
+        assertEquals(42, map["audioReadCount"])
+        assertEquals(4096, map["audioLastReadCode"])
+        assertEquals(12_345L, map["audioLastReadOkAgeMs"])
+        assertEquals(true, map["audioReaderAlive"])
+        assertEquals(true, map["audioEos"])
+        assertEquals(true, map["audioReaderNoData2s"])
+        assertEquals(true, map["eosTimedOut"])
+    }
+
+    @Test
+    fun `recordingInfoMap sin audio deja los contadores en defecto sin inventar`() {
+        // Sin campos de audio, el mapa lleva los defectos
+        // (null/0/false): Dart los muestra como `—`, nunca inventa.
+        val info = RecordingInfo(
+            recordingId = "",
+            filePath = "",
+            durationMs = 0,
+            sizeBytes = 0,
+            status = "idle",
+        )
+        val map = recordingInfoMap(info)
+        assertEquals(0, map["droppedInputBuffers"])
+        assertNull(map["inputBufferCapacityBytes"])
+        assertNull(map["micStateAtStart"])
+        assertNull(map["micStateAtStop"])
+        assertEquals(0, map["audioReadCount"])
+        assertNull(map["audioLastReadCode"])
+        assertNull(map["audioLastReadOkAgeMs"])
+        assertEquals(false, map["audioReaderAlive"])
+        assertEquals(false, map["audioEos"])
+        assertEquals(false, map["audioReaderNoData2s"])
+        assertEquals(false, map["eosTimedOut"])
     }
 }

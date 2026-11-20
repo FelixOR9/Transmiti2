@@ -208,6 +208,14 @@ data class RecordingResult(
     val audioLastReadOkAgeMs: Long? = null,
     val audioReaderAlive: Boolean = false,
     val audioEos: Boolean = false,
+    /**
+     * Grupo V: `audioReaderNoData2s` (V3) es el flag del watchdog
+     * del lector (sin ninguna lectura devuelta a los 2 s de
+     * arrancar); `eosTimedOut` (V4) es si la espera de EOS (audio
+     * y video, 5 s en total) se agotó sin que llegara el EOS.
+     */
+    val audioReaderNoData2s: Boolean = false,
+    val eosTimedOut: Boolean = false,
 ) {
     fun toMap(): Map<String, Any?> = mapOf(
         "recordingId" to recordingId,
@@ -228,6 +236,8 @@ data class RecordingResult(
         "audioLastReadOkAgeMs" to audioLastReadOkAgeMs,
         "audioReaderAlive" to audioReaderAlive,
         "audioEos" to audioEos,
+        "audioReaderNoData2s" to audioReaderNoData2s,
+        "eosTimedOut" to eosTimedOut,
     )
 
     companion object {
@@ -255,6 +265,8 @@ data class RecordingResult(
             audioLastReadOkAgeMs: Long? = null,
             audioReaderAlive: Boolean = false,
             audioEos: Boolean = false,
+            audioReaderNoData2s: Boolean = false,
+            eosTimedOut: Boolean = false,
         ): RecordingResult {
             val status = when {
                 segments.isEmpty() -> "corrupt"
@@ -281,6 +293,8 @@ data class RecordingResult(
                 audioLastReadOkAgeMs = audioLastReadOkAgeMs,
                 audioReaderAlive = audioReaderAlive,
                 audioEos = audioEos,
+                audioReaderNoData2s = audioReaderNoData2s,
+                eosTimedOut = eosTimedOut,
             )
         }
     }
@@ -2173,6 +2187,10 @@ open class RecordingSession(
         var lastReadOkAgeMsAtStop: Long? = null
         var readerAliveAtStop = false
         var audioEosAtStop = false
+        // Grupo V: flag del watchdog (V3) y si la espera de EOS
+        // agotó los 5 s (V4); se capturan como los demás contadores.
+        var readerNoDataAtStop = false
+        var eosTimedOutAtStop = false
         try {
             // EOS a ambos encoders (audio primero: parar la captura)
             // y drenado final (5 s en total); si no llega, se detiene
@@ -2194,6 +2212,9 @@ open class RecordingSession(
             } catch (_: Exception) {
                 eosTimedOut = true
             }
+            // Grupo V (V4): la espera agotó los 5 s o no; se guarda
+            // para el resultado (el `if` de abajo no cambia).
+            eosTimedOutAtStop = eosTimedOut
             if (eosTimedOut) {
                 drainStopped = true
                 encoder?.stopDrain()
@@ -2255,6 +2276,9 @@ open class RecordingSession(
                 }
             readerAliveAtStop = audioEncoderAtStop?.isReaderAlive ?: false
             audioEosAtStop = audioEosArrived
+            // Grupo V (V3): el flag del watchdog, del mismo encoder
+            // y antes de liberarlo que los demás contadores.
+            readerNoDataAtStop = audioEncoderAtStop?.readerNoData2s ?: false
             try {
                 encoder?.release()
             } catch (_: Exception) {
@@ -2291,6 +2315,8 @@ open class RecordingSession(
             audioLastReadOkAgeMs = lastReadOkAgeMsAtStop,
             audioReaderAlive = readerAliveAtStop,
             audioEos = audioEosAtStop,
+            audioReaderNoData2s = readerNoDataAtStop,
+            eosTimedOut = eosTimedOutAtStop,
         )
         sessionMutex.withLock {
             lastResult = result
@@ -2327,7 +2353,9 @@ open class RecordingSession(
                 "ultimoRead=${lastReadCodeAtStop ?: "—"} " +
                 "ultimaLecturaOkMs=${lastReadOkAgeMsAtStop ?: "—"} " +
                 "lectorVivo=$readerAliveAtStop " +
-                "audioEos=$audioEosAtStop)",
+                "audioEos=$audioEosAtStop " +
+                "lectorSinDatos2s=$readerNoDataAtStop " +
+                "eosTimeout=$eosTimedOutAtStop)",
         )
         return result
     }

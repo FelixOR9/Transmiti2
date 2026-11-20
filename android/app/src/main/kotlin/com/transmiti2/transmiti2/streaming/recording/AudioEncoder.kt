@@ -232,6 +232,13 @@ interface AudioEncoderPort {
     val lastReadCode: Int?
     val lastSuccessfulReadElapsedMs: Long?
     val isReaderAlive: Boolean
+    /**
+     * Grupo V (V3, solo lectura): el watchdog solo-observador
+     * disparó — a los 2 s de arrancar, ninguna lectura había
+     * devuelto todavía (`readCount == 0`). Lo lee la sesión al
+     * parar (diagnóstico visible, `lectorSinDatos2s`).
+     */
+    val readerNoData2s: Boolean
     var listener: AudioEncoderListener?
     fun configureAndStart()
     fun signalEndOfInputStream()
@@ -367,6 +374,15 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
     override val isReaderAlive: Boolean
         get() = readerThread?.isAlive ?: false
 
+    /**
+     * Grupo V (V3): el watchdog disparó en este arranque (a los
+     * 2 s sin ninguna lectura devuelta). Se resetea por arranque.
+     * Solo lo escribe la lambda del watchdog (hilo del callback).
+     */
+    @Volatile
+    override var readerNoData2s: Boolean = false
+        private set
+
     /** Primera muestra AAC ya registrada en log (se resetea por arranque). */
     @Volatile
     private var firstAudioSampleLogged = false
@@ -421,6 +437,8 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
         lastReadCode = null
         lastSuccessfulReadElapsedMs = null
         recordingStateAtStart = null
+        // Grupo V (V3): el flag del watchdog se resetea por arranque.
+        readerNoData2s = false
         val minBuffer = AudioRecord.getMinBufferSize(
             config.sampleRate,
             AudioFormat.CHANNEL_IN_MONO,
@@ -596,9 +614,11 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
             reader.start()
             // Watchdog solo-observador (grupo I): si la primera
             // lectura no vuelve en 2 s, un log, una sola vez. No
-            // degrada ni para nada: solo registra.
+            // degrada ni para nada: solo registra. Grupo V (V3):
+            // además deja el flag, visible en el diagnóstico.
             callbackHandler.postDelayed({
                 if (!released.get() && readCount == 0) {
+                    readerNoData2s = true
                     Transmiti2Logger.d(
                         "recording: lector de audio sin datos en 2 s " +
                             "(estadoMic=${recordingStateAtStart ?: recordingState})",
