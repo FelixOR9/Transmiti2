@@ -308,6 +308,9 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
                 )
             }
         },
+        // Grupo W: el drenado calcula el PTS de cada trozo desde la
+        // frecuencia real (48 kHz, o 44,1 kHz si cayó la escalera).
+        sampleRate = config.sampleRate,
     )
 
     /** Ancla de PTS (ns, `CLOCK_MONOTONIC`): instante de la primera lectura con éxito. */

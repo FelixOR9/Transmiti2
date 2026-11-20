@@ -12,12 +12,31 @@ import java.util.concurrent.atomic.AtomicInteger
  * lector produce tramas; el hilo del callback del codec las consume.
  * El `bytes` es una COPIA: el buffer de lectura se reutiliza en cada
  * `read()`.
+ *
+ * Grupo W: un trozo hereda el origen de su trama (`originPtsUs`,
+ * `originOffsetSamples`) para que su PTS se calcule en absoluto
+ * desde el PTS de la trama original, sin acumular el truncado entero
+ * de cada frontera (con el cálculo encadenado, 4 trozos de 512
+ * muestras quedarían en 21 332 / 31 998 µs en vez de 21 333 /
+ * 32 000 µs).
  */
 data class PcmFrame(
     val bytes: ByteArray,
     val size: Int,
     val ptsUs: Long,
     val samples: Long,
+    /**
+     * PTS de la primera muestra de la trama ORIGINAL de la que esta
+     * trama/trozo procede (Grupo W). Una trama del lector lleva su
+     * propio PTS; un trozo hereda el de su trama.
+     */
+    val originPtsUs: Long = ptsUs,
+    /**
+     * Muestras de la trama original ya alimentadas antes de la
+     * primera muestra de esta trama/trozo (Grupo W). Una trama del
+     * lector lleva 0; cada resto suma las muestras de su trozo.
+     */
+    val originOffsetSamples: Long = 0,
 )
 
 /**
@@ -44,10 +63,18 @@ interface InputBufferSink {
  * corre SOLO en el hilo del callback, las entrega con los buffers
  * que el callback pone a disposición.
  *
- * - **Cola PCM** (`pcmQueue`, capacidad 64 tramas ≈ 2,7 s de audio):
- *   si está llena al encolar, se descarta la trama NUEVA y
- *   `droppedInputBuffers++` (se preserva el orden; la sesión ve el
- *   hueco por el salto de PTS).
+ * - **Cola PCM** (`pcmQueue`, capacidad 128 tramas ≈ 2,7 s de audio
+ *   con trozos de 1024 muestras, Grupo W): si está llena al
+ *   encolar, se descarta la trama NUEVA y `droppedInputBuffers++`
+ *   (se preserva el orden; la sesión ve el hueco por el salto de
+ *   PTS).
+ * - **Troceo (Grupo W):** si el buffer de entrada es menor que la
+ *   trama PCM, la trama se trocea a la capacidad viva del buffer
+ *   (muestras completas) y el resto vuelve al frente de la cola con
+ *   su PTS; solo se descarta contada si ni una muestra cabe
+ *   (capacidad degenerada). La capacidad se registra en log y en
+ *   `inputBufferCapacityBytes` en el primer drenado con buffer no
+ *   nulo.
  * - **Pool de buffers libres** (`freeBuffers`): solo lo toca el hilo
  *   del callback. `onInputBufferAvailable` añade el índice y drena.
  * - **EOS:** solo se encola con la cola PCM vacía y una sola vez
@@ -66,11 +93,12 @@ interface InputBufferSink {
  *   se avisa a `onDrainError`; el drenado de esta ronda se detiene.
  *   Sin esta guarda, la excepción escapaba del `MediaCodec.Callback`
  *   y mataba el proceso (cierre al grabar, ronda 3).
- * - **Ronda U — capacidad del buffer:** si el buffer de entrada es
- *   menor que la trama PCM, la trama se descarta contada y el buffer
- *   se devuelve vacío (imposible el `BufferOverflowException`); la
- *   capacidad se registra en log y en `inputBufferCapacityBytes` en
- *   el primer drenado con buffer no nulo.
+ * - **Ronda U — capacidad del buffer:** la capacidad del buffer de
+ *   entrada se registra en log y en `inputBufferCapacityBytes` en
+ *   el primer drenado con buffer no nulo. Grupo W: si el buffer es
+ *   menor que la trama PCM, la trama se trocea (ver `drain()`), no
+ *   se descarta entera; el `BufferOverflowException` sigue siendo
+ *   imposible por construcción.
  *
  * Hilos: `offerFrame` / `requestEos` los llama el hilo lector (o
  * quien pide la parada); `onInputBufferAvailable` / `drain` SOLO el
@@ -78,6 +106,14 @@ interface InputBufferSink {
  */
 class AudioInputFeed(
     private val sink: InputBufferSink,
+    /**
+     * Frecuencia de muestreo (Grupo W): el drenado calcula el PTS
+     * de cada trozo como `frame.ptsUs + muestras × 1e6 / sampleRate`.
+     * En producción siempre es `config.sampleRate`; el valor por
+     * defecto (48 kHz) solo existe para que los tests actuales sigan
+     * compilando.
+     */
+    private val sampleRate: Int = AUDIO_TARGET_SAMPLE_RATE,
     private val maxFrames: Int = MAX_PCM_FRAMES,
 ) {
     private val pcmQueue = ArrayDeque<PcmFrame>()
@@ -93,9 +129,10 @@ class AudioInputFeed(
 
     /**
      * Entradas descartadas: trama nueva con la cola llena, `getInputBuffer
-     * == null`, trama mayor que el buffer de entrada, o error del
-     * sumidero al drenar (ronda U). Lo lee la sesión al parar (mismo
-     * contador que antes alimentaba `feedPcm`).
+     * == null`, trama que no cabe ni una muestra en el buffer de
+     * entrada (capacidad degenerada, Grupo W), o error del sumidero
+     * al drenar (ronda U). Lo lee la sesión al parar (mismo contador
+     * que antes alimentaba `feedPcm`).
      */
     private val dropped = AtomicInteger(0)
     val droppedInputBuffers: Int get() = dropped.get()
@@ -207,9 +244,52 @@ class AudioInputFeed(
                     )
                 }
                 if (buffer.remaining() < frame.size) {
-                    dropped.incrementAndGet()
-                    countedAsDropped = true
-                    sink.queueInputBuffer(index, 0, 0, 0, 0)
+                    // Troceo (Grupo W): la trama no cabe entera en el
+                    // buffer de entrada del encoder; se alimenta el
+                    // trozo que cabe (muestras completas, PCM 16 bits)
+                    // y el resto vuelve al FRENTE de la cola con su
+                    // PTS, antes que cualquier trama posterior. La
+                    // capacidad usada es la viva de este buffer, no
+                    // la registrada. Si ni una muestra cabe
+                    // (capacidad degenerada), se descarta contada y
+                    // no se reencola: sin bucle infinito.
+                    val chunkBytes = (buffer.remaining() / 2) * 2
+                    if (chunkBytes < 2) {
+                        dropped.incrementAndGet()
+                        countedAsDropped = true
+                        sink.queueInputBuffer(index, 0, 0, 0, 0)
+                        continue
+                    }
+                    val chunkSamples = chunkBytes / 2
+                    buffer.put(frame.bytes, 0, chunkBytes)
+                    sink.queueInputBuffer(
+                        index,
+                        0,
+                        chunkBytes,
+                        frame.ptsUs,
+                        0,
+                    )
+                    // El PTS del resto se calcula en absoluto desde el
+                    // origen de la trama (plan §4.2), no encadenado
+                    // desde el PTS de este trozo: con el cálculo
+                    // encadenado el truncado entero se acumularía en
+                    // cada frontera (21 332 / 31 998 µs en vez de
+                    // 21 333 / 32 000 µs con 4 trozos de 512 muestras).
+                    val restOffsetSamples =
+                        frame.originOffsetSamples + chunkSamples
+                    val restFrame = PcmFrame(
+                        bytes = frame.bytes.copyOfRange(
+                            chunkBytes,
+                            frame.size,
+                        ),
+                        size = frame.size - chunkBytes,
+                        ptsUs = frame.originPtsUs +
+                            restOffsetSamples * 1_000_000L / sampleRate,
+                        samples = frame.samples - chunkSamples,
+                        originPtsUs = frame.originPtsUs,
+                        originOffsetSamples = restOffsetSamples,
+                    )
+                    synchronized(pcmQueue) { pcmQueue.addFirst(restFrame) }
                     continue
                 }
                 buffer.put(frame.bytes, 0, frame.size)
@@ -232,7 +312,12 @@ class AudioInputFeed(
     }
 
     companion object {
-        /** Capacidad de la cola PCM (64 tramas ≈ 2,7 s de audio). */
-        const val MAX_PCM_FRAMES = 64
+        /**
+         * Capacidad de la cola PCM (128 tramas ≈ 2,7 s de audio con
+         * trozos de 1024 muestras, Grupo W: antes 64 tramas con
+         * tramas de 2048 muestras; el presupuesto de tiempo es el
+         * mismo, la memoria máxima 128 × 2048 B = 256 KB).
+         */
+        const val MAX_PCM_FRAMES = 128
     }
 }

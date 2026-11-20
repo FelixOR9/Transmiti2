@@ -15,6 +15,9 @@ import org.junit.Test
  * `AudioInputFeed` puro en JVM, con un `InputBufferSink` falso que
  * simula el callback (`onInputBufferAvailable`). El codec y el
  * `AudioRecord` reales solo se verifican en el teléfono.
+ *
+ * Grupo W: las tramas PCM se trocean a la capacidad viva del buffer
+ * de entrada (antes, ronda U, se descartaban enteras).
  */
 class AudioInputFeedTest {
 
@@ -242,23 +245,223 @@ class AudioInputFeedTest {
     }
 
     @Test
-    fun `trama mayor que el buffer de entrada se descarta contada sin lanzar`() {
-        // Ronda U (H1-a): el buffer de entrada del encoder puede ser
-        // menor que la trama PCM de 4096 bytes; el `put` directo
-        // lanzaba `BufferOverflowException` y mataba el proceso.
+    fun `trama mayor que el buffer de entrada se trocea en dos`() {
+        // Grupo W (T1): la trama PCM de 4096 bytes no cabe en el
+        // buffer de entrada AAC de 2048 bytes del S24 Ultra
+        // (H1-a: 519 de 520 lecturas descartadas). Sustituye al test
+        // de la ronda U, que afirmaba el descarte entero: ese era el
+        // comportamiento viejo que el Grupo W elimina (cambio
+        // documentado, no debilitamiento). El `put` directo lanzaba
+        // `BufferOverflowException` y mataba el proceso; el troceo
+        // lo hace imposible por construcción.
+        val sink = FakeSink(bufferCapacity = 2048)
+        val feed = AudioInputFeed(sink)
+        val bytes = ByteArray(4096) { it.toByte() }
+        feed.offerFrame(PcmFrame(bytes, 4096, 0L, 2048))
+        feed.onInputBufferAvailable(0)
+        feed.onInputBufferAvailable(1)
+        // Dos trozos de 2048 bytes = 1024 muestras cada uno, con el
+        // PTS del segundo trozo 21 333 µs después del primero.
+        assertEquals(
+            listOf(
+                QueuedInput(0, 2048, 0L, 0),
+                QueuedInput(1, 2048, 21_333L, 0),
+            ),
+            sink.queued,
+        )
+        assertEquals(0, feed.droppedInputBuffers)
+        assertEquals(2048, feed.inputBufferCapacityBytes)
+        // Contenido: cada trozo es su mitad exacta de la trama.
+        assertTrue(
+            sink.copiedBytes(0, 2048)
+                .contentEquals(bytes.copyOfRange(0, 2048)),
+        )
+        assertTrue(
+            sink.copiedBytes(1, 2048)
+                .contentEquals(bytes.copyOfRange(2048, 4096)),
+        )
+    }
+
+    @Test
+    fun `trama parcial menor que la capacidad se alimenta entera`() {
+        // Grupo W (T2): es el caso real de la última lectura de la
+        // prueba de 20 s (1536 bytes = 768 muestras, la única trama
+        // que llegó al codec antes del Grupo W).
+        val sink = FakeSink(bufferCapacity = 2048)
+        val feed = AudioInputFeed(sink)
+        feed.offerFrame(PcmFrame(ByteArray(1536) { 5 }, 1536, 0L, 768))
+        feed.onInputBufferAvailable(0)
+        assertEquals(listOf(QueuedInput(0, 1536, 0L, 0)), sink.queued)
+        assertEquals(0, feed.droppedInputBuffers)
+    }
+
+    @Test
+    fun `trama igual a la capacidad se alimenta entera`() {
+        // Grupo W (T3): sin troceo cuando la trama cabe justa.
+        val sink = FakeSink(bufferCapacity = 2048)
+        val feed = AudioInputFeed(sink)
+        feed.offerFrame(PcmFrame(ByteArray(2048) { 2 }, 2048, 21_333L, 1024))
+        feed.onInputBufferAvailable(0)
+        assertEquals(listOf(QueuedInput(0, 2048, 21_333L, 0)), sink.queued)
+        assertEquals(0, feed.droppedInputBuffers)
+        assertEquals(2048, feed.inputBufferCapacityBytes)
+    }
+
+    @Test
+    fun `capacidad menor que una trama AAC trocea en cuatro`() {
+        // Grupo W (T4): capacidad 1024 bytes (512 muestras), trama
+        // de 4096 → 4 trozos de 1024 bytes.
+        val sink = FakeSink(bufferCapacity = 1024)
+        val feed = AudioInputFeed(sink)
+        feed.offerFrame(frame(1, 0L))
+        feed.onInputBufferAvailable(0)
+        feed.onInputBufferAvailable(1)
+        feed.onInputBufferAvailable(2)
+        feed.onInputBufferAvailable(3)
+        assertEquals(
+            listOf(
+                QueuedInput(0, 1024, 0L, 0),
+                QueuedInput(1, 1024, 10_666L, 0),
+                QueuedInput(2, 1024, 21_333L, 0),
+                QueuedInput(3, 1024, 32_000L, 0),
+            ),
+            sink.queued,
+        )
+        assertEquals(0, feed.droppedInputBuffers)
+        assertEquals(4096, sink.queued.sumOf { it.size })
+    }
+
+    @Test
+    fun `troceo con 44,1 kHz`() {
+        // Grupo W (T4b): la frecuencia real viaja por el constructor;
+        // el PTS del segundo trozo es 23 219 µs, no 21 333 µs.
+        val sink = FakeSink(bufferCapacity = 2048)
+        val feed = AudioInputFeed(sink, sampleRate = 44_100)
+        feed.offerFrame(frame(1, 0L))
+        feed.onInputBufferAvailable(0)
+        feed.onInputBufferAvailable(1)
+        assertEquals(
+            listOf(
+                QueuedInput(0, 2048, 0L, 0),
+                QueuedInput(1, 2048, 23_219L, 0),
+            ),
+            sink.queued,
+        )
+        assertEquals(0, feed.droppedInputBuffers)
+    }
+
+    @Test(timeout = 5000)
+    fun `capacidad degenerada descarta contada sin bucle infinito`() {
+        // Grupo W (T5): si ni una muestra cabe (capacidad 0), la
+        // trama se descarta contada y no se reencola; el drenado
+        // retorna y no es un error del sumidero.
+        val sink = FakeSink(bufferCapacity = 0)
+        val feed = AudioInputFeed(sink)
+        val errors = mutableListOf<Exception>()
+        feed.onDrainError = { errors += it }
+        feed.offerFrame(frame(1, 0L))
+        feed.onInputBufferAvailable(0)
+        assertEquals(listOf(QueuedInput(0, 0, 0L, 0)), sink.queued)
+        assertEquals(1, feed.droppedInputBuffers)
+        assertEquals(0, feed.inputBufferCapacityBytes)
+        assertTrue(errors.isEmpty())
+    }
+
+    @Test
+    fun `resto espera al siguiente buffer libre`() {
+        // Grupo W (T6): con un solo buffer libre solo sale el primer
+        // trozo; el resto queda al frente de la cola y se alimenta
+        // con el siguiente buffer, antes que la trama posterior.
         val sink = FakeSink(bufferCapacity = 2048)
         val feed = AudioInputFeed(sink)
         feed.offerFrame(frame(1, 0L))
         feed.onInputBufferAvailable(0)
-        // El buffer se devuelve vacío, nunca se escribe de más.
-        assertEquals(listOf(QueuedInput(0, 0, 0L, 0)), sink.queued)
-        assertEquals(1, feed.droppedInputBuffers)
-        assertEquals(2048, feed.inputBufferCapacityBytes)
-        // Una trama que sí cabe fluye con normalidad.
-        feed.offerFrame(PcmFrame(ByteArray(2048) { 2 }, 2048, 21_333L, 1024))
+        assertEquals(listOf(QueuedInput(0, 2048, 0L, 0)), sink.queued)
+        assertEquals(0, feed.droppedInputBuffers)
         feed.onInputBufferAvailable(1)
         assertEquals(QueuedInput(1, 2048, 21_333L, 0), sink.queued[1])
-        assertEquals(1, feed.droppedInputBuffers)
+        feed.offerFrame(frame(2, 42_666L))
+        feed.onInputBufferAvailable(2)
+        assertEquals(QueuedInput(2, 2048, 42_666L, 0), sink.queued[2])
+        feed.onInputBufferAvailable(3)
+        assertEquals(QueuedInput(3, 2048, 63_999L, 0), sink.queued[3])
+        assertEquals(0, feed.droppedInputBuffers)
+    }
+
+    @Test
+    fun `EOS va despues del ultimo trozo`() {
+        // Grupo W (T7): el EOS espera a que la cola se vacíe, así
+        // que nunca se adelanta al resto de una trama troceada.
+        val sink = FakeSink(bufferCapacity = 2048)
+        val feed = AudioInputFeed(sink)
+        feed.offerFrame(frame(1, 0L))
+        feed.requestEos()
+        feed.onInputBufferAvailable(0)
+        assertEquals(listOf(QueuedInput(0, 2048, 0L, 0)), sink.queued)
+        feed.onInputBufferAvailable(1)
+        assertEquals(QueuedInput(1, 2048, 21_333L, 0), sink.queued[1])
+        feed.onInputBufferAvailable(2)
+        assertEquals(3, sink.queued.size)
+        assertEquals(
+            QueuedInput(
+                2,
+                0,
+                0L,
+                MediaCodec.BUFFER_FLAG_END_OF_STREAM,
+            ),
+            sink.queued[2],
+        )
+        feed.onInputBufferAvailable(3)
+        assertEquals(3, sink.queued.size)
+        assertEquals(0, feed.droppedInputBuffers)
+    }
+
+    @Test
+    fun `continuidad de PTS al trocear y con la trama siguiente`() {
+        // Grupo W (T8): los PTS son estrictamente crecientes y
+        // contiguos, sin duplicados ni huecos. El 63 999 (no 64 000)
+        // es el truncado entero esperado del cálculo por trozo.
+        val sink = FakeSink(bufferCapacity = 2048)
+        val feed = AudioInputFeed(sink)
+        feed.offerFrame(frame(1, 0L))
+        feed.offerFrame(frame(2, 42_666L))
+        feed.onInputBufferAvailable(0)
+        feed.onInputBufferAvailable(1)
+        feed.onInputBufferAvailable(2)
+        feed.onInputBufferAvailable(3)
+        assertEquals(
+            listOf(
+                QueuedInput(0, 2048, 0L, 0),
+                QueuedInput(1, 2048, 21_333L, 0),
+                QueuedInput(2, 2048, 42_666L, 0),
+                QueuedInput(3, 2048, 63_999L, 0),
+            ),
+            sink.queued,
+        )
+        assertEquals(8192, sink.queued.sumOf { it.size })
+        assertEquals(0, feed.droppedInputBuffers)
+    }
+
+    @Test
+    fun `varias tramas completas llegan al codec con capacidad 2048`() {
+        // Grupo W (T9, a nivel de feed): el nivel encoder no es
+        // posible sin codec real — `AudioEncoderTest` solo cubre la
+        // configuración y la matemática de PTS. Es el caso real del
+        // teléfono: tramas de 4096 bytes, buffer de 2048, 48 kHz.
+        val sink = FakeSink(bufferCapacity = 2048)
+        val feed = AudioInputFeed(sink, sampleRate = 48_000)
+        feed.offerFrame(frame(1, 0L))
+        feed.offerFrame(frame(2, 42_666L))
+        feed.offerFrame(frame(3, 85_333L))
+        repeat(6) { feed.onInputBufferAvailable(it) }
+        assertEquals(6, sink.queued.size)
+        assertEquals(12_288, sink.queued.sumOf { it.size })
+        assertEquals(
+            listOf(0L, 21_333L, 42_666L, 63_999L, 85_333L, 106_666L),
+            sink.queued.map { it.ptsUs },
+        )
+        assertEquals(0, feed.droppedInputBuffers)
+        assertEquals(2048, feed.inputBufferCapacityBytes)
     }
 
     @Test
