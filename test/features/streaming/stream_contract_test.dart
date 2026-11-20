@@ -581,6 +581,68 @@ void main() {
       expect(stopped.inputBufferCapacityBytes, isNull);
     });
 
+    test('RecordingInfo lee audioReaderNoData2s y eosTimedOut (grupo V)',
+        () {
+      final RecordingInfo info =
+          RecordingInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'filePath': '/docs/recordings/rec-1_seg000.mp4',
+            'durationMs': 60000,
+            'sizeBytes': 18750000,
+            'status': 'ready',
+            'audioReaderNoData2s': true,
+            'eosTimedOut': true,
+          });
+      expect(info.audioReaderNoData2s, isTrue);
+      expect(info.eosTimedOut, isTrue);
+    });
+
+    test('RecordingInfo sin audioReaderNoData2s ni eosTimedOut es false',
+        () {
+      final RecordingInfo info =
+          RecordingInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'filePath': '/docs/recordings/rec-1_seg000.mp4',
+            'durationMs': 60000,
+            'sizeBytes': 18750000,
+            'status': 'ready',
+          });
+      expect(info.audioReaderNoData2s, isFalse);
+      expect(info.eosTimedOut, isFalse);
+    });
+
+    test(
+        'RecordingStoppedInfo lee audioReaderNoData2s y eosTimedOut (grupo V)',
+        () {
+      final RecordingStoppedInfo stopped =
+          RecordingStoppedInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'segments': <Map<Object?, Object?>>[],
+            'totalDurationMs': 60000,
+            'totalSizeBytes': 18750000,
+            'status': 'ready',
+            'audioReaderNoData2s': true,
+            'eosTimedOut': true,
+          });
+      expect(stopped.audioReaderNoData2s, isTrue);
+      expect(stopped.eosTimedOut, isTrue);
+    });
+
+    test(
+        'RecordingStoppedInfo sin audioReaderNoData2s ni eosTimedOut es false',
+        () {
+      final RecordingStoppedInfo stopped =
+          RecordingStoppedInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'segments': <Map<Object?, Object?>>[],
+            'totalDurationMs': 60000,
+            'totalSizeBytes': 18750000,
+            'status': 'ready',
+          });
+      expect(stopped.audioReaderNoData2s, isFalse);
+      expect(stopped.eosTimedOut, isFalse);
+    });
+
     test('RecordingStoppedInfo lee los campos de instrumentación ronda 3',
         () {
       final RecordingStoppedInfo stopped =

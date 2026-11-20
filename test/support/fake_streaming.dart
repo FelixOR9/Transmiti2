@@ -78,6 +78,11 @@ class FakeStreamingService implements StreamingService {
   int? stopAudioLastReadOkAgeMs;
   bool stopAudioReaderAlive = false;
   bool stopAudioEos = false;
+  // Grupo V: flag del watchdog del lector (V3) y si la espera de
+  // EOS agotó los 5 s (V4) que devuelve el método `stopRecording`
+  // (`false` por defecto).
+  bool stopAudioReaderNoData2s = false;
+  bool stopEosTimedOut = false;
   RecordingOptions? lastRecordingOptions;
   RecordingStatusSnapshot recordingStatus =
       RecordingStatusSnapshot.idle();
@@ -217,6 +222,8 @@ class FakeStreamingService implements StreamingService {
       audioLastReadOkAgeMs: stopAudioLastReadOkAgeMs,
       audioReaderAlive: stopAudioReaderAlive,
       audioEos: stopAudioEos,
+      audioReaderNoData2s: stopAudioReaderNoData2s,
+      eosTimedOut: stopEosTimedOut,
       segments: <RecordingSegmentInfo>[
         RecordingSegmentInfo(
           recordingId: recordingId,

@@ -946,7 +946,7 @@ void main() {
           contains(
             'seg0: ready 60000ms motivo=— cerradoLimpio=sí fps=29.9 '
             'muestras=1800 verif=1798 fase=61.2s audio=59800ms av=120ms '
-            'inicioAudio=85 huecosAudio=3',
+            'inicioAudio=85 huecosAudio=3 muestrasAudio=2800',
           ),
         );
         // Sin claves de audio: `audio=no` y el inicio como `—`.
@@ -955,7 +955,7 @@ void main() {
           contains(
             'seg1: ready 60000ms motivo=— cerradoLimpio=sí fps=29.9 '
             'muestras=1800 verif=1798 fase=61.2s audio=no '
-            'inicioAudio=— huecosAudio=0',
+            'inicioAudio=— huecosAudio=0 muestrasAudio=—',
           ),
         );
       },
@@ -1015,7 +1015,8 @@ void main() {
             'segmentos=1 descartadasEntradaAAC=0 '
             'capacidadEntradaAAC=— bytes '
             'estadoMic=RECORDING/STOPPED lecturas=0 ultimoRead=— '
-            'ultimaLecturaOk=hace 12.3s lectorVivo=sí audioEos=sí',
+            'ultimaLecturaOk=hace 12.3s lectorVivo=sí audioEos=sí '
+            'lectorSinDatos2s=no eosTimeout=no',
           ),
         );
       },
@@ -1039,7 +1040,8 @@ void main() {
             'segmentos=1 descartadasEntradaAAC=0 '
             'capacidadEntradaAAC=— bytes '
             'estadoMic=—/— lecturas=0 ultimoRead=— '
-            'ultimaLecturaOk=— lectorVivo=no audioEos=no',
+            'ultimaLecturaOk=— lectorVivo=no audioEos=no '
+            'lectorSinDatos2s=no eosTimeout=no',
           ),
         );
       },
@@ -1062,6 +1064,10 @@ void main() {
       service.stopAudioLastReadOkAgeMs = 12300;
       service.stopAudioReaderAlive = true;
       service.stopAudioEos = true;
+      // Grupo V: el método trae también el flag del watchdog (V3)
+      // y si la espera de EOS agotó los 5 s (V4).
+      service.stopAudioReaderNoData2s = true;
+      service.stopEosTimedOut = true;
       await recording.stop();
       await tester.pump();
 
@@ -1072,7 +1078,8 @@ void main() {
           'segmentos=1 descartadasEntradaAAC=0 '
           'capacidadEntradaAAC=— bytes '
           'estadoMic=RECORDING/RECORDING lecturas=42 ultimoRead=4096 '
-          'ultimaLecturaOk=hace 12.3s lectorVivo=sí audioEos=sí',
+          'ultimaLecturaOk=hace 12.3s lectorVivo=sí audioEos=sí '
+          'lectorSinDatos2s=sí eosTimeout=sí',
         ),
       );
     });

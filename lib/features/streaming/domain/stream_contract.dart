@@ -306,6 +306,8 @@ class RecordingInfo {
     this.audioLastReadOkAgeMs,
     this.audioReaderAlive = false,
     this.audioEos = false,
+    this.audioReaderNoData2s = false,
+    this.eosTimedOut = false,
   });
 
   final String recordingId;
@@ -354,6 +356,14 @@ class RecordingInfo {
   final bool audioReaderAlive;
   final bool audioEos;
 
+  /// Grupo V: `audioReaderNoData2s` (V3) es el flag del watchdog
+  /// del lector (sin ninguna lectura devuelta a los 2 s de
+  /// arrancar); `eosTimedOut` (V4) es si la espera de EOS (audio y
+  /// video, 5 s en total) se agotó sin que llegara el EOS.
+  /// Ausentes → `false`: nunca se inventan valores.
+  final bool audioReaderNoData2s;
+  final bool eosTimedOut;
+
   factory RecordingInfo.fromMap(Map<Object?, Object?> map) {
     final List<Object?> rawSegments =
         (map['segments'] as List?)?.cast<Object?>() ?? <Object?>[];
@@ -380,6 +390,8 @@ class RecordingInfo {
           (map['audioLastReadOkAgeMs'] as num?)?.toInt(),
       audioReaderAlive: map['audioReaderAlive'] as bool? ?? false,
       audioEos: map['audioEos'] as bool? ?? false,
+      audioReaderNoData2s: map['audioReaderNoData2s'] as bool? ?? false,
+      eosTimedOut: map['eosTimedOut'] as bool? ?? false,
     );
   }
 }
@@ -614,6 +626,8 @@ class RecordingStoppedInfo {
     this.audioLastReadOkAgeMs,
     this.audioReaderAlive = false,
     this.audioEos = false,
+    this.audioReaderNoData2s = false,
+    this.eosTimedOut = false,
   });
 
   final String recordingId;
@@ -652,6 +666,13 @@ class RecordingStoppedInfo {
   final bool audioReaderAlive;
   final bool audioEos;
 
+  /// Grupo V: mismo significado que en `RecordingInfo`
+  /// (`audioReaderNoData2s`: el watchdog disparó a los 2 s sin
+  /// lecturas; `eosTimedOut`: la espera de EOS agotó los 5 s).
+  /// Ausentes → `false`: nunca se inventan valores.
+  final bool audioReaderNoData2s;
+  final bool eosTimedOut;
+
   int get segmentCount => segments.length;
 
   /// Ruta del primer segmento (la ruta final fusionada llega en 3.1.4).
@@ -683,6 +704,8 @@ class RecordingStoppedInfo {
           (map['audioLastReadOkAgeMs'] as num?)?.toInt(),
       audioReaderAlive: map['audioReaderAlive'] as bool? ?? false,
       audioEos: map['audioEos'] as bool? ?? false,
+      audioReaderNoData2s: map['audioReaderNoData2s'] as bool? ?? false,
+      eosTimedOut: map['eosTimedOut'] as bool? ?? false,
     );
   }
 }

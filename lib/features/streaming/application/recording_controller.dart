@@ -379,7 +379,9 @@ class RecordingController extends ChangeNotifier {
       // lector al parar. `estadoMic` es `getRecordingState()` nativo
       // (3 = RECORDING, 1 = STOPPED; otro/`null` → `—`) y
       // `ultimaLecturaOk` la edad de la última lectura `> 0` en
-      // segundos con un decimal (`—` si nunca hubo).
+      // segundos con un decimal (`—` si nunca hubo). Grupo V:
+      // `lectorSinDatos2s` es el flag del watchdog (V3) y
+      // `eosTimeout` si la espera de EOS agotó los 5 s (V4).
       tail.add(
         'Última parada: estado=${_lastStopped!.status} '
         'duración total=${_lastStopped!.totalDurationMs}ms '
@@ -392,7 +394,9 @@ class RecordingController extends ChangeNotifier {
         'ultimoRead=${_lastStopped!.audioLastReadCode?.toString() ?? '—'} '
         'ultimaLecturaOk=${_lastStopped!.audioLastReadOkAgeMs == null ? '—' : 'hace ${(_lastStopped!.audioLastReadOkAgeMs! / 1000).toStringAsFixed(1)}s'} '
         'lectorVivo=${_lastStopped!.audioReaderAlive ? 'sí' : 'no'} '
-        'audioEos=${_lastStopped!.audioEos ? 'sí' : 'no'}',
+        'audioEos=${_lastStopped!.audioEos ? 'sí' : 'no'} '
+        'lectorSinDatos2s=${_lastStopped!.audioReaderNoData2s ? 'sí' : 'no'} '
+        'eosTimeout=${_lastStopped!.eosTimedOut ? 'sí' : 'no'}',
       );
     }
     for (int i = 0; i < tail.length; i++) {
@@ -459,12 +463,18 @@ class RecordingController extends ChangeNotifier {
     final String inicioAudio =
         segment.audioStartOffsetMs?.toString() ?? '—';
     final String huecosAudio = segment.audioGapSamples.toString();
+    // Grupo V (V2): muestras AAC leídas del segmento (`—` si el
+    // motor no las envía, como en los segmentos de 3.1.2).
+    final String muestrasAudio =
+        segment.audioSampleCount?.toString() ?? '—';
     if (!segment.hasAudio) {
-      return ' audio=no inicioAudio=$inicioAudio huecosAudio=$huecosAudio';
+      return ' audio=no inicioAudio=$inicioAudio huecosAudio=$huecosAudio '
+          'muestrasAudio=$muestrasAudio';
     }
     return ' audio=${segment.audioDurationMs?.toString() ?? '—'}ms '
         'av=${segment.avOffsetMs?.toString() ?? '—'}ms '
-        'inicioAudio=$inicioAudio huecosAudio=$huecosAudio';
+        'inicioAudio=$inicioAudio huecosAudio=$huecosAudio '
+        'muestrasAudio=$muestrasAudio';
   }
 
   StreamSubscription<Map<String, Object?>>? _eventsSubscription;
@@ -764,6 +774,8 @@ class RecordingController extends ChangeNotifier {
         audioLastReadOkAgeMs: info.audioLastReadOkAgeMs,
         audioReaderAlive: info.audioReaderAlive,
         audioEos: info.audioEos,
+        audioReaderNoData2s: info.audioReaderNoData2s,
+        eosTimedOut: info.eosTimedOut,
       );
       _applyStoppedSegments(_lastStopped!);
       _state = RecordingState.idle;
