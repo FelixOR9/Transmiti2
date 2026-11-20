@@ -298,6 +298,7 @@ class RecordingInfo {
     this.segments = const <RecordingSegmentInfo>[],
     this.audioEnabled = false,
     this.droppedInputBuffers = 0,
+    this.inputBufferCapacityBytes,
     this.micStateAtStart,
     this.micStateAtStop,
     this.audioReadCount = 0,
@@ -331,6 +332,13 @@ class RecordingInfo {
   /// que la parada por método también trae el valor real; ausente → 0.
   final int droppedInputBuffers;
 
+  /// Capacidad del buffer de entrada AAC en bytes (ronda U):
+  /// `inputBufferCapacityBytes` nativo, registrado en el primer
+  /// drenado. Sirve para decidir a qué tamaño trocear las tramas PCM
+  /// si el buffer es menor que la trama (H1-a). Ausente → `null`:
+  /// sin audio o sin drenado, nunca se inventa un valor.
+  final int? inputBufferCapacityBytes;
+
   /// Instrumentación ronda 3 (grupo I): estado del micrófono
   /// (`getRecordingState()` nativo: 3 = `RECORDING`, 1 = `STOPPED`)
   /// tras `startRecording()` y al parar; `null` sin encoder o sin
@@ -362,6 +370,8 @@ class RecordingInfo {
       audioEnabled: map['audioEnabled'] as bool? ?? false,
       droppedInputBuffers:
           (map['droppedInputBuffers'] as num?)?.toInt() ?? 0,
+      inputBufferCapacityBytes:
+          (map['inputBufferCapacityBytes'] as num?)?.toInt(),
       micStateAtStart: (map['micStateAtStart'] as num?)?.toInt(),
       micStateAtStop: (map['micStateAtStop'] as num?)?.toInt(),
       audioReadCount: (map['audioReadCount'] as num?)?.toInt() ?? 0,
@@ -596,6 +606,7 @@ class RecordingStoppedInfo {
     this.previewRestoreError,
     this.audioEnabled = false,
     this.droppedInputBuffers = 0,
+    this.inputBufferCapacityBytes,
     this.micStateAtStart,
     this.micStateAtStop,
     this.audioReadCount = 0,
@@ -623,6 +634,11 @@ class RecordingStoppedInfo {
   /// (instrumentación de audio 3.1.3: `dequeueInputBuffer` sin búfer
   /// libre). Ausente → 0.
   final int droppedInputBuffers;
+
+  /// Capacidad del buffer de entrada AAC en bytes (ronda U): mismo
+  /// significado que en `RecordingInfo`. Ausente → `null`: nunca se
+  /// inventa un valor.
+  final int? inputBufferCapacityBytes;
 
   /// Instrumentación ronda 3 (grupo I): mismo significado que en
   /// `RecordingInfo` (estado del micrófono al arrancar y al parar,
@@ -657,6 +673,8 @@ class RecordingStoppedInfo {
       previewRestoreError: map['previewRestoreError'] as String?,
       audioEnabled: map['audioEnabled'] as bool? ?? false,
       droppedInputBuffers: (map['droppedInputBuffers'] as num?)?.toInt() ?? 0,
+      inputBufferCapacityBytes:
+          (map['inputBufferCapacityBytes'] as num?)?.toInt(),
       micStateAtStart: (map['micStateAtStart'] as num?)?.toInt(),
       micStateAtStop: (map['micStateAtStop'] as num?)?.toInt(),
       audioReadCount: (map['audioReadCount'] as num?)?.toInt() ?? 0,

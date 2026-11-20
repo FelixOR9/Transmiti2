@@ -385,6 +385,7 @@ class RecordingController extends ChangeNotifier {
         'duración total=${_lastStopped!.totalDurationMs}ms '
         'segmentos=${_lastStopped!.segments.length} '
         'descartadasEntradaAAC=${_lastStopped!.droppedInputBuffers} '
+        'capacidadEntradaAAC=${_lastStopped!.inputBufferCapacityBytes?.toString() ?? '—'} bytes '
         'estadoMic=${_micStateLabel(_lastStopped!.micStateAtStart)}/'
         '${_micStateLabel(_lastStopped!.micStateAtStop)} '
         'lecturas=${_lastStopped!.audioReadCount} '
@@ -755,6 +756,7 @@ class RecordingController extends ChangeNotifier {
         status: info.status,
         audioEnabled: info.audioEnabled,
         droppedInputBuffers: info.droppedInputBuffers,
+        inputBufferCapacityBytes: info.inputBufferCapacityBytes,
         micStateAtStart: info.micStateAtStart,
         micStateAtStop: info.micStateAtStop,
         audioReadCount: info.audioReadCount,

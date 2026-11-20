@@ -456,6 +456,26 @@ void main() {
       );
     });
 
+    testWidgets('stop por método trae la capacidad real del buffer AAC', (
+      WidgetTester tester,
+    ) async {
+      await pumpController(tester);
+      await recording.start();
+      await tester.pump();
+
+      // El método devuelve la capacidad real del buffer de entrada
+      // AAC (el mismo valor que el evento `recording_stopped`): la
+      // parada por método no la pierde (ronda U).
+      service.stopInputBufferCapacityBytes = 2048;
+      await recording.stop();
+      await tester.pump();
+
+      expect(
+        recording.diagnosticText,
+        contains('capacidadEntradaAAC=2048 bytes'),
+      );
+    });
+
     testWidgets('stop usa los segmentos del método aunque falte un evento', (
       WidgetTester tester,
     ) async {
@@ -951,9 +971,11 @@ void main() {
         // Sin evento `recording_started`: el origen es desconocido.
         expect(recording.diagnosticText, contains('Origen timestamps: —'));
 
-        // Parada externa por evento con el contador nativo.
+        // Parada externa por evento con el contador nativo y la
+        // capacidad del buffer de entrada AAC (ronda U).
         final Map<String, Object?> stopped = stoppedEvent()
-          ..['droppedInputBuffers'] = 5;
+          ..['droppedInputBuffers'] = 5
+          ..['inputBufferCapacityBytes'] = 2048;
         service.emitEvent(stopped);
         await tester.pump();
 
@@ -961,7 +983,8 @@ void main() {
           recording.diagnosticText,
           contains(
             'Última parada: estado=ready duración total=12000ms '
-            'segmentos=1 descartadasEntradaAAC=5',
+            'segmentos=1 descartadasEntradaAAC=5 '
+            'capacidadEntradaAAC=2048 bytes',
           ),
         );
       },
@@ -990,6 +1013,7 @@ void main() {
           contains(
             'Última parada: estado=ready duración total=12000ms '
             'segmentos=1 descartadasEntradaAAC=0 '
+            'capacidadEntradaAAC=— bytes '
             'estadoMic=RECORDING/STOPPED lecturas=0 ultimoRead=— '
             'ultimaLecturaOk=hace 12.3s lectorVivo=sí audioEos=sí',
           ),
@@ -1013,6 +1037,7 @@ void main() {
           contains(
             'Última parada: estado=ready duración total=12000ms '
             'segmentos=1 descartadasEntradaAAC=0 '
+            'capacidadEntradaAAC=— bytes '
             'estadoMic=—/— lecturas=0 ultimoRead=— '
             'ultimaLecturaOk=— lectorVivo=no audioEos=no',
           ),
@@ -1045,6 +1070,7 @@ void main() {
         contains(
           'Última parada: estado=ready duración total=12000ms '
           'segmentos=1 descartadasEntradaAAC=0 '
+          'capacidadEntradaAAC=— bytes '
           'estadoMic=RECORDING/RECORDING lecturas=42 ultimoRead=4096 '
           'ultimaLecturaOk=hace 12.3s lectorVivo=sí audioEos=sí',
         ),

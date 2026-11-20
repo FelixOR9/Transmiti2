@@ -528,6 +528,59 @@ void main() {
       expect(stopped.droppedInputBuffers, 0);
     });
 
+    test('RecordingStoppedInfo lee inputBufferCapacityBytes cuando lo hay',
+        () {
+      final RecordingStoppedInfo stopped =
+          RecordingStoppedInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'segments': <Map<Object?, Object?>>[],
+            'totalDurationMs': 60000,
+            'totalSizeBytes': 18750000,
+            'status': 'ready',
+            'audioEnabled': true,
+            'inputBufferCapacityBytes': 2048,
+          });
+      expect(stopped.inputBufferCapacityBytes, 2048);
+    });
+
+    test('RecordingInfo lee inputBufferCapacityBytes cuando lo hay', () {
+      final RecordingInfo info =
+          RecordingInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'filePath': '/docs/recordings/rec-1_seg000.mp4',
+            'durationMs': 60000,
+            'sizeBytes': 18750000,
+            'status': 'ready',
+            'audioEnabled': true,
+            'inputBufferCapacityBytes': 2048,
+          });
+      expect(info.inputBufferCapacityBytes, 2048);
+    });
+
+    test('RecordingInfo sin inputBufferCapacityBytes es null', () {
+      final RecordingInfo info =
+          RecordingInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'filePath': '/docs/recordings/rec-1_seg000.mp4',
+            'durationMs': 60000,
+            'sizeBytes': 18750000,
+            'status': 'ready',
+          });
+      expect(info.inputBufferCapacityBytes, isNull);
+    });
+
+    test('RecordingStoppedInfo sin inputBufferCapacityBytes es null', () {
+      final RecordingStoppedInfo stopped =
+          RecordingStoppedInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'segments': <Map<Object?, Object?>>[],
+            'totalDurationMs': 60000,
+            'totalSizeBytes': 18750000,
+            'status': 'ready',
+          });
+      expect(stopped.inputBufferCapacityBytes, isNull);
+    });
+
     test('RecordingStoppedInfo lee los campos de instrumentación ronda 3',
         () {
       final RecordingStoppedInfo stopped =

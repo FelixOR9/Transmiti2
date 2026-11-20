@@ -64,6 +64,10 @@ class FakeStreamingService implements StreamingService {
   // Instrumentación de audio 3.1.3: buffers de entrada AAC
   // descartados que devuelve el método `stopRecording` (0 por defecto).
   int stopDroppedInputBuffers = 0;
+  // Capacidad del buffer de entrada AAC en bytes que devuelve el
+  // método `stopRecording` (ronda U; `null` por defecto: sin audio o
+  // sin drenado).
+  int? stopInputBufferCapacityBytes;
   // Instrumentación ronda 3 (grupo I): estado del micrófono y
   // contadores del lector que devuelve el método `stopRecording`
   // (defectos: sin arranque / sin lecturas / sin EOS).
@@ -205,6 +209,7 @@ class FakeStreamingService implements StreamingService {
       sizeBytes: 3750000,
       status: 'ready',
       droppedInputBuffers: stopDroppedInputBuffers,
+      inputBufferCapacityBytes: stopInputBufferCapacityBytes,
       micStateAtStart: stopMicStateAtStart,
       micStateAtStop: stopMicStateAtStop,
       audioReadCount: stopAudioReadCount,
