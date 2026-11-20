@@ -967,6 +967,90 @@ void main() {
       },
     );
 
+    testWidgets(
+      'el diagnóstico muestra el estado del micrófono y los contadores al parar',
+      (WidgetTester tester) async {
+        await pumpController(tester);
+        await recording.start();
+        await tester.pump();
+
+        // Parada externa por evento con los campos de la ronda 3.
+        final Map<String, Object?> stopped = stoppedEvent()
+          ..['micStateAtStart'] = 3
+          ..['micStateAtStop'] = 1
+          ..['audioReadCount'] = 0
+          ..['audioLastReadOkAgeMs'] = 12300
+          ..['audioReaderAlive'] = true
+          ..['audioEos'] = true;
+        service.emitEvent(stopped);
+        await tester.pump();
+
+        expect(
+          recording.diagnosticText,
+          contains(
+            'Última parada: estado=ready duración total=12000ms '
+            'segmentos=1 descartadasEntradaAAC=0 '
+            'estadoMic=RECORDING/STOPPED lecturas=0 ultimoRead=— '
+            'ultimaLecturaOk=hace 12.3s lectorVivo=sí audioEos=sí',
+          ),
+        );
+      },
+    );
+
+    testWidgets(
+      'el diagnóstico muestra — en los campos de la ronda 3 sin claves',
+      (WidgetTester tester) async {
+        await pumpController(tester);
+        await recording.start();
+        await tester.pump();
+
+        // Parada externa por evento sin las claves nuevas: nada se inventa.
+        service.emitEvent(stoppedEvent());
+        await tester.pump();
+
+        expect(
+          recording.diagnosticText,
+          contains(
+            'Última parada: estado=ready duración total=12000ms '
+            'segmentos=1 descartadasEntradaAAC=0 '
+            'estadoMic=—/— lecturas=0 ultimoRead=— '
+            'ultimaLecturaOk=— lectorVivo=no audioEos=no',
+          ),
+        );
+      },
+    );
+
+    testWidgets('stop por método trae el estado del micrófono y los contadores',
+        (WidgetTester tester) async {
+      await pumpController(tester);
+      await recording.start();
+      await tester.pump();
+
+      // El método devuelve los campos de la ronda 3 (mismo mapa que
+      // el evento): la parada por método no los pierde (lección de
+      // la ronda anterior: `stop()` construye `_lastStopped` desde
+      // el `RecordingInfo` del método).
+      service.stopMicStateAtStart = 3;
+      service.stopMicStateAtStop = 3;
+      service.stopAudioReadCount = 42;
+      service.stopAudioLastReadCode = 4096;
+      service.stopAudioLastReadOkAgeMs = 12300;
+      service.stopAudioReaderAlive = true;
+      service.stopAudioEos = true;
+      await recording.stop();
+      await tester.pump();
+
+      expect(
+        recording.diagnosticText,
+        contains(
+          'Última parada: estado=ready duración total=12000ms '
+          'segmentos=1 descartadasEntradaAAC=0 '
+          'estadoMic=RECORDING/RECORDING lecturas=42 ultimoRead=4096 '
+          'ultimaLecturaOk=hace 12.3s lectorVivo=sí audioEos=sí',
+        ),
+      );
+    });
+
     testWidgets('al volver, el snapshot re-sincroniza el estado de audio', (
       WidgetTester tester,
     ) async {

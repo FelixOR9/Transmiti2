@@ -64,6 +64,16 @@ class FakeStreamingService implements StreamingService {
   // Instrumentación de audio 3.1.3: buffers de entrada AAC
   // descartados que devuelve el método `stopRecording` (0 por defecto).
   int stopDroppedInputBuffers = 0;
+  // Instrumentación ronda 3 (grupo I): estado del micrófono y
+  // contadores del lector que devuelve el método `stopRecording`
+  // (defectos: sin arranque / sin lecturas / sin EOS).
+  int? stopMicStateAtStart;
+  int? stopMicStateAtStop;
+  int stopAudioReadCount = 0;
+  int? stopAudioLastReadCode;
+  int? stopAudioLastReadOkAgeMs;
+  bool stopAudioReaderAlive = false;
+  bool stopAudioEos = false;
   RecordingOptions? lastRecordingOptions;
   RecordingStatusSnapshot recordingStatus =
       RecordingStatusSnapshot.idle();
@@ -195,6 +205,13 @@ class FakeStreamingService implements StreamingService {
       sizeBytes: 3750000,
       status: 'ready',
       droppedInputBuffers: stopDroppedInputBuffers,
+      micStateAtStart: stopMicStateAtStart,
+      micStateAtStop: stopMicStateAtStop,
+      audioReadCount: stopAudioReadCount,
+      audioLastReadCode: stopAudioLastReadCode,
+      audioLastReadOkAgeMs: stopAudioLastReadOkAgeMs,
+      audioReaderAlive: stopAudioReaderAlive,
+      audioEos: stopAudioEos,
       segments: <RecordingSegmentInfo>[
         RecordingSegmentInfo(
           recordingId: recordingId,

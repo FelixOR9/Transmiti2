@@ -298,6 +298,13 @@ class RecordingInfo {
     this.segments = const <RecordingSegmentInfo>[],
     this.audioEnabled = false,
     this.droppedInputBuffers = 0,
+    this.micStateAtStart,
+    this.micStateAtStop,
+    this.audioReadCount = 0,
+    this.audioLastReadCode,
+    this.audioLastReadOkAgeMs,
+    this.audioReaderAlive = false,
+    this.audioEos = false,
   });
 
   final String recordingId;
@@ -324,6 +331,21 @@ class RecordingInfo {
   /// que la parada por método también trae el valor real; ausente → 0.
   final int droppedInputBuffers;
 
+  /// Instrumentación ronda 3 (grupo I): estado del micrófono
+  /// (`getRecordingState()` nativo: 3 = `RECORDING`, 1 = `STOPPED`)
+  /// tras `startRecording()` y al parar; `null` sin encoder o sin
+  /// arranque. Los contadores del hilo lector (`audioReadCount`,
+  /// `audioLastReadCode`, `audioLastReadOkAgeMs`, `audioReaderAlive`)
+  /// y si llegó el EOS de audio (`audioEos`). Ausentes → `null`/`0`/
+  /// `false`: nunca se inventan valores.
+  final int? micStateAtStart;
+  final int? micStateAtStop;
+  final int audioReadCount;
+  final int? audioLastReadCode;
+  final int? audioLastReadOkAgeMs;
+  final bool audioReaderAlive;
+  final bool audioEos;
+
   factory RecordingInfo.fromMap(Map<Object?, Object?> map) {
     final List<Object?> rawSegments =
         (map['segments'] as List?)?.cast<Object?>() ?? <Object?>[];
@@ -340,6 +362,14 @@ class RecordingInfo {
       audioEnabled: map['audioEnabled'] as bool? ?? false,
       droppedInputBuffers:
           (map['droppedInputBuffers'] as num?)?.toInt() ?? 0,
+      micStateAtStart: (map['micStateAtStart'] as num?)?.toInt(),
+      micStateAtStop: (map['micStateAtStop'] as num?)?.toInt(),
+      audioReadCount: (map['audioReadCount'] as num?)?.toInt() ?? 0,
+      audioLastReadCode: (map['audioLastReadCode'] as num?)?.toInt(),
+      audioLastReadOkAgeMs:
+          (map['audioLastReadOkAgeMs'] as num?)?.toInt(),
+      audioReaderAlive: map['audioReaderAlive'] as bool? ?? false,
+      audioEos: map['audioEos'] as bool? ?? false,
     );
   }
 }
@@ -566,6 +596,13 @@ class RecordingStoppedInfo {
     this.previewRestoreError,
     this.audioEnabled = false,
     this.droppedInputBuffers = 0,
+    this.micStateAtStart,
+    this.micStateAtStop,
+    this.audioReadCount = 0,
+    this.audioLastReadCode,
+    this.audioLastReadOkAgeMs,
+    this.audioReaderAlive = false,
+    this.audioEos = false,
   });
 
   final String recordingId;
@@ -586,6 +623,18 @@ class RecordingStoppedInfo {
   /// (instrumentación de audio 3.1.3: `dequeueInputBuffer` sin búfer
   /// libre). Ausente → 0.
   final int droppedInputBuffers;
+
+  /// Instrumentación ronda 3 (grupo I): mismo significado que en
+  /// `RecordingInfo` (estado del micrófono al arrancar y al parar,
+  /// contadores del lector y EOS de audio). Ausentes → `null`/`0`/
+  /// `false`: nunca se inventan valores.
+  final int? micStateAtStart;
+  final int? micStateAtStop;
+  final int audioReadCount;
+  final int? audioLastReadCode;
+  final int? audioLastReadOkAgeMs;
+  final bool audioReaderAlive;
+  final bool audioEos;
 
   int get segmentCount => segments.length;
 
@@ -608,6 +657,14 @@ class RecordingStoppedInfo {
       previewRestoreError: map['previewRestoreError'] as String?,
       audioEnabled: map['audioEnabled'] as bool? ?? false,
       droppedInputBuffers: (map['droppedInputBuffers'] as num?)?.toInt() ?? 0,
+      micStateAtStart: (map['micStateAtStart'] as num?)?.toInt(),
+      micStateAtStop: (map['micStateAtStop'] as num?)?.toInt(),
+      audioReadCount: (map['audioReadCount'] as num?)?.toInt() ?? 0,
+      audioLastReadCode: (map['audioLastReadCode'] as num?)?.toInt(),
+      audioLastReadOkAgeMs:
+          (map['audioLastReadOkAgeMs'] as num?)?.toInt(),
+      audioReaderAlive: map['audioReaderAlive'] as bool? ?? false,
+      audioEos: map['audioEos'] as bool? ?? false,
     );
   }
 }

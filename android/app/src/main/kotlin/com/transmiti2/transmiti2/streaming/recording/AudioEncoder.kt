@@ -11,6 +11,7 @@ import android.media.MediaRecorder
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
+import android.os.SystemClock
 import com.transmiti2.transmiti2.streaming.StreamContract
 import com.transmiti2.transmiti2.streaming.Transmiti2Logger
 import java.nio.ByteBuffer
@@ -198,6 +199,32 @@ interface AudioEncoderPort {
     /** Buffers de entrada descartados porque la cola del codec
      * estaba llena (instrumentación 3.1.3: lo lee la sesión al parar). */
     val droppedInputBuffers: Int
+    /**
+     * Instrumentación ronda 3 de audio 3.1.3 (grupo I, solo lectura):
+     * estado del micrófono y contadores del hilo lector, para
+     * distinguir H1-A (arranque nativo fallido en silencio) de H1-B
+     * (HAL sin tramas) cuando `read()` nunca devuelve.
+     *
+     * - `recordingStateAtStart`: `AudioRecord.getRecordingState()`
+     *   justo tras `startRecording()` (`RECORDING`=3, `STOPPED`=1);
+     *   `null` si nunca se llegó a arrancar.
+     * - `recordingState`: lectura en vivo (`-1` sin `AudioRecord`).
+     * - `readCount`: llamadas a `read()` que DEVUELVEN (se incrementa
+     *   tras cada retorno, no antes: un `read()` bloqueado deja el
+     *   contador en 0 y el watchdog lo detecta; `isReaderAlive`
+     *   distingue "hilo vivo bloqueado" de "hilo muerto").
+     * - `lastReadCode`: último valor de retorno de `read()`.
+     * - `lastSuccessfulReadElapsedMs`: `elapsedRealtime()` de la
+     *   última lectura `> 0` (`null` si nunca hubo); la sesión lo
+     *   convierte en edad al parar.
+     * - `isReaderAlive`: el hilo lector sigue vivo al parar.
+     */
+    val recordingStateAtStart: Int?
+    val recordingState: Int
+    val readCount: Int
+    val lastReadCode: Int?
+    val lastSuccessfulReadElapsedMs: Long?
+    val isReaderAlive: Boolean
     var listener: AudioEncoderListener?
     fun configureAndStart()
     fun signalEndOfInputStream()
@@ -254,6 +281,45 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
     override var droppedInputBuffers: Int = 0
         private set
 
+    /**
+     * Instrumentación ronda 3 (grupo I): estado del micrófono justo
+     * tras `startRecording()` (`RECORDING`=3, `STOPPED`=1); `null`
+     * si nunca se llegó a arrancar. Lo lee la sesión al parar.
+     */
+    @Volatile
+    override var recordingStateAtStart: Int? = null
+        private set
+
+    /** Estado del micrófono en vivo (`-1` sin `AudioRecord`). */
+    override val recordingState: Int
+        get() = audioRecord?.recordingState ?: -1
+
+    /**
+     * Llamadas a `read()` que devolvieron. Se incrementa tras cada
+     * retorno (nunca antes): un `read()` bloqueado deja el contador
+     * en 0 y el watchdog lo detecta.
+     */
+    @Volatile
+    override var readCount: Int = 0
+        private set
+
+    /** Último valor de retorno de `read()` (`null` si nunca volvió). */
+    @Volatile
+    override var lastReadCode: Int? = null
+        private set
+
+    /**
+     * `elapsedRealtime()` de la última lectura `> 0` (`null` si
+     * nunca hubo). La sesión lo convierte en edad al parar.
+     */
+    @Volatile
+    override var lastSuccessfulReadElapsedMs: Long? = null
+        private set
+
+    /** El hilo lector sigue vivo (`false` sin hilo). */
+    override val isReaderAlive: Boolean
+        get() = readerThread?.isAlive ?: false
+
     /** Primera muestra AAC ya registrada en log (se resetea por arranque). */
     @Volatile
     private var firstAudioSampleLogged = false
@@ -282,6 +348,13 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
         check(!released.get()) { "AudioEncoder ya liberado." }
         config.validate()
         firstAudioSampleLogged = false
+        // Instrumentación ronda 3 (grupo I): contadores del lector
+        // por arranque; `recordingStateAtStart` se fija tras
+        // `startRecording()` (abajo) y queda `null` si no se llega.
+        readCount = 0
+        lastReadCode = null
+        lastSuccessfulReadElapsedMs = null
+        recordingStateAtStart = null
         val minBuffer = AudioRecord.getMinBufferSize(
             config.sampleRate,
             AudioFormat.CHANNEL_IN_MONO,
@@ -408,12 +481,28 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
                     ),
                 )
             }
+            // Instrumentación ronda 3 (grupo I): `startRecording()`
+            // no lanza si el arranque nativo falla (AOSP): el estado
+            // queda en `STOPPED` y solo este valor lo distingue de
+            // un HAL que no entrega tramas (H1-A vs H1-B).
+            recordingStateAtStart = record.recordingState
             val reader = Thread(
                 { readLoop() },
                 "Transmiti2AudioReader",
             )
             readerThread = reader
             reader.start()
+            // Watchdog solo-observador (grupo I): si la primera
+            // lectura no vuelve en 2 s, un log, una sola vez. No
+            // degrada ni para nada: solo registra.
+            callbackHandler.postDelayed({
+                if (!released.get() && readCount == 0) {
+                    Transmiti2Logger.d(
+                        "recording: lector de audio sin datos en 2 s " +
+                            "(estadoMic=${recordingStateAtStart ?: recordingState})",
+                    )
+                }
+            }, READER_WATCHDOG_DELAY_MS)
             Transmiti2Logger.d(
                 "recording: audio iniciado ${config.sampleRate} Hz " +
                     "mono ${config.bitrateBps} bps",
@@ -500,9 +589,17 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
                 )
                 break
             }
+            // Instrumentación ronda 3 (grupo I): solo cuentan las
+            // lecturas que DEVUELVEN. Un `read()` bloqueado deja
+            // `readCount` en 0 y el watchdog lo detecta; `isReaderAlive`
+            // distingue "hilo vivo bloqueado" de "hilo muerto".
+            readCount++
+            lastReadCode = read
             when {
                 read > 0 -> {
                     zeroReads = 0
+                    lastSuccessfulReadElapsedMs =
+                        SystemClock.elapsedRealtime()
                     if (anchorNs == null) {
                         anchorFrom(record)
                     }
@@ -731,6 +828,13 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
 
         /** Lecturas de 0 seguidas antes de tratar el audio como perdido (plan §6 D7). */
         private const val SILENCE_ZERO_READS = 10
+
+        /**
+         * Retraso del watchdog solo-observador del lector de audio
+         * (ronda 3, grupo I): si ninguna lectura devolvió en este
+         * tiempo, un único log. Sin degradar ni parar nada.
+         */
+        private const val READER_WATCHDOG_DELAY_MS = 2_000L
 
         /**
          * Construye el formato de codificación a partir de la

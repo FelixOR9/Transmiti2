@@ -162,6 +162,17 @@ class RecordingSessionTest {
         /** Contador de entradas descartadas (instrumentación 3.1.3):
          * el test lo fija para comprobar que `stop()` lo propaga. */
         override var droppedInputBuffers: Int = 0
+        /**
+         * Instrumentación ronda 3 (grupo I): estado del micrófono
+         * y contadores del lector; el test los fija para comprobar
+         * que `stop()` los propaga al `RecordingResult`.
+         */
+        override var recordingStateAtStart: Int? = null
+        override var recordingState: Int = -1
+        override var readCount: Int = 0
+        override var lastReadCode: Int? = null
+        override var lastSuccessfulReadElapsedMs: Long? = null
+        override var isReaderAlive: Boolean = false
         override var listener: AudioEncoderListener? = null
         var configureCalls = 0
         var releaseCalls = 0
@@ -1374,22 +1385,111 @@ class RecordingSessionTest {
     }
 
     @Test
-    fun `stop propaga droppedInputBuffers del encoder de audio`() =
+    fun `fromSegments y toMap llevan los campos de instrumentacion ronda 3 con valor y por defecto`() {
+        val segment = RecordingSegmentResult(
+            recordingId = "rec_20261119_151552_e2e0",
+            index = 0,
+            fileName = "rec_20261119_151552_e2e0_seg000.mp4",
+            filePath = "/docs/rec_20261119_151552_e2e0_seg000.mp4",
+            status = SegmentStatus.READY,
+            durationMs = 3_000L,
+            sizeBytes = 900_000L,
+            sampleCount = 90,
+            keyframeCount = 2,
+            firstSampleKeyframe = true,
+            ptsMonotonic = true,
+            profileIdc = 66,
+            closedCleanly = true,
+            reason = null,
+        )
+        val withValues = RecordingResult.fromSegments(
+            recordingId = "rec_20261119_151552_e2e0",
+            segments = listOf(segment),
+            errorCode = null,
+            previewRestoreError = null,
+            micStateAtStart = 3,
+            micStateAtStop = 3,
+            audioReadCount = 42,
+            audioLastReadCode = 4096,
+            audioLastReadOkAgeMs = 12_345L,
+            audioReaderAlive = true,
+            audioEos = true,
+        )
+        assertEquals(3, withValues.micStateAtStart)
+        assertEquals(3, withValues.micStateAtStop)
+        assertEquals(42, withValues.audioReadCount)
+        assertEquals(4096, withValues.audioLastReadCode)
+        assertEquals(12_345L, withValues.audioLastReadOkAgeMs)
+        assertEquals(true, withValues.audioReaderAlive)
+        assertEquals(true, withValues.audioEos)
+        val withMap = withValues.toMap()
+        assertEquals(3, withMap["micStateAtStart"])
+        assertEquals(3, withMap["micStateAtStop"])
+        assertEquals(42, withMap["audioReadCount"])
+        assertEquals(4096, withMap["audioLastReadCode"])
+        assertEquals(12_345L, withMap["audioLastReadOkAgeMs"])
+        assertEquals(true, withMap["audioReaderAlive"])
+        assertEquals(true, withMap["audioEos"])
+        // Sin pasar los parámetros, los defectos son null/0/false.
+        val byDefault = RecordingResult.fromSegments(
+            recordingId = "rec_20261119_151552_e2e0",
+            segments = listOf(segment),
+            errorCode = null,
+            previewRestoreError = null,
+        )
+        assertEquals(null, byDefault.micStateAtStart)
+        assertEquals(null, byDefault.micStateAtStop)
+        assertEquals(0, byDefault.audioReadCount)
+        assertEquals(null, byDefault.audioLastReadCode)
+        assertEquals(null, byDefault.audioLastReadOkAgeMs)
+        assertEquals(false, byDefault.audioReaderAlive)
+        assertEquals(false, byDefault.audioEos)
+        assertEquals(null, byDefault.toMap()["micStateAtStart"])
+        assertEquals(0, byDefault.toMap()["audioReadCount"])
+        assertEquals(false, byDefault.toMap()["audioEos"])
+    }
+
+    @Test
+    fun `stop propaga el estado del microfono y los contadores del lector`() =
         runBlocking {
             val session = buildSession()
             startRecording(session, audioEnabled = true)
             fakeEncoder.deliverSample(0L, true)
             fakeAudioEncoder.deliverSample(0L)
             fakeEncoder.deliverSample(33_333L, false)
-            // El contador se lee al parar, antes de liberar el
-            // encoder: fijarlo justo antes de `stop()`.
-            fakeAudioEncoder.droppedInputBuffers = 7
+            // Caso H1 (lector bloqueado en `read()`): arranque con
+            // estado RECORDING pero ninguna lectura devuelta y el
+            // hilo vivo. `lastSuccessfulReadElapsedMs` queda en
+            // `null` a propósito: con un valor, `doStop` llamaría a
+            // `SystemClock.elapsedRealtime()`, que en JVM (harness
+            // y CI) lanza `Stub!`; la resta solo corre en el
+            // teléfono. La propagación del valor de la edad queda
+            // cubierta por el test de `fromSegments`/`toMap`.
+            fakeAudioEncoder.recordingStateAtStart = 3
+            fakeAudioEncoder.recordingState = 3
+            fakeAudioEncoder.readCount = 0
+            fakeAudioEncoder.lastReadCode = null
+            fakeAudioEncoder.lastSuccessfulReadElapsedMs = null
+            fakeAudioEncoder.isReaderAlive = true
             val result = session.stop()
             assertEquals("ready", result.status)
-            assertEquals(7, result.droppedInputBuffers)
+            assertEquals(3, result.micStateAtStart)
+            assertEquals(3, result.micStateAtStop)
+            assertEquals(0, result.audioReadCount)
+            assertEquals(null, result.audioLastReadCode)
+            assertEquals(null, result.audioLastReadOkAgeMs)
+            assertEquals(true, result.audioReaderAlive)
+            // El falso entrega el EOS al parar: `audioEos` es `true`.
+            assertEquals(true, result.audioEos)
             val stoppedPayload = events.first {
                 it.first == StreamContract.EVENT_RECORDING_STOPPED
             }.second
-            assertEquals(7, stoppedPayload["droppedInputBuffers"])
+            assertEquals(3, stoppedPayload["micStateAtStart"])
+            assertEquals(3, stoppedPayload["micStateAtStop"])
+            assertEquals(0, stoppedPayload["audioReadCount"])
+            assertEquals(null, stoppedPayload["audioLastReadCode"])
+            assertEquals(null, stoppedPayload["audioLastReadOkAgeMs"])
+            assertEquals(true, stoppedPayload["audioReaderAlive"])
+            assertEquals(true, stoppedPayload["audioEos"])
         }
 }

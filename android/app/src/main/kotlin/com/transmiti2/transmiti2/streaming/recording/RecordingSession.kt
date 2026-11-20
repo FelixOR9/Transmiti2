@@ -6,6 +6,7 @@ import android.hardware.camera2.CameraManager
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.os.StatFs
+import android.os.SystemClock
 import android.view.Surface
 import com.transmiti2.transmiti2.streaming.CameraException
 import com.transmiti2.transmiti2.streaming.PreviewConfig
@@ -184,6 +185,23 @@ data class RecordingResult(
      * (instrumentación 3.1.3): leído del encoder al parar, antes de
      * liberarlo. */
     val droppedInputBuffers: Int = 0,
+    /**
+     * Instrumentación ronda 3 de audio 3.1.3 (grupo I): estado del
+     * micrófono y contadores del hilo lector, leídos del encoder al
+     * parar, antes de liberarlo (como `droppedInputBuffers`).
+     * `micStateAtStart`/`micStateAtStop` son `getRecordingState()`
+     * tras `startRecording()` y al parar (`RECORDING`=3,
+     * `STOPPED`=1; `null` sin encoder o sin arranque).
+     * `audioLastReadOkAgeMs` es la edad en ms de la última lectura
+     * `> 0` al parar (`null` si nunca hubo).
+     */
+    val micStateAtStart: Int? = null,
+    val micStateAtStop: Int? = null,
+    val audioReadCount: Int = 0,
+    val audioLastReadCode: Int? = null,
+    val audioLastReadOkAgeMs: Long? = null,
+    val audioReaderAlive: Boolean = false,
+    val audioEos: Boolean = false,
 ) {
     fun toMap(): Map<String, Any?> = mapOf(
         "recordingId" to recordingId,
@@ -196,6 +214,13 @@ data class RecordingResult(
         "previewRestoreError" to previewRestoreError,
         "audioEnabled" to audioEnabled,
         "droppedInputBuffers" to droppedInputBuffers,
+        "micStateAtStart" to micStateAtStart,
+        "micStateAtStop" to micStateAtStop,
+        "audioReadCount" to audioReadCount,
+        "audioLastReadCode" to audioLastReadCode,
+        "audioLastReadOkAgeMs" to audioLastReadOkAgeMs,
+        "audioReaderAlive" to audioReaderAlive,
+        "audioEos" to audioEos,
     )
 
     companion object {
@@ -215,6 +240,13 @@ data class RecordingResult(
             errorCode: String?,
             previewRestoreError: String?,
             droppedInputBuffers: Int = 0,
+            micStateAtStart: Int? = null,
+            micStateAtStop: Int? = null,
+            audioReadCount: Int = 0,
+            audioLastReadCode: Int? = null,
+            audioLastReadOkAgeMs: Long? = null,
+            audioReaderAlive: Boolean = false,
+            audioEos: Boolean = false,
         ): RecordingResult {
             val status = when {
                 segments.isEmpty() -> "corrupt"
@@ -233,6 +265,13 @@ data class RecordingResult(
                 previewRestoreError = previewRestoreError,
                 audioEnabled = segments.any { it.hasAudio },
                 droppedInputBuffers = droppedInputBuffers,
+                micStateAtStart = micStateAtStart,
+                micStateAtStop = micStateAtStop,
+                audioReadCount = audioReadCount,
+                audioLastReadCode = audioLastReadCode,
+                audioLastReadOkAgeMs = audioLastReadOkAgeMs,
+                audioReaderAlive = audioReaderAlive,
+                audioEos = audioEos,
             )
         }
     }
@@ -450,6 +489,15 @@ open class RecordingSession(
     @Volatile
     private var audioFormat: MediaFormat? = null
     private var audioEosDeferred: CompletableDeferred<Unit>? = null
+    /**
+     * EOS de audio llegado antes del cierre (ronda 3, grupo I):
+     * se fija en `onAudioEndOfStream` (generación actual) y se
+     * resetea en `start()` y al crear un encoder nuevo en
+     * `tryStartAudio()`. Decide si el defecto del EOS se cumple en
+     * el teléfono (paradas de ~5 s).
+     */
+    @Volatile
+    private var audioEosArrived: Boolean = false
     /** Generación del encoder de audio vigente: cada (re)creación la
      * incrementa; los callbacks de un encoder ya liberado se
      * descartan por generación (el `HandlerThread` puede entregar
@@ -639,6 +687,7 @@ open class RecordingSession(
         audioEncoderName = ""
         audioFormat = null
         audioEosDeferred = null
+        audioEosArrived = false
         audioExpected = false
         audioReason = null
         audioLost = false
@@ -664,7 +713,7 @@ open class RecordingSession(
 
         try {
             // Origen de timestamps de la cámara (§4): `realtime`
-            // (CLOCK_MONOTONIC) es la base que exige el plan; se
+            // (CLOCK_BOOTTIME) es la base que exige el plan; se
             // registra en `recording_started` para el diagnóstico.
             timestampSource = try {
                 val characteristics = cameraManager
@@ -988,6 +1037,7 @@ open class RecordingSession(
             audioConfig = setup.config
             audioEncoderName = setup.encoderName
             audioEosDeferred = CompletableDeferred()
+            audioEosArrived = false
             Transmiti2Logger.d(
                 "recording: audio ${setup.config.sampleRate} Hz " +
                     "${setup.config.channels}ch " +
@@ -1190,6 +1240,7 @@ open class RecordingSession(
     /** Fin del drenado de audio tras `signalEndOfInputStream`. */
     private fun onAudioEndOfStream(generation: Int) {
         if (generation != audioGeneration) return
+        audioEosArrived = true
         audioEosDeferred?.complete(Unit)
     }
 
@@ -2052,7 +2103,16 @@ open class RecordingSession(
         // Buffers de entrada AAC descartados (instrumentación
         // 3.1.3): se capturan en el `finally`, antes de liberar el
         // encoder de audio (tras `release()` ya no se puede leer).
+        // Ronda 3 (grupo I): igual para el estado del micrófono y
+        // los contadores del lector.
         var droppedAtStop = 0
+        var micStateAtStart: Int? = null
+        var micStateAtStop: Int? = null
+        var readCountAtStop = 0
+        var lastReadCodeAtStop: Int? = null
+        var lastReadOkAgeMsAtStop: Long? = null
+        var readerAliveAtStop = false
+        var audioEosAtStop = false
         try {
             // EOS a ambos encoders (audio primero: parar la captura)
             // y drenado final (5 s en total); si no llega, se detiene
@@ -2117,8 +2177,22 @@ open class RecordingSession(
             }
         } finally {
             // Antes de liberar el encoder de audio: su contador de
-            // entradas descartadas muere con él.
-            droppedAtStop = audioEncoder?.droppedInputBuffers ?: 0
+            // entradas descartadas muere con él. Ronda 3 (grupo I):
+            // igual el estado del micrófono y los contadores del
+            // lector; la edad de la última lectura OK se calcula
+            // aquí (`elapsedRealtime()` ahora − instante guardado).
+            val audioEncoderAtStop = audioEncoder
+            droppedAtStop = audioEncoderAtStop?.droppedInputBuffers ?: 0
+            micStateAtStart = audioEncoderAtStop?.recordingStateAtStart
+            micStateAtStop = audioEncoderAtStop?.recordingState
+            readCountAtStop = audioEncoderAtStop?.readCount ?: 0
+            lastReadCodeAtStop = audioEncoderAtStop?.lastReadCode
+            lastReadOkAgeMsAtStop =
+                audioEncoderAtStop?.lastSuccessfulReadElapsedMs?.let {
+                    SystemClock.elapsedRealtime() - it
+                }
+            readerAliveAtStop = audioEncoderAtStop?.isReaderAlive ?: false
+            audioEosAtStop = audioEosArrived
             try {
                 encoder?.release()
             } catch (_: Exception) {
@@ -2147,6 +2221,13 @@ open class RecordingSession(
             errorCode = errorCode,
             previewRestoreError = previewRestoreError,
             droppedInputBuffers = droppedAtStop,
+            micStateAtStart = micStateAtStart,
+            micStateAtStop = micStateAtStop,
+            audioReadCount = readCountAtStop,
+            audioLastReadCode = lastReadCodeAtStop,
+            audioLastReadOkAgeMs = lastReadOkAgeMsAtStop,
+            audioReaderAlive = readerAliveAtStop,
+            audioEos = audioEosAtStop,
         )
         sessionMutex.withLock {
             lastResult = result
@@ -2177,7 +2258,13 @@ open class RecordingSession(
                 segments.sumOf { it.audioSampleCount ?: 0 } +
                 " huecosAudio=" +
                 segments.sumOf { it.audioGapSamples } +
-                " descartadasEntradaAAC=$droppedAtStop)",
+                " descartadasEntradaAAC=$droppedAtStop " +
+                "estadoMic=$micStateAtStart/$micStateAtStop " +
+                "lecturas=$readCountAtStop " +
+                "ultimoRead=${lastReadCodeAtStop ?: "—"} " +
+                "ultimaLecturaOkMs=${lastReadOkAgeMsAtStop ?: "—"} " +
+                "lectorVivo=$readerAliveAtStop " +
+                "audioEos=$audioEosAtStop)",
         )
         return result
     }

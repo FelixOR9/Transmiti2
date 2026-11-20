@@ -375,11 +375,23 @@ class RecordingController extends ChangeNotifier {
       }
     }
     if (_lastStopped != null) {
+      // Ronda 3 (grupo I): estado del micrófono y contadores del
+      // lector al parar. `estadoMic` es `getRecordingState()` nativo
+      // (3 = RECORDING, 1 = STOPPED; otro/`null` → `—`) y
+      // `ultimaLecturaOk` la edad de la última lectura `> 0` en
+      // segundos con un decimal (`—` si nunca hubo).
       tail.add(
         'Última parada: estado=${_lastStopped!.status} '
         'duración total=${_lastStopped!.totalDurationMs}ms '
         'segmentos=${_lastStopped!.segments.length} '
-        'descartadasEntradaAAC=${_lastStopped!.droppedInputBuffers}',
+        'descartadasEntradaAAC=${_lastStopped!.droppedInputBuffers} '
+        'estadoMic=${_micStateLabel(_lastStopped!.micStateAtStart)}/'
+        '${_micStateLabel(_lastStopped!.micStateAtStop)} '
+        'lecturas=${_lastStopped!.audioReadCount} '
+        'ultimoRead=${_lastStopped!.audioLastReadCode?.toString() ?? '—'} '
+        'ultimaLecturaOk=${_lastStopped!.audioLastReadOkAgeMs == null ? '—' : 'hace ${(_lastStopped!.audioLastReadOkAgeMs! / 1000).toStringAsFixed(1)}s'} '
+        'lectorVivo=${_lastStopped!.audioReaderAlive ? 'sí' : 'no'} '
+        'audioEos=${_lastStopped!.audioEos ? 'sí' : 'no'}',
       );
     }
     for (int i = 0; i < tail.length; i++) {
@@ -398,6 +410,17 @@ class RecordingController extends ChangeNotifier {
     final int seconds = totalSeconds % 60;
     return '${minutes.toString().padLeft(2, '0')}:'
         '${seconds.toString().padLeft(2, '0')}';
+  }
+
+  /// Etiqueta del estado del micrófono (ronda 3, grupo I):
+  /// `getRecordingState()` nativo (3 = `RECORDING`, 1 = `STOPPED`);
+  /// cualquier otro valor o `null` es `—`.
+  String _micStateLabel(int? state) {
+    return switch (state) {
+      3 => 'RECORDING',
+      1 => 'STOPPED',
+      _ => '—',
+    };
   }
 
   /// Cabecera de audio del diagnóstico (3.1.3, plan §8.2):
@@ -732,6 +755,13 @@ class RecordingController extends ChangeNotifier {
         status: info.status,
         audioEnabled: info.audioEnabled,
         droppedInputBuffers: info.droppedInputBuffers,
+        micStateAtStart: info.micStateAtStart,
+        micStateAtStop: info.micStateAtStop,
+        audioReadCount: info.audioReadCount,
+        audioLastReadCode: info.audioLastReadCode,
+        audioLastReadOkAgeMs: info.audioLastReadOkAgeMs,
+        audioReaderAlive: info.audioReaderAlive,
+        audioEos: info.audioEos,
       );
       _applyStoppedSegments(_lastStopped!);
       _state = RecordingState.idle;

@@ -528,6 +528,97 @@ void main() {
       expect(stopped.droppedInputBuffers, 0);
     });
 
+    test('RecordingStoppedInfo lee los campos de instrumentación ronda 3',
+        () {
+      final RecordingStoppedInfo stopped =
+          RecordingStoppedInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'segments': <Map<Object?, Object?>>[],
+            'totalDurationMs': 60000,
+            'totalSizeBytes': 18750000,
+            'status': 'ready',
+            'micStateAtStart': 3,
+            'micStateAtStop': 1,
+            'audioReadCount': 42,
+            'audioLastReadCode': 4096,
+            'audioLastReadOkAgeMs': 12300,
+            'audioReaderAlive': true,
+            'audioEos': true,
+          });
+      expect(stopped.micStateAtStart, 3);
+      expect(stopped.micStateAtStop, 1);
+      expect(stopped.audioReadCount, 42);
+      expect(stopped.audioLastReadCode, 4096);
+      expect(stopped.audioLastReadOkAgeMs, 12300);
+      expect(stopped.audioReaderAlive, isTrue);
+      expect(stopped.audioEos, isTrue);
+    });
+
+    test(
+        'RecordingStoppedInfo sin claves de instrumentación ronda 3 no inventa valores',
+        () {
+      final RecordingStoppedInfo stopped =
+          RecordingStoppedInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'segments': <Map<Object?, Object?>>[],
+            'totalDurationMs': 60000,
+            'totalSizeBytes': 18750000,
+            'status': 'ready',
+          });
+      expect(stopped.micStateAtStart, isNull);
+      expect(stopped.micStateAtStop, isNull);
+      expect(stopped.audioReadCount, 0);
+      expect(stopped.audioLastReadCode, isNull);
+      expect(stopped.audioLastReadOkAgeMs, isNull);
+      expect(stopped.audioReaderAlive, isFalse);
+      expect(stopped.audioEos, isFalse);
+    });
+
+    test('RecordingInfo lee los campos de instrumentación ronda 3', () {
+      final RecordingInfo info =
+          RecordingInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'filePath': '/docs/recordings/rec-1_seg000.mp4',
+            'durationMs': 60000,
+            'sizeBytes': 18750000,
+            'status': 'ready',
+            'micStateAtStart': 3,
+            'micStateAtStop': 3,
+            'audioReadCount': 42,
+            'audioLastReadCode': 4096,
+            'audioLastReadOkAgeMs': 12300,
+            'audioReaderAlive': true,
+            'audioEos': true,
+          });
+      expect(info.micStateAtStart, 3);
+      expect(info.micStateAtStop, 3);
+      expect(info.audioReadCount, 42);
+      expect(info.audioLastReadCode, 4096);
+      expect(info.audioLastReadOkAgeMs, 12300);
+      expect(info.audioReaderAlive, isTrue);
+      expect(info.audioEos, isTrue);
+    });
+
+    test(
+        'RecordingInfo sin claves de instrumentación ronda 3 no inventa valores',
+        () {
+      final RecordingInfo info =
+          RecordingInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'filePath': '/docs/recordings/rec-1_seg000.mp4',
+            'durationMs': 60000,
+            'sizeBytes': 18750000,
+            'status': 'ready',
+          });
+      expect(info.micStateAtStart, isNull);
+      expect(info.micStateAtStop, isNull);
+      expect(info.audioReadCount, 0);
+      expect(info.audioLastReadCode, isNull);
+      expect(info.audioLastReadOkAgeMs, isNull);
+      expect(info.audioReaderAlive, isFalse);
+      expect(info.audioEos, isFalse);
+    });
+
     test('RecordingStoppedInfo lee audioEnabled a nivel de grabación', () {
       final RecordingStoppedInfo stopped =
           RecordingStoppedInfo.fromMap(<Object?, Object?>{
