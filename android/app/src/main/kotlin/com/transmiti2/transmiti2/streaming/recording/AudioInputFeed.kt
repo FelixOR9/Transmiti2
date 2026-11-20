@@ -1,6 +1,7 @@
 package com.transmiti2.transmiti2.streaming.recording
 
 import android.media.MediaCodec
+import com.transmiti2.transmiti2.streaming.Transmiti2Logger
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -58,6 +59,18 @@ interface InputBufferSink {
  * - **`getInputBuffer == null`:** se cuenta como descarte
  *   (`droppedInputBuffers++`) y el buffer se devuelve encolándolo
  *   vacío; nunca se deja un índice sin devolver.
+ * - **Ronda U — el drenado nunca lanza:** cada iteración va en
+ *   `try/catch`. Ante una excepción del sumidero (`getInputBuffer` /
+ *   `queueInputBuffer` sobre un codec parado o liberado), la trama se
+ *   cuenta como descartada una sola vez, el índice vuelve al pool y
+ *   se avisa a `onDrainError`; el drenado de esta ronda se detiene.
+ *   Sin esta guarda, la excepción escapaba del `MediaCodec.Callback`
+ *   y mataba el proceso (cierre al grabar, ronda 3).
+ * - **Ronda U — capacidad del buffer:** si el buffer de entrada es
+ *   menor que la trama PCM, la trama se descarta contada y el buffer
+ *   se devuelve vacío (imposible el `BufferOverflowException`); la
+ *   capacidad se registra en log y en `inputBufferCapacityBytes` en
+ *   el primer drenado con buffer no nulo.
  *
  * Hilos: `offerFrame` / `requestEos` los llama el hilo lector (o
  * quien pide la parada); `onInputBufferAvailable` / `drain` SOLO el
@@ -79,12 +92,32 @@ class AudioInputFeed(
     private var eosQueued = false
 
     /**
-     * Entradas descartadas: trama nueva con la cola llena, o
-     * `getInputBuffer == null`. Lo lee la sesión al parar (mismo
+     * Entradas descartadas: trama nueva con la cola llena, `getInputBuffer
+     * == null`, trama mayor que el buffer de entrada, o error del
+     * sumidero al drenar (ronda U). Lo lee la sesión al parar (mismo
      * contador que antes alimentaba `feedPcm`).
      */
     private val dropped = AtomicInteger(0)
     val droppedInputBuffers: Int get() = dropped.get()
+
+    /**
+     * Handler de errores de drenado (ronda U): el encoder lo conecta
+     * a su `reportInputError` para degradar a video-only. Sin él, la
+     * excepción solo se traga (el drenado no propaga nunca).
+     */
+    var onDrainError: ((Exception) -> Unit)? = null
+
+    /**
+     * Capacidad del buffer de entrada AAC en bytes (ronda U), fijada
+     * en el primer drenado con buffer no nulo; `null` si aún no se
+     * drenó ninguno. Lo lee la sesión al parar (diagnóstico visible).
+     */
+    @Volatile
+    var inputBufferCapacityBytes: Int? = null
+        private set
+
+    /** Capacidad ya registrada en log (una sola vez). Solo hilo del callback. */
+    private var inputBufferCapacityLogged = false
 
     /**
      * Encola una trama PCM (hilo lector). Devuelve `false` si la
@@ -120,6 +153,13 @@ class AudioInputFeed(
      * buffers libres, encola la siguiente trama o el EOS (si se
      * pidió y la cola está vacía). Sin tramas y sin EOS pendiente,
      * los índices quedan en el pool y se sale.
+     *
+     * Ronda U: el drenado nunca lanza. Cada iteración va en
+     * `try/catch`: ante una excepción del sumidero, la trama se
+     * cuenta como descartada una sola vez, el índice vuelve al pool,
+     * se avisa a `onDrainError` y el drenado de esta ronda se
+     * detiene (el codec está probablemente parado; la sesión
+     * libera o recrea el encoder tras `onAudioError`).
      */
     fun drain() {
         while (true) {
@@ -127,13 +167,19 @@ class AudioInputFeed(
             val queueEmpty = synchronized(pcmQueue) { pcmQueue.isEmpty() }
             if (eosRequested && queueEmpty && !eosQueued) {
                 freeBuffers.removeFirst()
-                sink.queueInputBuffer(
-                    index,
-                    0,
-                    0,
-                    0,
-                    MediaCodec.BUFFER_FLAG_END_OF_STREAM,
-                )
+                try {
+                    sink.queueInputBuffer(
+                        index,
+                        0,
+                        0,
+                        0,
+                        MediaCodec.BUFFER_FLAG_END_OF_STREAM,
+                    )
+                } catch (e: Exception) {
+                    freeBuffers.addFirst(index)
+                    onDrainError?.invoke(e)
+                    return
+                }
                 eosQueued = true
                 return
             }
@@ -141,15 +187,39 @@ class AudioInputFeed(
                 pcmQueue.removeFirstOrNull()
             } ?: return
             freeBuffers.removeFirst()
-            val buffer = sink.getInputBuffer(index)
-            if (buffer == null) {
-                dropped.incrementAndGet()
-                sink.queueInputBuffer(index, 0, 0, 0, 0)
-                continue
+            var countedAsDropped = false
+            try {
+                val buffer = sink.getInputBuffer(index)
+                if (buffer == null) {
+                    dropped.incrementAndGet()
+                    countedAsDropped = true
+                    sink.queueInputBuffer(index, 0, 0, 0, 0)
+                    continue
+                }
+                buffer.clear()
+                if (!inputBufferCapacityLogged) {
+                    inputBufferCapacityLogged = true
+                    inputBufferCapacityBytes = buffer.capacity()
+                    Transmiti2Logger.d(
+                        "recording: capacidad buffer entrada AAC=" +
+                            "${buffer.capacity()} bytes " +
+                            "(trama PCM=${frame.size} bytes)",
+                    )
+                }
+                if (buffer.remaining() < frame.size) {
+                    dropped.incrementAndGet()
+                    countedAsDropped = true
+                    sink.queueInputBuffer(index, 0, 0, 0, 0)
+                    continue
+                }
+                buffer.put(frame.bytes, 0, frame.size)
+                sink.queueInputBuffer(index, 0, frame.size, frame.ptsUs, 0)
+            } catch (e: Exception) {
+                if (!countedAsDropped) dropped.incrementAndGet()
+                freeBuffers.addFirst(index)
+                onDrainError?.invoke(e)
+                return
             }
-            buffer.clear()
-            buffer.put(frame.bytes, 0, frame.size)
-            sink.queueInputBuffer(index, 0, frame.size, frame.ptsUs, 0)
         }
     }
 

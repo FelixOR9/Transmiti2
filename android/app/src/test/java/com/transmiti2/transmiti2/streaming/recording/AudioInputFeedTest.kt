@@ -1,10 +1,13 @@
 package com.transmiti2.transmiti2.streaming.recording
 
 import android.media.MediaCodec
+import com.transmiti2.transmiti2.streaming.Transmiti2Logger
 import java.nio.ByteBuffer
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 
 /**
@@ -24,13 +27,21 @@ class AudioInputFeedTest {
 
     private class FakeSink(
         var nullBufferIndexes: Set<Int> = emptySet(),
+        /** Capacidad de los buffers de entrada (ronda U). */
+        var bufferCapacity: Int = 8192,
+        /** El sumidero lanza al pedir el buffer (ronda U). */
+        var throwOnGet: Boolean = false,
+        /** El sumidero lanza al encolar (ronda U). */
+        var throwOnQueue: Boolean = false,
     ) : InputBufferSink {
         val queued = mutableListOf<QueuedInput>()
         val buffers = mutableMapOf<Int, ByteBuffer>()
 
         override fun getInputBuffer(index: Int): ByteBuffer? {
+            if (throwOnGet) throw IllegalStateException("codec parado")
             if (index in nullBufferIndexes) return null
-            return ByteBuffer.allocate(8192).also { buffers[index] = it }
+            return ByteBuffer.allocate(bufferCapacity)
+                .also { buffers[index] = it }
         }
 
         override fun queueInputBuffer(
@@ -40,6 +51,7 @@ class AudioInputFeedTest {
             presentationTimeUs: Long,
             flags: Int,
         ) {
+            if (throwOnQueue) throw IllegalStateException("codec parado")
             queued += QueuedInput(index, size, presentationTimeUs, flags)
         }
 
@@ -59,6 +71,19 @@ class AudioInputFeedTest {
         ptsUs = ptsUs,
         samples = 2048,
     )
+
+    @Before
+    fun setUp() {
+        // `Transmiti2Logger` sin receptor llamaría a
+        // `android.util.Log`, que lanza en las unitarias JVM puras
+        // (el drenado registra la capacidad del buffer, ronda U).
+        Transmiti2Logger.sink = { _, _ -> }
+    }
+
+    @After
+    fun tearDown() {
+        Transmiti2Logger.sink = null
+    }
 
     @Test
     fun `tramas en orden con su PTS y su contenido`() {
@@ -214,5 +239,89 @@ class AudioInputFeedTest {
         feed.onInputBufferAvailable(0)
         assertTrue(sink.queued.isEmpty())
         assertEquals(0, feed.droppedInputBuffers)
+    }
+
+    @Test
+    fun `trama mayor que el buffer de entrada se descarta contada sin lanzar`() {
+        // Ronda U (H1-a): el buffer de entrada del encoder puede ser
+        // menor que la trama PCM de 4096 bytes; el `put` directo
+        // lanzaba `BufferOverflowException` y mataba el proceso.
+        val sink = FakeSink(bufferCapacity = 2048)
+        val feed = AudioInputFeed(sink)
+        feed.offerFrame(frame(1, 0L))
+        feed.onInputBufferAvailable(0)
+        // El buffer se devuelve vacío, nunca se escribe de más.
+        assertEquals(listOf(QueuedInput(0, 0, 0L, 0)), sink.queued)
+        assertEquals(1, feed.droppedInputBuffers)
+        assertEquals(2048, feed.inputBufferCapacityBytes)
+        // Una trama que sí cabe fluye con normalidad.
+        feed.offerFrame(PcmFrame(ByteArray(2048) { 2 }, 2048, 21_333L, 1024))
+        feed.onInputBufferAvailable(1)
+        assertEquals(QueuedInput(1, 2048, 21_333L, 0), sink.queued[1])
+        assertEquals(1, feed.droppedInputBuffers)
+    }
+
+    @Test
+    fun `sumidero que lanza en queueInputBuffer no propaga y avisa`() {
+        // Ronda U (H1-b): el drenado nunca lanza; el error llega al
+        // handler para degradar a video-only.
+        val sink = FakeSink(throwOnQueue = true)
+        val feed = AudioInputFeed(sink)
+        val errors = mutableListOf<Exception>()
+        feed.onDrainError = { errors += it }
+        feed.offerFrame(frame(1, 0L))
+        feed.onInputBufferAvailable(0)
+        assertEquals(1, errors.size)
+        assertTrue(errors[0] is IllegalStateException)
+        assertEquals(1, feed.droppedInputBuffers)
+        assertTrue(sink.queued.isEmpty())
+        // Con el sumidero sano, el índice vuelve al pool y drena.
+        sink.throwOnQueue = false
+        feed.offerFrame(frame(2, 21_333L))
+        feed.drain()
+        assertEquals(listOf(QueuedInput(0, 4096, 21_333L, 0)), sink.queued)
+        assertEquals(1, errors.size)
+        assertEquals(1, feed.droppedInputBuffers)
+    }
+
+    @Test
+    fun `sumidero que lanza en getInputBuffer no propaga y avisa`() {
+        val sink = FakeSink(throwOnGet = true)
+        val feed = AudioInputFeed(sink)
+        val errors = mutableListOf<Exception>()
+        feed.onDrainError = { errors += it }
+        feed.offerFrame(frame(1, 0L))
+        feed.onInputBufferAvailable(0)
+        assertEquals(1, errors.size)
+        assertTrue(errors[0] is IllegalStateException)
+        assertEquals(1, feed.droppedInputBuffers)
+        assertTrue(sink.queued.isEmpty())
+        sink.throwOnGet = false
+        feed.offerFrame(frame(2, 21_333L))
+        feed.drain()
+        assertEquals(listOf(QueuedInput(0, 4096, 21_333L, 0)), sink.queued)
+        assertEquals(1, errors.size)
+    }
+
+    @Test
+    fun `EOS que lanza no propaga y avisa`() {
+        val sink = FakeSink(throwOnQueue = true)
+        val feed = AudioInputFeed(sink)
+        val errors = mutableListOf<Exception>()
+        feed.onDrainError = { errors += it }
+        feed.requestEos()
+        feed.onInputBufferAvailable(3)
+        assertEquals(1, errors.size)
+        assertTrue(errors[0] is IllegalStateException)
+        assertTrue(sink.queued.isEmpty())
+        // Sin EOS encolado: con el sumidero sano se encola al drenar.
+        sink.throwOnQueue = false
+        feed.drain()
+        assertEquals(1, sink.queued.size)
+        assertEquals(
+            MediaCodec.BUFFER_FLAG_END_OF_STREAM,
+            sink.queued[0].flags,
+        )
+        assertEquals(1, errors.size)
     }
 }

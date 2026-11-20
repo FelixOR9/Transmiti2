@@ -162,6 +162,9 @@ class RecordingSessionTest {
         /** Contador de entradas descartadas (instrumentación 3.1.3):
          * el test lo fija para comprobar que `stop()` lo propaga. */
         override var droppedInputBuffers: Int = 0
+        /** Capacidad del buffer de entrada AAC (ronda U): el test la
+         * fija para comprobar que `stop()` la propaga. */
+        override var inputBufferCapacityBytes: Int? = null
         /**
          * Instrumentación ronda 3 (grupo I): estado del micrófono
          * y contadores del lector; el test los fija para comprobar

@@ -196,9 +196,16 @@ interface AudioEncoderListener {
 interface AudioEncoderPort {
     val config: AudioEncoderConfig
     val outputFormat: MediaFormat?
-    /** Buffers de entrada descartados porque la cola del codec
-     * estaba llena (instrumentación 3.1.3: lo lee la sesión al parar). */
+    /** Buffers de entrada descartados: cola llena, `getInputBuffer
+     * == null`, trama mayor que el buffer de entrada, o error del
+     * sumidero al drenar (ronda U). Lo lee la sesión al parar. */
     val droppedInputBuffers: Int
+    /**
+     * Capacidad del buffer de entrada AAC en bytes (ronda U):
+     * `null` si aún no se drenó ningún buffer no nulo. Lo lee la
+     * sesión al parar (diagnóstico visible).
+     */
+    val inputBufferCapacityBytes: Int?
     /**
      * Instrumentación ronda 3 de audio 3.1.3 (grupo I, solo lectura):
      * estado del micrófono y contadores del hilo lector, para
@@ -306,11 +313,20 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
 
     /**
      * Buffers de entrada descartados (diagnóstico 3.1.3): trama
-     * nueva con la cola PCM llena, o `getInputBuffer == null`. Lo
-     * posee el feed; lo lee la sesión al parar.
+     * nueva con la cola PCM llena, `getInputBuffer == null`, trama
+     * mayor que el buffer de entrada, o error del sumidero al drenar
+     * (ronda U). Lo posee el feed; lo lee la sesión al parar.
      */
     override val droppedInputBuffers: Int
         get() = inputFeed.droppedInputBuffers
+
+    /**
+     * Capacidad del buffer de entrada AAC en bytes (ronda U); `null`
+     * si aún no se drenó ningún buffer no nulo. Lo posee el feed; lo
+     * lee la sesión al parar.
+     */
+    override val inputBufferCapacityBytes: Int?
+        get() = inputFeed.inputBufferCapacityBytes
 
     /**
      * Instrumentación ronda 3 (grupo I): estado del micrófono justo
@@ -355,6 +371,18 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
     @Volatile
     private var firstAudioSampleLogged = false
 
+    /**
+     * Errores de entrada/salida de audio ya notificados (ronda U):
+     * solo la primera excepción de cada clase degrada con su motivo;
+     * las siguientes solo se cuentan (el encoder se libera o se
+     * recrea tras `onAudioError`). Se resetean por arranque.
+     * Solo hilo del callback.
+     */
+    private var inputErrorReported = false
+    private var outputErrorReported = false
+    private var inputErrorCount = 0
+    private var outputErrorCount = 0
+
     override var listener: AudioEncoderListener? = null
 
     /**
@@ -379,6 +407,13 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
         check(!released.get()) { "AudioEncoder ya liberado." }
         config.validate()
         firstAudioSampleLogged = false
+        // Ronda U: los errores de drenado se notifican una sola vez
+        // por arranque; el feed avisa a `reportInputError`.
+        inputErrorReported = false
+        outputErrorReported = false
+        inputErrorCount = 0
+        outputErrorCount = 0
+        inputFeed.onDrainError = { e -> reportInputError(e) }
         // Instrumentación ronda 3 (grupo I): contadores del lector
         // por arranque; `recordingStateAtStart` se fija tras
         // `startRecording()` (abajo) y queda `null` si no se llega.
@@ -452,9 +487,15 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
                     ) {
                         // Grupo F: el callback entrega los buffers de
                         // entrada; el drenado corre en este hilo
-                        // (nunca en el hilo lector).
+                        // (nunca en el hilo lector). Ronda U: una
+                        // excepción aquí mataba el proceso; ahora
+                        // degrada a video-only (reportInputError).
                         if (released.get()) return
-                        inputFeed.onInputBufferAvailable(index)
+                        try {
+                            inputFeed.onInputBufferAvailable(index)
+                        } catch (e: Exception) {
+                            reportInputError(e)
+                        }
                     }
 
                     override fun onOutputBufferAvailable(
@@ -473,7 +514,16 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
                             "recording: error del codec de audio: " +
                                 "${e.javaClass.simpleName} ${e.message}",
                         )
-                        listener?.onAudioError(e)
+                        // Ronda U: un listener que lance no debe
+                        // matar el hilo del callback.
+                        try {
+                            listener?.onAudioError(e)
+                        } catch (listenerError: Exception) {
+                            Transmiti2Logger.e(
+                                "recording: onAudioError lanzó " +
+                                    "(${listenerError.javaClass.simpleName})",
+                            )
+                        }
                     }
 
                     override fun onOutputFormatChanged(
@@ -598,11 +648,72 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
             if (isEos) {
                 listener?.onAudioEndOfStream()
             }
+        } catch (e: Exception) {
+            // Ronda U: una excepción del listener (p. ej. al copiar
+            // la primera muestra) mataba el proceso; ahora degrada
+            // a video-only (reportOutputError).
+            reportOutputError(e)
         } finally {
             try {
                 codec.releaseOutputBuffer(index, false)
             } catch (_: Exception) {
             }
+        }
+    }
+
+    /**
+     * Excepción en el drenado de entrada (ronda U): log + degradación
+     * a video-only con motivo `audio_input_error`. Solo la primera
+     * por arranque notifica; las siguientes solo se cuentan.
+     */
+    private fun reportInputError(e: Exception) {
+        inputErrorCount++
+        if (inputErrorReported) return
+        inputErrorReported = true
+        Transmiti2Logger.e(
+            "recording: error en la entrada de audio " +
+                "(${e.javaClass.simpleName}): ${e.message}",
+        )
+        notifyAudioError("audio_input_error", "onInputBufferAvailable", e)
+    }
+
+    /**
+     * Excepción en el drenado de salida (ronda U): log + degradación
+     * a video-only con motivo `audio_output_error`. Solo la primera
+     * por arranque notifica; las siguientes solo se cuentan.
+     */
+    private fun reportOutputError(e: Exception) {
+        outputErrorCount++
+        if (outputErrorReported) return
+        outputErrorReported = true
+        Transmiti2Logger.e(
+            "recording: error en la salida de audio " +
+                "(${e.javaClass.simpleName}): ${e.message}",
+        )
+        notifyAudioError("audio_output_error", "handleOutputBuffer", e)
+    }
+
+    /**
+     * Entrega `onAudioError` al listener sin que un listener que
+     * lance pueda matar el hilo del callback (ronda U).
+     */
+    private fun notifyAudioError(reason: String, stage: String, e: Exception) {
+        try {
+            listener?.onAudioError(
+                RecordingException.audioError(
+                    "Fallo de audio ($reason): ${e.message}",
+                    mapOf(
+                        "stage" to stage,
+                        "reason" to reason,
+                        "exceptionClass" to e.javaClass.simpleName,
+                    ),
+                ),
+            )
+        } catch (listenerError: Exception) {
+            Transmiti2Logger.e(
+                "recording: onAudioError lanzó " +
+                    "(${listenerError.javaClass.simpleName})",
+            )
         }
     }
 
@@ -751,11 +862,16 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
      * `onInputBufferAvailable` lo llama directo; el lector y
      * `signalEndOfInputStream()` lo piden con
      * `callbackHandler.post`. Nunca se llama a `queueInputBuffer`
-     * desde el hilo lector.
+     * desde el hilo lector. Ronda U: una excepción aquí mataba el
+     * proceso; ahora degrada a video-only (reportInputError).
      */
     private fun drainInput() {
         if (released.get()) return
-        inputFeed.drain()
+        try {
+            inputFeed.drain()
+        } catch (e: Exception) {
+            reportInputError(e)
+        }
     }
 
     /**
