@@ -21,12 +21,15 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -475,6 +478,7 @@ class RecordingSessionTest {
         eosTimeoutMs: Long = 5_000L,
         audioFormatTimeoutMs: Long = 2_000L,
         muxerFactory: ((String) -> RecordingMuxer)? = null,
+        registry: ActiveRecordingRegistry = ActiveRecordingRegistry(),
     ): RecordingSession {
         return RecordingSession(
             scope = CoroutineScope(Dispatchers.Unconfined),
@@ -505,6 +509,7 @@ class RecordingSessionTest {
             clockMs = { fixedClockMs },
             formatTimeoutMs = formatTimeoutMs,
             eosTimeoutMs = eosTimeoutMs,
+            registry = registry,
         )
     }
 
@@ -1773,5 +1778,283 @@ class RecordingSessionTest {
             assertEquals(true, stoppedPayload["audioEos"])
             assertEquals(true, stoppedPayload["audioReaderNoData2s"])
             assertEquals(false, stoppedPayload["eosTimedOut"])
+        }
+
+    // --- Subetapa 0, grupo 0-c: registro de coordinación (U39–U42, U49) ---
+
+    private fun failedStartRecordingId(): String {
+        val errorEvent = synchronized(events) {
+            events.firstOrNull {
+                it.first == StreamContract.EVENT_RECORDING_ERROR
+            }
+        }
+        assertNotNull(
+            "failStart emite recording_error con el id",
+            errorEvent,
+        )
+        val id = errorEvent!!.second["recordingId"] as? String
+        assertNotNull("el evento de error trae recordingId", id)
+        return id!!
+    }
+
+    @Test
+    fun `U39 colision con grupo reservado, se agotan los intentos sin tocar G`() =
+        runBlocking {
+            val registry = ActiveRecordingRegistry()
+            // Reservar TODOS los ids posibles del segundo fijado
+            // (sufijo de 16 bits): cualquier id que genere el inicio
+            // esta reservado, asi que los 10 intentos del claim
+            // fracasan de forma determinista.
+            val stampPrefix =
+                fileStore.newRecordingId(fixedClockMs).dropLast(5)
+            val reservedTokens = mutableMapOf<String, OwnershipToken>()
+            for (suffix in 0 until 0x10000) {
+                val id = "%s_%04x".format(stampPrefix, suffix)
+                val token = registry.tryReserveGroup(id, "reconcile:u39")
+                assertNotNull("reserva de $id", token)
+                reservedTokens[id] = token!!
+            }
+            val session = buildSession(registry = registry)
+            val thrown = assertThrows(RecordingException::class.java) {
+                runBlocking { startRecording(session) }
+            }
+            assertEquals(
+                StreamContract.RECORDING_STATE_ERROR,
+                thrown.code,
+            )
+            assertEquals("id_reservation", thrown.details["stage"])
+            assertEquals(RecordingState.ERROR, session.currentState())
+            // Sin encoder, sin archivos: el inicio no paso del claim.
+            assertEquals(0, fakeEncoder.configureCalls)
+            assertTrue(dir.listFiles().isNullOrEmpty())
+            // G intacto: todos los tokens siguen iguales.
+            val snapshot = registry.snapshot()
+            assertEquals(0x10000, snapshot.reservedGroups.size)
+            assertTrue(snapshot.activeClaims.isEmpty())
+            val sampleId = reservedTokens.keys.first()
+            assertEquals(
+                reservedTokens[sampleId],
+                snapshot.reservedGroups[sampleId]?.token,
+            )
+
+            // Recuperacion: con el reloj en el segundo siguiente (sin
+            // reservas) el inicio desde ERROR tiene exito con un id
+            // nuevo, sin tocar G.
+            fixedClockMs += 1_000L
+            val info = startRecording(session)
+            assertEquals(RecordingState.RECORDING, session.currentState())
+            assertTrue(info.recordingId !in reservedTokens)
+            assertNull(
+                registry.tryReserveGroup(
+                    info.recordingId,
+                    "reconcile:u39",
+                ),
+            )
+            val result = session.stop()
+            assertEquals("ready", result.status)
+            val afterStop = registry.snapshot()
+            assertEquals(0x10000, afterStop.reservedGroups.size)
+            assertTrue(afterStop.activeClaims.isEmpty())
+            assertEquals(
+                reservedTokens[sampleId],
+                afterStop.reservedGroups[sampleId]?.token,
+            )
+        }
+
+    @Test
+    fun `U40 liberacion al parar, reserva fracasa durante stop y tiene exito despues`() =
+        runBlocking {
+            val registry = ActiveRecordingRegistry()
+            val session = buildSession(registry = registry)
+            // La verificacion tarda 2 s: `stop()` queda en vuelo
+            // mientras el test sondea el claim.
+            fakeVerifier.verifyDelayMs = 2_000L
+            val info = startRecording(session)
+            val id = info.recordingId
+            // Claim vivo: la reserva fracasa.
+            assertNull(registry.tryReserveGroup(id, "reconcile:run-u40"))
+            // Liberacion ajena: NOT_OWNER y no libera.
+            val foreignToken = registry.tryClaimRecording("rec_u40_ajeno")!!
+            assertEquals(
+                ReleaseResult.NOT_OWNER,
+                registry.releaseRecording(id, foreignToken),
+            )
+            assertEquals(
+                ReleaseResult.RELEASED,
+                registry.releaseRecording("rec_u40_ajeno", foreignToken),
+            )
+            assertNull(registry.tryReserveGroup(id, "reconcile:run-u40"))
+
+            val stopDeferred = async { session.stop() }
+            withTimeout(5_000L) {
+                while (fakeVerifier.verifyCalls == 0) delay(10)
+            }
+            // Durante `stop()` (verificacion en vuelo) el claim sigue
+            // vivo: la reserva fracasa y el token ajeno no libera.
+            assertNull(
+                "reserva durante stop()",
+                registry.tryReserveGroup(id, "reconcile:run-u40"),
+            )
+            assertEquals(
+                ReleaseResult.NOT_OWNER,
+                registry.releaseRecording(id, foreignToken),
+            )
+            val result = stopDeferred.await()
+            assertEquals("ready", result.status)
+            assertEquals(RecordingState.IDLE, session.currentState())
+            // Tras parar, el claim esta liberado: la reserva tiene exito.
+            val reservation = registry.tryReserveGroup(id, "reconcile:run-u40")
+            assertNotNull(reservation)
+            assertEquals(
+                ReleaseResult.RELEASED,
+                registry.releaseGroup(id, reservation!!),
+            )
+        }
+
+    @Test
+    fun `U41 liberacion en failStart, reserva posterior tiene exito`() =
+        runBlocking {
+            fakeEncoder.deliverFormatOnStart = false
+            val registry = ActiveRecordingRegistry()
+            val session = buildSession(formatTimeoutMs = 100L, registry = registry)
+            val thrown = assertThrows(RecordingException::class.java) {
+                runBlocking { startRecording(session) }
+            }
+            assertEquals(StreamContract.ENCODER_ERROR, thrown.code)
+            assertEquals(RecordingState.ERROR, session.currentState())
+            val id = failedStartRecordingId()
+            // Reserva posterior tiene exito: el claim se libero en
+            // `failStart()`.
+            val reservation = registry.tryReserveGroup(id, "reconcile:run-u41")
+            assertNotNull(reservation)
+            assertEquals(
+                ReleaseResult.RELEASED,
+                registry.releaseGroup(id, reservation!!),
+            )
+            // Sub-caso de U48(ii) a nivel de sesion: reclamar el id de
+            // nuevo y liberar con un token ajeno no toca el claim
+            // nuevo. (El token obsoleto exacto de la sesion es privado;
+            // el caso obsoleto-del-mismo-id lo cubre U48(ii) a nivel de
+            // registro; aqui el token ajeno es de otro id, tambien
+            // valido y nunca emitido para este id.)
+            val newToken = registry.tryClaimRecording(id)
+            assertNotNull(newToken)
+            val foreign = registry.tryClaimRecording("rec_u41_ajeno")!!
+            assertEquals(
+                ReleaseResult.NOT_OWNER,
+                registry.releaseRecording(id, foreign),
+            )
+            assertEquals(
+                ReleaseResult.RELEASED,
+                registry.releaseRecording("rec_u41_ajeno", foreign),
+            )
+            assertNull(registry.tryReserveGroup(id, "reconcile:run-u41"))
+            assertEquals(
+                newToken,
+                registry.snapshot().activeClaims[id]?.token,
+            )
+            assertEquals(
+                ReleaseResult.RELEASED,
+                registry.releaseRecording(id, newToken!!),
+            )
+        }
+
+    @Test
+    fun `U42 reserva liberada siempre en finally, doble liberacion tolerada`() =
+        runBlocking {
+            // U42 a nivel de sesion, sobre el registro inyectado en la
+            // sesion: el `finally` de la reconciliacion (0-d, todavia
+            // sin `reconcileRecordings()`) debe poder llamar a
+            // `releaseGroup` incondicionalmente. El `finally` real de
+            // la reconciliacion lo cubre 0-d.
+            val registry = ActiveRecordingRegistry()
+            buildSession(registry = registry)
+            val id = "rec_u42"
+            val token = registry.tryReserveGroup(id, "reconcile:run-u42")
+            assertNotNull(token)
+            try {
+                assertNull(
+                    "grupo reservado: el claim no pasa",
+                    registry.tryClaimRecording(id),
+                )
+            } finally {
+                assertEquals(
+                    ReleaseResult.RELEASED,
+                    registry.releaseGroup(id, token!!),
+                )
+            }
+            // Segundo `finally`: doble liberacion tolerada (NOT_FOUND,
+            // no excepcion).
+            assertEquals(
+                ReleaseResult.NOT_FOUND,
+                registry.releaseGroup(id, token),
+            )
+            // Liberacion con token incorrecto desde un `finally` no libera.
+            val second = registry.tryReserveGroup(id, "reconcile:run-u42b")
+            assertNotNull(second)
+            assertEquals(
+                ReleaseResult.NOT_OWNER,
+                registry.releaseGroup(id, token),
+            )
+            assertNull(
+                "la reserva sigue viva tras el intento ajeno",
+                registry.tryClaimRecording(id),
+            )
+            assertEquals(
+                ReleaseResult.RELEASED,
+                registry.releaseGroup(id, second!!),
+            )
+            val snapshot = registry.snapshot()
+            assertTrue(snapshot.activeClaims.isEmpty())
+            assertTrue(snapshot.reservedGroups.isEmpty())
+        }
+
+    @Test
+    fun `U49 liberacion tras failStart, reserva posterior y doble release`() =
+        runBlocking {
+            fakeEncoder.deliverFormatOnStart = false
+            val registry = ActiveRecordingRegistry()
+            val session = buildSession(formatTimeoutMs = 100L, registry = registry)
+            val thrown = assertThrows(RecordingException::class.java) {
+                runBlocking { startRecording(session) }
+            }
+            assertEquals(StreamContract.ENCODER_ERROR, thrown.code)
+            assertEquals(RecordingState.ERROR, session.currentState())
+            val id = failedStartRecordingId()
+            // Tras el fallo, el claim esta liberado: la reserva tiene exito.
+            val reservation = registry.tryReserveGroup(id, "reconcile:run-u49")
+            assertNotNull(reservation)
+            // Segundo `release` con el mismo token de reserva: la
+            // primera liberacion ya lo consumio, la segunda es
+            // NOT_FOUND (el token del claim de la sesion es privado y
+            // ya se libero en `failStart()`; el de reserva es el
+            // observable por el test y tiene la misma semantica).
+            assertEquals(
+                ReleaseResult.RELEASED,
+                registry.releaseGroup(id, reservation!!),
+            )
+            assertEquals(
+                ReleaseResult.NOT_FOUND,
+                registry.releaseGroup(id, reservation),
+            )
+            // ...y no libera una reserva posterior (token obsoleto
+            // inofensivo).
+            val second = registry.tryReserveGroup(id, "reconcile:run-u49b")
+            assertNotNull(second)
+            assertEquals(
+                ReleaseResult.NOT_OWNER,
+                registry.releaseGroup(id, reservation),
+            )
+            assertNull(
+                "la reserva posterior sigue viva",
+                registry.tryClaimRecording(id),
+            )
+            assertEquals(
+                ReleaseResult.RELEASED,
+                registry.releaseGroup(id, second!!),
+            )
+            val snapshot = registry.snapshot()
+            assertTrue(snapshot.activeClaims.isEmpty())
+            assertTrue(snapshot.reservedGroups.isEmpty())
         }
 }

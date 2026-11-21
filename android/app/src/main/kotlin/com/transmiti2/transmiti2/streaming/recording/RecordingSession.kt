@@ -18,12 +18,14 @@ import java.nio.ByteBuffer
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 
 /** Estados de grabación (plan 3.1.2 §6.1; máquina separada de la vista previa). */
@@ -477,6 +479,13 @@ open class RecordingSession(
         }
     },
     private val clockMs: () -> Long = System::currentTimeMillis,
+    /**
+     * Registro de coordinación grabación/reconciliación (subetapa 0,
+     * grupo 0-c; revisión 3 §3.1). Inyectable por constructor, como
+     * `verifier`/`fileStore`; por defecto uno propio por sesión. El
+     * registro es por instancia de sesión, nunca singleton.
+     */
+    private val registry: ActiveRecordingRegistry = ActiveRecordingRegistry(),
 ) : VideoEncoderListener {
 
     private val segmentVerifier: SegmentVerifier = verifier
@@ -503,6 +512,16 @@ open class RecordingSession(
     private var stopResult: CompletableDeferred<RecordingResult>? = null
 
     private var recordingId: String? = null
+    /**
+     * Token del claim vivo en el registro de coordinación (subetapa 0,
+     * grupo 0-c). Se escribe inmediatamente tras el claim con éxito
+     * en `start()` (asignación plana, sin `suspend` entre el claim y
+     * el guardado) y se pone a `null` al liberar. Invariante: token
+     * no-nulo ⟹ `recordingId` es el id reclamado (ambos se escriben
+     * sin punto de suspensión entre medias, así que ningún otro camino
+     * puede observar el token con otro id).
+     */
+    private var activeClaimToken: OwnershipToken? = null
     private var matchId: String? = null
     private var recordingStartWallMs: Long = 0
     private var previewSession: PreviewSession? = null
@@ -836,7 +855,7 @@ open class RecordingSession(
                     "modo=${config.bitrateMode} cbr=${caps.cbrSupported}",
             )
 
-            val id = fileStore.newRecordingId(clockMs())
+            val id = claimRecordingId()
             recordingId = id
             recordingStartWallMs = clockMs()
             fileStore.ensureDir()
@@ -979,8 +998,101 @@ open class RecordingSession(
         synchronized(metadataSegments) { metadataSegments.clear() }
     }
 
+    /**
+     * S4' (subetapa 0, grupo 0-c): reclama un id en el registro de
+     * coordinación ANTES de `ensureDir()` y antes de crear ningún
+     * archivo. Si el id está reservado por la reconciliación (claim
+     * `null`), regenera el id y reintenta, acotado a
+     * [MAX_ID_CLAIM_ATTEMPTS] intentos; agotado → `recording_state_error`
+     * con `stage = "id_reservation"` (error visible, no grabar).
+     *
+     * El token queda guardado en [activeClaimToken] inmediatamente tras
+     * el claim con éxito, sin `suspend` entre medias. Si `start()`
+     * falla antes del claim (p. ej. `storage_full`), no hay nada que
+     * liberar.
+     *
+     * `newRecordingId()` se usa tal como está hoy (sin comprobación de
+     * existencia: la S3' es del grupo 0-b, que vendrá después).
+     */
+    private suspend fun claimRecordingId(): String {
+        repeat(MAX_ID_CLAIM_ATTEMPTS) { attempt ->
+            val candidate = fileStore.newRecordingId(clockMs())
+            val token = registry.tryClaimRecording(candidate)
+            if (token != null) {
+                activeClaimToken = token
+                return candidate
+            }
+            Transmiti2Logger.d(
+                "recording: id $candidate reservado, regenerando " +
+                    "(intento ${attempt + 1}/$MAX_ID_CLAIM_ATTEMPTS)",
+            )
+        }
+        throw RecordingException.stateError(
+            "No se pudo reservar un id de grabación libre.",
+            mapOf("stage" to "id_reservation"),
+        )
+    }
+
+    /**
+     * Toma el token del claim vivo y lo pone a `null` en la misma
+     * sección crítica bajo `sessionMutex` (toma-y-limpia atómica): dos
+     * vías de salida (`stop()` + `release()`, o `doStop()` +
+     * `failStart()`) no pueden liberar dos veces el mismo claim.
+     * El lock se libera antes de llamar al registro: el
+     * `coordinationMutex` es hoja y nunca se toma con otro mutex.
+     */
+    private suspend fun takeClaimToken(): OwnershipToken? =
+        sessionMutex.withLock {
+            val token = activeClaimToken
+            activeClaimToken = null
+            token
+        }
+
+    /**
+     * Libera el claim de `id` con `token`. Nunca lanza por el estado
+     * del registro: `NOT_FOUND` en `finally` se ignora, `NOT_OWNER`
+     * se registra como aviso (alguien intentó soltar lo ajeno).
+     */
+    private suspend fun releaseClaim(id: String, token: OwnershipToken) {
+        when (registry.releaseRecording(id, token)) {
+            ReleaseResult.RELEASED ->
+                Transmiti2Logger.d(
+                    "recording: claim liberado id=$id token=$token",
+                )
+            ReleaseResult.NOT_FOUND ->
+                Transmiti2Logger.d(
+                    "recording: claim ya liberado id=$id token=$token",
+                )
+            ReleaseResult.NOT_OWNER ->
+                Transmiti2Logger.e(
+                    "recording: intento de liberar claim ajeno " +
+                        "id=$id token=$token",
+                )
+        }
+    }
+
+    /**
+     * Libera el claim vivo, si lo hay, con el id dado. Corre en
+     * `NonCancellable`: una cancelación no debe fugar el claim (R-N1).
+     * Sin claim vivo no hace nada. El id debe ser el reclamado (ver
+     * invariante de [activeClaimToken]); si no coincide, el registro
+     * devuelve `NOT_FOUND`/`NOT_OWNER` sin tocar la entrada viva.
+     */
+    private suspend fun releaseClaimIfHeld(id: String) {
+        withContext(NonCancellable) {
+            val token = takeClaimToken() ?: return@withContext
+            releaseClaim(id, token)
+        }
+    }
+
     /** Fracaso del inicio: estado `ERROR`, evento y limpieza. */
-    private fun failStart(e: RecordingException): Nothing {
+    private suspend fun failStart(e: RecordingException): Nothing {
+        // 0-c: liberar el claim ANTES de publicar ERROR (la transición
+        // que admite un nuevo inicio). Con el orden contrario, un nuevo
+        // inicio podría reclamar el mismo id antes de la liberación;
+        // con tokens no robaría el claim, pero dejaría ruido
+        // (NOT_OWNER) y un aviso espurio.
+        recordingId?.let { releaseClaimIfHeld(it) }
         state = RecordingState.ERROR
         lastError = e
         Transmiti2Logger.e(
@@ -2367,6 +2479,15 @@ open class RecordingSession(
             audioEosDeferred = null
             drainStopped = false
             rotationPending = false
+            // 0-c: liberar el claim DESPUÉS de esperar las
+            // verificaciones (arriba, en el `try`) y ANTES de volver a
+            // IDLE/ERROR (abajo, fuera del `try`). Va en el `finally`
+            // para cubrir también la salida por excepción; en
+            // `NonCancellable` (ver `releaseClaimIfHeld`), para que
+            // una cancelación no fugue el claim. Sin claim vivo (parada
+            // desde IDLE/ERROR, o `stop()` durante el inicio antes del
+            // claim) no hace nada.
+            idAtStop?.let { releaseClaimIfHeld(it) }
         }
         val segments: List<RecordingSegmentResult>
         synchronized(segmentResults) {
@@ -2541,6 +2662,17 @@ open class RecordingSession(
         audioEncoder = null
         audioFormat = null
         audioEosDeferred = null
+        // 0-c: red de seguridad del claim: `stop()` ya lo liberó en
+        // `doStop()` en el camino normal, pero si `release()` llega
+        // sin pasar por ahí (o `doStop()` no llegó a su `finally`),
+        // el claim no debe fugar. Toma-y-limpia atómica bajo
+        // `sessionMutex`; la liberación al registro ocurre fuera del
+        // lock (el `coordinationMutex` es hoja).
+        val claimId = recordingId
+        val claimToken = takeClaimToken()
+        if (claimId != null && claimToken != null) {
+            withContext(NonCancellable) { releaseClaim(claimId, claimToken) }
+        }
         sessionMutex.withLock { state = RecordingState.IDLE }
     }
 
@@ -2554,6 +2686,14 @@ open class RecordingSession(
 
         /** Sin espacio para empezar o seguir (< 200 MB, plan §6.3). */
         const val MIN_FREE_BYTES_START = 200L * 1024 * 1024
+
+        /**
+         * Intentos de regeneración del id si el claim es rechazado
+         * (grupo reservado, subetapa 0 grupo 0-c): mismo tope que la
+         * S3' del plan (10 intentos); agotado → `recording_state_error`
+         * con `stage = "id_reservation"`.
+         */
+        const val MAX_ID_CLAIM_ATTEMPTS = 10
 
         /** Aviso de poco espacio al iniciar (< 2 GB, plan §9.2). */
         const val LOW_STORAGE_WARN_BYTES = 2L * 1024 * 1024 * 1024
