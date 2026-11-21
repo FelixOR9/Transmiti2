@@ -33,6 +33,38 @@ android {
         versionName = flutter.versionName
     }
 
+    // Firma estable (3.1.3): si el CI restauró el keystore dedicado y
+    // exportó sus credenciales, el build debug usa esa clave; si no hay
+    // ninguna variable, no se toca nada y Gradle usa su debug keystore
+    // por defecto (comportamiento previo). Si hay alguna variable pero
+    // falta otra o el keystore, se falla cerrado: nunca se firma en
+    // silencio con una clave distinta a la pedida. Las credenciales
+    // llegan solo por variables de entorno (secretos de GitHub Actions
+    // en CI) y nunca se escriben en el repo.
+    signingConfigs {
+        getByName("debug") {
+            val storePassword = System.getenv("TRANSMITI2_DEBUG_KEYSTORE_PASSWORD")
+            val keyAlias = System.getenv("TRANSMITI2_DEBUG_KEY_ALIAS")
+            val keyPassword = System.getenv("TRANSMITI2_DEBUG_KEY_PASSWORD")
+            if (storePassword != null || keyAlias != null || keyPassword != null) {
+                val keystorePath = System.getenv("TRANSMITI2_DEBUG_KEYSTORE_PATH")
+                    ?: "${System.getProperty("user.home")}/.android/debug.keystore"
+                val keystoreFile = File(keystorePath)
+                check(storePassword != null && keyAlias != null && keyPassword != null) {
+                    "Firma estable: faltan variables TRANSMITI2_DEBUG_KEYSTORE_PASSWORD, " +
+                        "TRANSMITI2_DEBUG_KEY_ALIAS o TRANSMITI2_DEBUG_KEY_PASSWORD"
+                }
+                check(keystoreFile.exists()) {
+                    "Firma estable: no existe el keystore en $keystorePath"
+                }
+                storeFile = keystoreFile
+                this.storePassword = storePassword
+                this.keyAlias = keyAlias
+                this.keyPassword = keyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             // TODO: Add your own signing config for the release build.
