@@ -93,7 +93,7 @@ internal fun escapeJson(value: String): String {
 
 /**
  * Rutas y nombres de la grabación (plan 3.1.2 §5): almacenamiento
- * privado de la app (`<documents>/recordings/`), sin MediaStore
+ * privado de la app (`<filesDir>/recordings/`), sin MediaStore
  * (es 3.1.4).
  *
  * - Segmento final: `<recordingId>_seg<NNN>.mp4`
@@ -108,17 +108,77 @@ internal fun escapeJson(value: String): String {
  */
 class RecordingFileStore(val recordingsDir: File) {
 
+    /**
+     * Crea el directorio si no existe y lo devuelve.
+     *
+     * Subetapa 0, grupo 0-b (ambigüedad A8 del plan: `ensureDir()`
+     * LANZA, la misma convención en sus dos llamadores): `mkdirs()`
+     * con resultado comprobado y existencia posterior; si no se puede
+     * crear o no es un directorio, lanza
+     * `RecordingException.recordingsDirUnavailable` (`mkdirs_failed`
+     * o `not_a_directory`). En `RecordingSession.start()` el fallo
+     * llega a `failStart()`; en `writeSidecar()` lo recoge el
+     * `try/catch` de `writeSidecarSnapshot()` (solo se registra).
+     */
     fun ensureDir(): File {
-        recordingsDir.mkdirs()
+        if (!recordingsDir.exists()) {
+            val created = try {
+                recordingsDir.mkdirs()
+            } catch (e: Exception) {
+                throw RecordingException.recordingsDirUnavailable(
+                    "mkdirs_failed",
+                    exceptionClass = e.javaClass.simpleName,
+                )
+            }
+            if (!created || !recordingsDir.exists()) {
+                throw RecordingException.recordingsDirUnavailable(
+                    "mkdirs_failed",
+                )
+            }
+        }
+        if (!recordingsDir.isDirectory) {
+            throw RecordingException.recordingsDirUnavailable(
+                "not_a_directory",
+            )
+        }
         return recordingsDir
     }
 
-    /** `rec_<yyyyMMdd_HHmmss>_<4 hex>` (plan §5.1). */
-    fun newRecordingId(nowMs: Long = System.currentTimeMillis()): String {
+    /**
+     * `rec_<yyyyMMdd_HHmmss>_<4 hex>` (plan §5.1).
+     *
+     * S3' (subetapa 0, grupo 0-b): comprobación de existencia antes
+     * de devolver el id — si ya existe el sidecar `<id>.json` o algún
+     * `<id>_seg*` (final o staging), se regenera el sufijo, hasta
+     * [MAX_ID_GENERATION_ATTEMPTS] intentos. Si sigue colisionando,
+     * lanza `RecordingException` con `recording_state_error` y
+     * `stage = "id_reservation"` (error visible, no grabar; en
+     * `start()` lo recoge `failStart()`). `suffixSupplier` existe
+     * para que las pruebas fijen el sufijo de forma determinista.
+     */
+    fun newRecordingId(
+        nowMs: Long = System.currentTimeMillis(),
+        suffixSupplier: () -> String = {
+            "%04x".format(Random().nextInt(0x10000))
+        },
+    ): String {
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
             .format(Date(nowMs))
-        val suffix = "%04x".format(Random().nextInt(0x10000))
-        return "rec_${stamp}_$suffix"
+        repeat(MAX_ID_GENERATION_ATTEMPTS) {
+            val id = "rec_${stamp}_${suffixSupplier()}"
+            if (!recordingIdExists(id)) return id
+        }
+        throw RecordingException.stateError(
+            "No se pudo generar un id de grabación libre.",
+            mapOf("stage" to "id_reservation"),
+        )
+    }
+
+    /** `true` si el id ya tiene sidecar o algún segmento en disco. */
+    private fun recordingIdExists(id: String): Boolean {
+        if (sidecarFile(id).exists()) return true
+        if (listSegmentFiles(id).isNotEmpty()) return true
+        return listStagingFiles().any { it.name.startsWith("${id}_seg") }
     }
 
     fun segmentFileName(recordingId: String, index: Int): String =
@@ -177,6 +237,12 @@ class RecordingFileStore(val recordingsDir: File) {
         staging.renameTo(final)
 
     companion object {
+        /**
+         * Intentos de generación de id en [newRecordingId] (S3'):
+         * si los 10 colisionan con archivos existentes, error visible.
+         */
+        const val MAX_ID_GENERATION_ATTEMPTS = 10
+
         private val SEGMENT_NAME_REGEX =
             Regex("^(.+)_seg(\\d{3})(\\.tmp)?\\.mp4$")
 

@@ -79,6 +79,20 @@ abstract class StreamingService {
   /// Clasifica los `.tmp.mp4` que quedaron de una muerte del proceso
   /// (Fase B, 3.1.2). Nunca borra ni modifica nada.
   Future<List<RecoveredSegmentInfo>> recoverInterruptedRecordings();
+
+  /// Ruta canónica de grabaciones (subetapa 0, 3.1.4): la ruta
+  /// absoluta `<filesDir>/recordings/` o un `PlatformException` con
+  /// código `recordings_dir_unavailable`. Devuelve `null` solo si el
+  /// lado nativo responde nulo: **sin** valor por defecto (no copiar
+  /// el patrón de `getStatus`); el wrapper de `AppServices` lo
+  /// clasifica como `recordings_channel_contract_error`.
+  /// `MissingPluginException` se propaga tal cual (canal no
+  /// registrado). El timeout y los reintentos viven en el wrapper
+  /// (`AppServices.resolveRecordingsDir`), una sola sede. `attempt`
+  /// es el número de intento que Dart pasa para el diagnóstico del
+  /// timeout nativo.
+  Future<String?> getRecordingsDir({int attempt = 1});
+
   Future<void> stopAll();
 }
 
@@ -314,6 +328,22 @@ class MethodChannelStreamingService implements StreamingService {
           .whereType<Map<Object?, Object?>>()
           .map(RecoveredSegmentInfo.fromMap)
           .toList();
+    } on PlatformException catch (e) {
+      throw _fromPlatform(e);
+    }
+  }
+
+  @override
+  Future<String?> getRecordingsDir({int attempt = 1}) async {
+    try {
+      return await _channel.invokeMethod<String>(
+        StreamContract.getRecordingsDir,
+        <String, Object>{'attempt': attempt},
+      );
+    } on MissingPluginException {
+      // Se propaga tal cual: el wrapper la clasifica como fallo
+      // temporal del puente (`stage=missing_plugin`).
+      rethrow;
     } on PlatformException catch (e) {
       throw _fromPlatform(e);
     }

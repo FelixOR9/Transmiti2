@@ -266,6 +266,31 @@ class FakeStreamingService implements StreamingService {
     return List<RecoveredSegmentInfo>.unmodifiable(recoveredSegments);
   }
 
+  /// Ruta canónica (subetapa 0, 3.1.4): por defecto devuelve
+  /// [recordingsDirPath]. `recordingsDirScript` guioniza las
+  /// llamadas: cada llamada consume un elemento (una ruta `String?`
+  /// o una `Exception` a lanzar); sin guion devuelve la ruta por
+  /// defecto. `getRecordingsDirAttempts` registra el intento que
+  /// Dart pasó en cada llamada.
+  String recordingsDirPath = '/fake/recordings';
+  List<Object?> recordingsDirScript = <Object?>[];
+  int getRecordingsDirCalls = 0;
+  List<int> getRecordingsDirAttempts = <int>[];
+
+  @override
+  Future<String?> getRecordingsDir({int attempt = 1}) async {
+    getRecordingsDirCalls++;
+    getRecordingsDirAttempts.add(attempt);
+    if (recordingsDirScript.isNotEmpty) {
+      final Object? next = recordingsDirScript.removeAt(0);
+      if (next is Exception) {
+        throw next;
+      }
+      return next as String?;
+    }
+    return recordingsDirPath;
+  }
+
   @override
   Future<void> stopAll() async {
     stopAllCalls++;

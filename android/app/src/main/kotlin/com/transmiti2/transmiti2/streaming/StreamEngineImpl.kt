@@ -115,7 +115,7 @@ class StreamEngineImpl(
     /**
      * `Context` de la app: solo se usa para construir la sesión de
      * grabación por defecto (`RecordingFileStore` en
-     * `<documents>/recordings/` y `DefaultSegmentVerifier`). Sin él
+     * `<filesDir>/recordings/` y `DefaultSegmentVerifier`). Sin él
      * (pruebas sin Android) no hay sesión y `startRecording` devuelve
      * `camera_unavailable`.
      */

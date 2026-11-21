@@ -134,7 +134,7 @@ class SqliteRecordingRepository implements RecordingRepository {
 
   final Database _db;
 
-  /// Carpeta `<documents>/recordings/` (para la ruta prevista del
+  /// Carpeta `<filesDir>/recordings/` (para la ruta prevista del
   /// final fusionado `<recordingId>_final.mp4`, plan §8.1).
   final String recordingsDirPath;
 

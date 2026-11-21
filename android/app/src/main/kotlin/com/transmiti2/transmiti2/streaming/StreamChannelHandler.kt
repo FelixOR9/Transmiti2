@@ -9,10 +9,13 @@ import android.net.Uri
 import android.provider.Settings
 import androidx.core.content.ContextCompat
 import com.transmiti2.transmiti2.streaming.recording.RecordingException
+import com.transmiti2.transmiti2.streaming.recording.RecordingsDirReplySink
+import com.transmiti2.transmiti2.streaming.recording.launchGetRecordingsDir
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.view.TextureRegistry
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
@@ -186,6 +189,13 @@ class StreamChannelHandler(
     private val textureRegistry: TextureRegistry? = null,
     private val cameraManager: CameraManager? = null,
     private val onEvent: ((Map<String, Any?>) -> Unit)? = null,
+    /**
+     * Dispatcher del hilo principal para responder por el canal
+     * (subetapa 0, 3.1.4): `getRecordingsDir()` responde desde Main
+     * con `replyOnce`, igual que `StreamEngineImpl` y
+     * `SegmentVerifier` ya lo tienen. Inyectable para las pruebas.
+     */
+    private val mainDispatcher: CoroutineDispatcher = Dispatchers.Main,
 ) : MethodChannel.MethodCallHandler {
 
     private var store: SecureCredentialStore? = null
@@ -289,6 +299,7 @@ class StreamChannelHandler(
             StreamContract.GET_RECORDING_STATUS -> getRecordingStatus(result)
             StreamContract.RECOVER_INTERRUPTED_RECORDINGS ->
                 recoverInterruptedRecordings(result)
+            StreamContract.GET_RECORDINGS_DIR -> getRecordingsDir(call, result)
             StreamContract.START_STREAM ->
                 result.error(
                     StreamContract.NOT_AVAILABLE_IN_PHASE_3_0,
@@ -498,6 +509,53 @@ class StreamChannelHandler(
         scope.launch {
             result.success(engine.recordingStatusMap())
         }
+    }
+
+    /**
+     * Ruta canónica de grabaciones (subetapa 0, 3.1.4, grupo 0-b):
+     * `<filesDir>/recordings/` o `recordings_dir_unavailable`.
+     *
+     * Enrutado síncrono en Main: solo se lee `context.filesDir` en
+     * memoria (la nulidad es V1) y el número de intento que Dart pasa
+     * para el diagnóstico del timeout; sin tocar disco ni
+     * `previewEngine` (el motor no se materializa: esta rama no lo
+     * necesita). El trabajo V1–V4c va a `Dispatchers.IO` y la
+     * respuesta vuelve a Main con `replyOnce`, exactamente una vez
+     * (ver [launchGetRecordingsDir]; revisión 4 §3.5).
+     */
+    private fun getRecordingsDir(
+        call: MethodCall,
+        result: MethodChannel.Result,
+    ) {
+        val attempt = (call.argument<Any>("attempt") as? Number)?.toInt()
+            ?: 1
+        val filesDir = try {
+            context.filesDir
+        } catch (_: Exception) {
+            null
+        }
+        // El flujo es JVM-puro y responde por un `sink`; aquí solo se
+        // adapta el `MethodChannel.Result` real.
+        val replySink = object : RecordingsDirReplySink {
+            override fun success(path: String) {
+                result.success(path)
+            }
+
+            override fun error(
+                code: String,
+                message: String?,
+                details: Map<String, Any?>?,
+            ) {
+                result.error(code, message, details)
+            }
+        }
+        launchGetRecordingsDir(
+            scope = scope,
+            mainDispatcher = mainDispatcher,
+            filesDir = filesDir,
+            attempt = attempt,
+            replySink = replySink,
+        )
     }
 
     /**

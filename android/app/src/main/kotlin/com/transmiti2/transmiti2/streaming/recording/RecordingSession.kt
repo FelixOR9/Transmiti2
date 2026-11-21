@@ -15,6 +15,7 @@ import com.transmiti2.transmiti2.streaming.StreamContract
 import com.transmiti2.transmiti2.streaming.Transmiti2Logger
 import java.io.File
 import java.nio.ByteBuffer
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -406,7 +407,7 @@ data class AudioSetup(
  *   segmento en curso como interrumpido y restaura la vista previa.
  *
  * No depende de `Context`: el motor construye `fileStore` (con
- * `<documents>/recordings/`) y `verifier` (con el `Context` de la app
+ * `<filesDir>/recordings/`) y `verifier` (con el `Context` de la app
  * para ExoPlayer) y los inyecta.
  *
  * La clase y su API pública son `open` (costura de pruebas): los tests
@@ -470,12 +471,19 @@ open class RecordingSession(
     },
     /** Espera del formato AAC desde el formato de video (2 s, §5.1). */
     private val audioFormatTimeoutMs: Long = AUDIO_FORMAT_TIMEOUT_MS,
-    private val freeSpaceBytes: () -> Long = {
+    /**
+     * Espacio libre medible en la carpeta de grabaciones (subetapa 0,
+     * grupo 0-b): `null` cuando `StatFs` no pudo medirlo (constructor
+     * o `availableBytes` lanzan). Nunca se inventa un valor: el
+     * `Long.MAX_VALUE` anterior se eliminó por completo — con `null`
+     * el inicio falla con `storage_check_unavailable` y la rotación
+     * hace una parada limpia con el mismo código (U20/U20b/U20c).
+     */
+    private val freeSpaceBytes: () -> Long? = {
         try {
             StatFs(fileStore.recordingsDir.absolutePath).availableBytes
         } catch (_: Exception) {
-            // Sin medida: no bloquear el inicio por el chequeo.
-            Long.MAX_VALUE
+            null
         }
     },
     private val clockMs: () -> Long = System::currentTimeMillis,
@@ -817,8 +825,58 @@ open class RecordingSession(
                 audioExpected = true
             }
 
+            // Subetapa 0, grupo 0-b. Orden en start(): revalidar
+            // directorio → medir espacio → resto. La re-validación
+            // V1–V4 es Kotlin directo (inmune al canal, con
+            // `withContext(Dispatchers.IO)`; `start()` ya es
+            // `suspend`): si falla, no se crea encoder, segmento ni
+            // fila — `failStart` con `recordings_dir_unavailable`.
+            // La medida de espacio también va a IO (`StatFs` es una
+            // llamada `statvfs` bloqueante).
+            val revalidation = withContext(Dispatchers.IO) {
+                validateRecordingsDir(
+                    fileStore.recordingsDir,
+                    nowMs = clockMs,
+                )
+            }
+            when (revalidation) {
+                is RecordingsDirOutcome.Ok -> {
+                    if (revalidation.writeTestDeleteFailed) {
+                        Transmiti2Logger.e(
+                            "recording: no se pudo borrar el archivo " +
+                                "de prueba " +
+                                "${revalidation.writeTestFile}",
+                        )
+                    }
+                }
+                is RecordingsDirOutcome.Failed ->
+                    throw RecordingException.recordingsDirUnavailable(
+                        revalidation.stage,
+                        revalidation.reason,
+                        revalidation.exceptionClass,
+                    )
+            }
+
             // Almacenamiento: < 200 MB no se empieza; < 2 GB avisa.
-            val free = freeSpaceBytes()
+            // Espacio no medible (`null`) → `storage_check_unavailable`
+            // (nunca `storage_full` ni aviso; U20/U20c).
+            val free: Long? = try {
+                withContext(Dispatchers.IO) { freeSpaceBytes() }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                throw RecordingException.storageCheckUnavailable(
+                    stage = "start",
+                    check = "free_space_check",
+                    exceptionClass = e.javaClass.simpleName,
+                )
+            }
+            if (free == null) {
+                throw RecordingException.storageCheckUnavailable(
+                    stage = "start",
+                    check = "free_space_check",
+                )
+            }
             if (free < MIN_FREE_BYTES_START) {
                 throw RecordingException.storageFull(
                     "Sin espacio para grabar: quedan " +
@@ -1011,8 +1069,10 @@ open class RecordingSession(
      * falla antes del claim (p. ej. `storage_full`), no hay nada que
      * liberar.
      *
-     * `newRecordingId()` se usa tal como está hoy (sin comprobación de
-     * existencia: la S3' es del grupo 0-b, que vendrá después).
+     * `newRecordingId()` ya trae la S3' (subetapa 0, grupo 0-b):
+     * comprobación de existencia + regeneración del sufijo, máx. 10
+     * intentos; si sigue colisionando lanza `recording_state_error`
+     * con `stage = "id_reservation"`.
      */
     private suspend fun claimRecordingId(): String {
         repeat(MAX_ID_CLAIM_ATTEMPTS) { attempt ->
@@ -1916,7 +1976,30 @@ open class RecordingSession(
         if (state == RecordingState.RECORDING && !rotationPending) {
             val firstPts = segmentFirstPtsUs ?: ptsUs
             if (ptsUs - firstPts >= SEGMENT_TARGET_US) {
-                if (freeSpaceBytes() < MIN_FREE_BYTES_START) {
+                // Subetapa 0, grupo 0-b: espacio no medible (`null`,
+                // `StatFs` lanzó o el lambda falló) → parada limpia
+                // con `storage_check_unavailable`, mismo camino que
+                // `storage_full`, segmentos previos intactos (U20b).
+                // La medida corre en el hilo del encoder (este
+                // `drainSample` no es `suspend`: `withContext(IO)`
+                // no aplica aquí — ver informe del grupo 0-b, R-T5);
+                // es un hilo de fondo dedicado, nunca Main.
+                val free: Long? = try {
+                    freeSpaceBytes()
+                } catch (_: Exception) {
+                    null
+                }
+                if (free == null) {
+                    scheduleErrorStop(
+                        RecordingException.storageCheckUnavailable(
+                            stage = "rotate",
+                            check = "free_space_check",
+                            segmentIndex = segmentIndex,
+                        ),
+                    )
+                    return
+                }
+                if (free < MIN_FREE_BYTES_START) {
                     scheduleErrorStop(
                         RecordingException.storageFull(
                             "Sin espacio durante la grabación: parada " +
