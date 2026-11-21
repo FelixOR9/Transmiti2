@@ -189,7 +189,11 @@ void main() {
       final RecordingStatusSnapshot snapshot =
           await service.getRecordingStatus();
       expect(snapshot.state, 'idle');
-      expect(await service.recoverInterruptedRecordings(), isEmpty);
+      expect(await service.reconcileRecordings(), isA<ReconciliationResult>());
+      final ReconciliationResult empty =
+          await service.reconcileRecordings();
+      expect(empty.state, ReconciliationState.done);
+      expect(empty.segments, isEmpty);
     });
   });
 }

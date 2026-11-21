@@ -58,14 +58,18 @@ abstract final class StreamContract {
   static const String stopRecording = 'stopRecording';
   static const String stopAll = 'stopAll';
 
-  /// Estado de la grabación y recuperación de interrupciones (Fase B,
-  /// 3.1.2, componente 3). `getRecordingStatus` devuelve la instantánea
-  /// del estado para re-sincronizar la UI al volver a la pantalla;
-  /// `recoverInterruptedRecordings` clasifica los `.tmp.mp4` que
-  /// quedaron de una muerte del proceso (nunca borra ni modifica nada).
+  /// Estado de la grabación y reconciliación de interrupciones
+  /// (Fase B, 3.1.2, componente 3; subetapa 0, grupo 0-d2).
+  /// `getRecordingStatus` devuelve la instantánea del estado para
+  /// re-sincronizar la UI al volver a la pantalla;
+  /// `reconcileRecordings` ejecuta (o espera, si ya corre) la única
+  /// pasada de reconciliación del proceso y devuelve el resumen por
+  /// grupo (renombres, clasificaciones, pendientes
+  /// `PENDING_VERIFICATION`, `skipped_active`). El nombre antiguo
+  /// `recoverInterruptedRecordings` se eliminó en 0-d2: no hay dos
+  /// caminos.
   static const String getRecordingStatus = 'getRecordingStatus';
-  static const String recoverInterruptedRecordings =
-      'recoverInterruptedRecordings';
+  static const String reconcileRecordings = 'reconcileRecordings';
 
   /// Ruta canónica de grabaciones y estado de la puerta de
   /// reconciliación (subetapa 0, 3.1.4). `getRecordingsDir` devuelve
@@ -206,6 +210,16 @@ abstract final class StreamContract {
       'recordings_channel_contract_error';
   static const String recordingsChannelTimeout =
       'recordings_channel_timeout';
+
+  /// Fallos de la puerta de reconciliación (subetapa 0, grupo 0-d2).
+  /// `reconciliation_unavailable`: no hay sesión de grabación con la
+  /// que reconciliar (motor sin `context` ni fábrica). Viajan DENTRO
+  /// del payload de `reconcileRecordings`/`getReconciliationState`
+  /// (`state` `FAILED` + `errorCode`), nunca como
+  /// `PlatformException`. Espejo en Kotlin (`StreamContract.kt`).
+  static const String reconciliationUnavailable =
+      'reconciliation_unavailable';
+  static const String reconciliationFailed = 'reconciliation_failed';
 }
 
 /// Estado del motor de transmisión que devuelve `getStatus`.
@@ -927,33 +941,99 @@ enum ReconciliationState {
   };
 }
 
+/// Segmento pendiente de verificación (caso C6 de la reconciliación):
+/// no verificable (timeout, excepción, decodificador no disponible).
+/// Nunca `ready`, nunca se elimina, excluido de lo utilizable, listado
+/// para reintento. Es la forma Dart de `ReconciledSegmentRef` (Kotlin).
+class PendingSegmentRef {
+  const PendingSegmentRef({
+    required this.recordingId,
+    required this.segmentIndex,
+    required this.fileName,
+    this.reason,
+  });
+
+  final String recordingId;
+  final int segmentIndex;
+  final String fileName;
+  final String? reason;
+
+  factory PendingSegmentRef.fromMap(Map<Object?, Object?> map) {
+    return PendingSegmentRef(
+      recordingId: map['recordingId'] as String? ?? '',
+      segmentIndex: (map['segmentIndex'] as num?)?.toInt() ?? 0,
+      fileName: map['fileName'] as String? ?? '',
+      reason: map['reason'] as String?,
+    );
+  }
+
+  Map<String, Object?> toMap() {
+    return <String, Object?>{
+      'recordingId': recordingId,
+      'segmentIndex': segmentIndex,
+      'fileName': fileName,
+      'reason': reason,
+    };
+  }
+}
+
 /// Resumen de una reconciliación (subetapa 0, 3.1.4), tal como lo
-/// devuelve `getReconciliationState` al completarse la puerta.
+/// devuelve `getReconciliationState` al completarse la puerta y
+/// `reconcileRecordings` dentro de su resultado.
 ///
-/// Los contadores nunca se inventan: ausentes en el mapa → 0. Los
-/// tokens (`claimToken`/`reservationToken`) son `Long` internos del
-/// registro Kotlin, seguros de registrar; `null` cuando la
-/// reconciliación no tomó ese papel. `pending` cuenta los segmentos
-/// `PENDING_VERIFICATION` (no verificables: nunca `ready`, nunca se
-/// eliminan). `skippedActive` cuenta los grupos saltados porque su
-/// grabación estaba activa o reservada.
+/// Los contadores nunca se inventan: ausentes en el mapa → 0. `pending`
+/// cuenta los segmentos `PENDING_VERIFICATION` (no verificables: nunca
+/// `ready`, nunca se eliminan); `skippedActive` cuenta los grupos
+/// saltados porque su grabación estaba activa o reservada.
+/// `orphansReconstructed` lo rellena Dart al reconciliar las filas
+/// (Kotlin no conoce las filas: en el mapa nativo la clave no viaja y
+/// aquí es 0 hasta que el controlador la fusiona con `copyWith`).
+///
+/// Los tokens viajan como mapa grupo → token (`reservationTokens`):
+/// no hay un único token de reserva (uno por grupo reservado) y el
+/// token del claim del grabador es privado de la sesión, así que los
+/// campos únicos `claimToken`/`reservationToken` de 0-a se eliminaron
+/// en 0-d2.
 class ReconciliationSummary {
   const ReconciliationSummary({
     this.state = ReconciliationState.notStarted,
+    this.runId,
+    this.startedAtMs,
+    this.finishedAtMs,
+    this.durationMs = 0,
+    this.groupsTotal = 0,
     this.recordingsReconciled = 0,
     this.segmentsRenamed = 0,
     this.segmentsClassified = 0,
+    this.segmentsTrusted = 0,
+    this.segmentsVerified = 0,
     this.orphansReconstructed = 0,
     this.duplicatesQuarantined = 0,
     this.pending = 0,
+    this.segmentsPending = const <PendingSegmentRef>[],
     this.skippedActive = 0,
-    this.claimToken,
-    this.reservationToken,
+    this.groupsSkippedActive = const <String>[],
+    this.groupsFailed = const <String>[],
+    this.reservationTokens = const <String, int>{},
     this.foreignReleaseRejected = 0,
     this.orphanWriteTestFiles = 0,
+    this.conflicts = 0,
   });
 
   final ReconciliationState state;
+
+  /// Identificador de la pasada (`run-N`).
+  final String? runId;
+
+  /// Inicio/fin de la pasada (reloj de pared, ms).
+  final int? startedAtMs;
+  final int? finishedAtMs;
+
+  /// Duración medida de la pasada (ms).
+  final int durationMs;
+
+  /// Grupos en el inventario.
+  final int groupsTotal;
 
   /// Grabaciones reconciliadas.
   final int recordingsReconciled;
@@ -964,6 +1044,12 @@ class ReconciliationSummary {
   /// Segmentos clasificados (por `status` del sidecar o verificados).
   final int segmentsClassified;
 
+  /// Segmentos en los que se confió sin verificar (E1–E6).
+  final int segmentsTrusted;
+
+  /// Segmentos verificados en esta pasada (C3–C5).
+  final int segmentsVerified;
+
   /// Huérfanos reconstruidos (archivo sin fila: fila insertada).
   final int orphansReconstructed;
 
@@ -973,14 +1059,20 @@ class ReconciliationSummary {
   /// Segmentos pendientes de verificación (`PENDING_VERIFICATION`).
   final int pending;
 
+  /// Detalle de los pendientes (para reintento).
+  final List<PendingSegmentRef> segmentsPending;
+
   /// Grupos saltados por grabación activa o reserva (`skipped_active`).
   final int skippedActive;
 
-  /// Token del claim del grabador, si lo hubo.
-  final int? claimToken;
+  /// Identificadores de los grupos saltados.
+  final List<String> groupsSkippedActive;
 
-  /// Token de la reserva de la reconciliación, si lo hubo.
-  final int? reservationToken;
+  /// Grupos que fallaron con excepción (no tumbaron la pasada).
+  final List<String> groupsFailed;
+
+  /// Grupo → token de reserva que lo procesó.
+  final Map<String, int> reservationTokens;
 
   /// Liberaciones ajenas rechazadas (`NOT_OWNER`).
   final int foreignReleaseRejected;
@@ -988,45 +1080,198 @@ class ReconciliationSummary {
   /// Archivos huérfanos `.write-test-*.tmp` barridos (V4a).
   final int orphanWriteTestFiles;
 
+  /// Conflictos de destino duplicado encontrados.
+  final int conflicts;
+
   factory ReconciliationSummary.fromMap(Map<Object?, Object?> map) {
+    final List<Object?> rawPending =
+        (map['segmentsPending'] as List?)?.cast<Object?>() ?? <Object?>[];
+    final Map<Object?, Object?>? rawTokens =
+        map['reservationTokens'] as Map<Object?, Object?>?;
     return ReconciliationSummary(
       state: ReconciliationState.fromWireName(map['state'] as String?),
+      runId: map['runId'] as String?,
+      startedAtMs: (map['startedAtMs'] as num?)?.toInt(),
+      finishedAtMs: (map['finishedAtMs'] as num?)?.toInt(),
+      durationMs: (map['durationMs'] as num?)?.toInt() ?? 0,
+      groupsTotal: (map['groupsTotal'] as num?)?.toInt() ?? 0,
       recordingsReconciled:
           (map['recordingsReconciled'] as num?)?.toInt() ?? 0,
       segmentsRenamed: (map['segmentsRenamed'] as num?)?.toInt() ?? 0,
       segmentsClassified:
           (map['segmentsClassified'] as num?)?.toInt() ?? 0,
+      segmentsTrusted: (map['segmentsTrusted'] as num?)?.toInt() ?? 0,
+      segmentsVerified: (map['segmentsVerified'] as num?)?.toInt() ?? 0,
       orphansReconstructed:
           (map['orphansReconstructed'] as num?)?.toInt() ?? 0,
       duplicatesQuarantined:
           (map['duplicatesQuarantined'] as num?)?.toInt() ?? 0,
       pending: (map['pending'] as num?)?.toInt() ?? 0,
+      segmentsPending: rawPending
+          .whereType<Map<Object?, Object?>>()
+          .map(PendingSegmentRef.fromMap)
+          .toList(),
       skippedActive: (map['skipped_active'] as num?)?.toInt() ?? 0,
-      claimToken: (map['claimToken'] as num?)?.toInt(),
-      reservationToken: (map['reservationToken'] as num?)?.toInt(),
+      groupsSkippedActive: _stringList(map['groupsSkippedActive']),
+      groupsFailed: _stringList(map['groupsFailed']),
+      reservationTokens: rawTokens == null
+          ? const <String, int>{}
+          : <String, int>{
+              for (final MapEntry<Object?, Object?> e in rawTokens.entries)
+                e.key.toString(): (e.value as num).toInt(),
+            },
       foreignReleaseRejected:
           (map['foreignReleaseRejected'] as num?)?.toInt() ?? 0,
       orphanWriteTestFiles:
           (map['orphanWriteTestFiles'] as num?)?.toInt() ?? 0,
+      conflicts: (map['conflicts'] as num?)?.toInt() ?? 0,
     );
   }
 
   Map<String, Object> toMap() {
     return <String, Object>{
       'state': state.wireName,
+      if (runId != null) 'runId': runId!,
+      if (startedAtMs != null) 'startedAtMs': startedAtMs!,
+      if (finishedAtMs != null) 'finishedAtMs': finishedAtMs!,
+      'durationMs': durationMs,
+      'groupsTotal': groupsTotal,
       'recordingsReconciled': recordingsReconciled,
       'segmentsRenamed': segmentsRenamed,
       'segmentsClassified': segmentsClassified,
+      'segmentsTrusted': segmentsTrusted,
+      'segmentsVerified': segmentsVerified,
       'orphansReconstructed': orphansReconstructed,
       'duplicatesQuarantined': duplicatesQuarantined,
       'pending': pending,
+      'segmentsPending':
+          segmentsPending.map((s) => s.toMap()).toList(),
       'skipped_active': skippedActive,
-      if (claimToken != null) 'claimToken': claimToken!,
-      if (reservationToken != null) 'reservationToken': reservationToken!,
+      'groupsSkippedActive': groupsSkippedActive,
+      'groupsFailed': groupsFailed,
+      'reservationTokens': reservationTokens,
       'foreignReleaseRejected': foreignReleaseRejected,
       'orphanWriteTestFiles': orphanWriteTestFiles,
+      'conflicts': conflicts,
     };
   }
+
+  /// Fusión de lo que solo Dart conoce: el estado observado por el
+  /// canal y los huérfanos reconstruidos al reconciliar las filas.
+  ReconciliationSummary copyWith({
+    ReconciliationState? state,
+    int? orphansReconstructed,
+  }) {
+    return ReconciliationSummary(
+      state: state ?? this.state,
+      runId: runId,
+      startedAtMs: startedAtMs,
+      finishedAtMs: finishedAtMs,
+      durationMs: durationMs,
+      groupsTotal: groupsTotal,
+      recordingsReconciled: recordingsReconciled,
+      segmentsRenamed: segmentsRenamed,
+      segmentsClassified: segmentsClassified,
+      segmentsTrusted: segmentsTrusted,
+      segmentsVerified: segmentsVerified,
+      orphansReconstructed:
+          orphansReconstructed ?? this.orphansReconstructed,
+      duplicatesQuarantined: duplicatesQuarantined,
+      pending: pending,
+      segmentsPending: segmentsPending,
+      skippedActive: skippedActive,
+      groupsSkippedActive: groupsSkippedActive,
+      groupsFailed: groupsFailed,
+      reservationTokens: reservationTokens,
+      foreignReleaseRejected: foreignReleaseRejected,
+      orphanWriteTestFiles: orphanWriteTestFiles,
+      conflicts: conflicts,
+    );
+  }
+}
+
+/// Resultado completo de `reconcileRecordings` por el canal (0-d2;
+/// forma fijada en ambos lados a la vez, plan §6 A4). `segments` lleva
+/// TODOS los segmentos del inventario (certificados o `pending`);
+/// `pending` es el subconjunto `PENDING_VERIFICATION` (el mismo que
+/// `summary.segmentsPending`). En `FAILED`, `segments` está vacío y
+/// `errorCode`/`errorMessage` llevan el motivo: nunca una lista vacía
+/// como éxito final (U34).
+class ReconciliationResult {
+  const ReconciliationResult({
+    this.state = ReconciliationState.notStarted,
+    this.summary = const ReconciliationSummary(),
+    this.segments = const <RecoveredSegmentInfo>[],
+    this.groupsSkippedActive = const <String>[],
+    this.groupsFailed = const <String>[],
+    this.unknownFiles = const <String>[],
+    this.missingFiles = const <String>[],
+    this.errorCode,
+    this.errorMessage,
+  });
+
+  final ReconciliationState state;
+  final ReconciliationSummary summary;
+
+  /// Todos los segmentos del inventario, en orden por grabación/índice.
+  final List<RecoveredSegmentInfo> segments;
+
+  /// Grupos saltados por grabación activa o reserva.
+  final List<String> groupsSkippedActive;
+
+  /// Grupos que fallaron con excepción.
+  final List<String> groupsFailed;
+
+  /// Archivos sin `recordingId` reconocible (se listan, nunca se tocan).
+  final List<String> unknownFiles;
+
+  /// Entradas del sidecar sin archivo en disco (se listan, nunca se borran).
+  final List<String> missingFiles;
+
+  /// Motivo en `FAILED` (`null` en `DONE`).
+  final String? errorCode;
+  final String? errorMessage;
+
+  /// Segmentos pendientes de verificación (`status == 'pending'`).
+  List<RecoveredSegmentInfo> get pendingSegments =>
+      segments.where((s) => s.status == 'pending').toList();
+
+  /// Segmentos utilizables (`ready` o `partial`).
+  List<RecoveredSegmentInfo> get usableSegments =>
+      segments.where((s) => s.usable).toList();
+
+  factory ReconciliationResult.fromMap(Map<Object?, Object?> map) {
+    final ReconciliationState state =
+        ReconciliationState.fromWireName(map['state'] as String?);
+    final Map<Object?, Object?>? rawSummary =
+        map['summary'] as Map<Object?, Object?>?;
+    final List<Object?> rawSegments =
+        (map['segments'] as List?)?.cast<Object?>() ?? <Object?>[];
+    return ReconciliationResult(
+      state: state,
+      summary: rawSummary == null
+          ? ReconciliationSummary(state: state)
+          : ReconciliationSummary.fromMap(rawSummary),
+      segments: rawSegments
+          .whereType<Map<Object?, Object?>>()
+          .map(RecoveredSegmentInfo.fromMap)
+          .toList(),
+      groupsSkippedActive: _stringList(map['groupsSkippedActive']),
+      groupsFailed: _stringList(map['groupsFailed']),
+      unknownFiles: _stringList(map['unknownFiles']),
+      missingFiles: _stringList(map['missingFiles']),
+      errorCode: map['errorCode'] as String?,
+      errorMessage: map['errorMessage'] as String?,
+    );
+  }
+}
+
+List<String> _stringList(Object? value) {
+  final List<Object?>? raw = (value as List?)?.cast<Object?>();
+  if (raw == null) {
+    return const <String>[];
+  }
+  return raw.whereType<String>().toList();
 }
 
 /// Dato asociado (AAD) canónico para cifrar la clave de un destino.

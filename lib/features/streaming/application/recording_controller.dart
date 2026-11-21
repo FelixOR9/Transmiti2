@@ -259,6 +259,38 @@ class RecordingController extends ChangeNotifier {
   List<RecoveredSegmentInfo> get lastRecovery =>
       List<RecoveredSegmentInfo>.unmodifiable(_lastRecovery);
 
+  /// Resumen de la última reconciliación (0-d2): `null` antes de la
+  /// primera pasada. Lleva los huérfanos reconstruidos por Dart
+  /// (filas insertadas) fusionados.
+  ReconciliationSummary? _lastReconciliation;
+  ReconciliationSummary? get lastReconciliation => _lastReconciliation;
+
+  /// Estado de la puerta la última vez que se consultó (`running`
+  /// mientras la pasada corre: la biblioteca futura muestra
+  /// «Preparando biblioteca…» y no presenta datos hasta `DONE`).
+  ReconciliationState _reconciliationState =
+      ReconciliationState.notStarted;
+  ReconciliationState get reconciliationState => _reconciliationState;
+
+  /// Código de error de la última reconciliación fallida (`null` si
+  /// la última fue bien o aún no hubo ninguna). El fallo no es
+  /// final: se reintenta al volver a abrir la pantalla.
+  String? _reconciliationError;
+  String? get reconciliationError => _reconciliationError;
+
+  /// Filas pendientes de reconciliación (0-d2; U11/U14): ids cuya
+  /// fila falta (el `insertRecording` al iniciar falló) o cuya fila
+  /// está en `recording`/`finalizing` sin archivos que la respalden.
+  /// Nunca se inventan segmentos ni se borra la fila: la marca se
+  /// quita cuando una pasada posterior inserta o actualiza la fila.
+  final Set<String> _pendingReconciliationIds = <String>{};
+  Set<String> get pendingReconciliationIds =>
+      Set<String>.unmodifiable(_pendingReconciliationIds);
+
+  /// Filas insertadas por la última reconciliación (huérfanos, U10).
+  int _orphansReconstructed = 0;
+  int get orphansReconstructed => _orphansReconstructed;
+
   /// Instante (reloj de pared) en que empezó la grabación, para el
   /// tiempo transcurrido.
   int? _startedAtMs;
@@ -374,7 +406,72 @@ class RecordingController extends ChangeNotifier {
     text.writeln('Última etapa con error: ${diag.lastErrorStage ?? '—'}');
     if (_lastRecovery.isNotEmpty) {
       text.writeln(
-        'Recuperados: ${_lastRecovery.length} segmento(s) interrumpido(s)',
+        'Segmentos utilizables reconciliados: ${_lastRecovery.length}',
+      );
+    }
+    // Reconciliación (subetapa 0, grupo 0-d2): resumen de la última
+    // pasada (inicio/fin, grupos reservados, `skipped_active`,
+    // conflictos, tokens, liberaciones ajenas, huérfanos) y las filas
+    // pendientes (U11/U14). Mientras la puerta corre, la línea dice
+    // «preparando…»: la biblioteca no presenta datos hasta `DONE`
+    // (I6). Sin pasada todavía, no aparece ninguna línea: no se
+    // inventa un resumen. `recordingsDirState`/`attempt`/
+    // `writeTestDeleteFailed` y la duración medida de la resolución
+    // de ruta no viven aquí: son del arranque (`AppServices`, 0-b/
+    // 0-e); el controlador expone lo que recibe por el canal.
+    if (_reconciliationState == ReconciliationState.running &&
+        _lastReconciliation == null) {
+      text.writeln('Reconciliación: preparando…');
+    }
+    final ReconciliationSummary? reconciliation = _lastReconciliation;
+    if (reconciliation != null) {
+      text.writeln(
+        'Reconciliación: ${reconciliation.state.name} '
+        'run=${reconciliation.runId ?? '—'} '
+        '${reconciliation.durationMs}ms',
+      );
+      text.writeln(
+        'Grupos reconciliados: ${reconciliation.recordingsReconciled} '
+        'de ${reconciliation.groupsTotal}; '
+        'saltados (activos): '
+        '${reconciliation.groupsSkippedActive.join(', ')}; '
+        'fallidos: ${reconciliation.groupsFailed.join(', ')}',
+      );
+      text.writeln(
+        'Segmentos: renombrados ${reconciliation.segmentsRenamed}, '
+        'clasificados ${reconciliation.segmentsClassified}, '
+        'pendientes ${reconciliation.pending}, '
+        'cuarentena ${reconciliation.duplicatesQuarantined}',
+      );
+      text.writeln(
+        'Huérfanos reconstruidos (filas insertadas): '
+        '${reconciliation.orphansReconstructed}',
+      );
+      text.writeln(
+        'Tokens de reserva: ${reconciliation.reservationTokens.length} '
+        'grupo(s); liberaciones ajenas rechazadas: '
+        '${reconciliation.foreignReleaseRejected}; '
+        'conflictos: ${reconciliation.conflicts}; '
+        'huérfanos .write-test barridos: '
+        '${reconciliation.orphanWriteTestFiles}',
+      );
+      if (reconciliation.segmentsPending.isNotEmpty) {
+        text.writeln(
+          'Pendientes de verificación: '
+          '${reconciliation.segmentsPending.map((s) => '${s.recordingId} seg${s.segmentIndex}').join(', ')}',
+        );
+      }
+    }
+    if (_reconciliationError != null) {
+      text.writeln(
+        'Reconciliación: error $_reconciliationError '
+        '(se reintenta al volver a abrir)',
+      );
+    }
+    if (_pendingReconciliationIds.isNotEmpty) {
+      text.writeln(
+        'Filas pendientes de reconciliación: '
+        '${_pendingReconciliationIds.join(', ')}',
       );
     }
     // Segmentos verificados, uno por línea, con su estado, su duración
@@ -561,7 +658,7 @@ class RecordingController extends ChangeNotifier {
       // Re-sincronización al volver: el motor puede estar grabando
       // aunque esta UI no lo sepa (la grabación continuó por el FGS).
       unawaited(_resync());
-      unawaited(_recoverInterrupted());
+      unawaited(_reconcile());
     }
   }
 
@@ -636,48 +733,118 @@ class RecordingController extends ChangeNotifier {
     _startTimer();
   }
 
-  /// Clasifica los `.tmp.mp4` que quedaron de una muerte del proceso
-  /// y actualiza sus filas (`ready` si hay algún segmento utilizable,
-  /// `corrupt` si no). Nunca lanza ni borra nada.
-  Future<void> _recoverInterrupted() async {
-    List<RecoveredSegmentInfo> recovered;
+  /// Reconcilia las filas con la única pasada del proceso (0-d2;
+  /// sustituye a `_recoverInterrupted()`): llama a
+  /// `reconcileRecordings`, recibe el resumen por grupo y por cada
+  /// grupo inserta la fila si falta (U10) o `updateOnStop` si está
+  /// en `recording`/`finalizing`; si ya está en `ready`/`corrupt`,
+  /// la deja. Después marca las filas de `interrupted()` sin grupo
+  /// en el resultado (fila sin archivo, U11). Mejor esfuerzo: nunca
+  /// lanza; un fallo del canal deja las filas para la siguiente
+  /// pasada. La grabación activa nunca se toca: su grupo viene
+  /// `skipped_active` (o no viene) y su fila la actualiza `stop()`.
+  Future<void> _reconcile() async {
+    // La puerta está en `RUNNING` mientras se espera al canal: la
+    // biblioteca futura muestra «Preparando biblioteca…» y no
+    // presenta datos hasta `DONE` (U33/I6). Se fija ANTES de
+    // esperar, no al recibir el resultado.
+    _reconciliationState = ReconciliationState.running;
+    notifyListeners();
+    ReconciliationResult? result;
     try {
-      recovered = await _service.recoverInterruptedRecordings();
-    } on StreamingException {
-      return;
+      result = await _service.reconcileRecordings();
+    } on StreamingException catch (e) {
+      _reconciliationError = e.code;
+      _reconciliationState = ReconciliationState.failed;
+      result = null;
     }
-    if (recovered.isEmpty) {
-      return;
-    }
-    _lastRecovery = recovered;
-    final Map<String, List<RecoveredSegmentInfo>> byRecording =
-        <String, List<RecoveredSegmentInfo>>{};
-    for (final RecoveredSegmentInfo segment in recovered) {
-      byRecording
-          .putIfAbsent(segment.recordingId, () => <RecoveredSegmentInfo>[])
-          .add(segment);
-    }
-    for (final MapEntry<String, List<RecoveredSegmentInfo>> entry
-        in byRecording.entries) {
-      final bool usable = entry.value.any((s) => s.usable);
-      final int duration = entry.value
-          .where((s) => s.usable)
-          .fold<int>(0, (sum, s) => sum + (s.durationMs ?? 0));
-      final int size = entry.value
-          .where((s) => s.usable)
-          .fold<int>(0, (sum, s) => sum + s.sizeBytes);
-      try {
-        await _recordings.updateOnStop(
-          recordingId: entry.key,
-          status: usable ? 'ready' : 'corrupt',
-          durationMs: duration,
-          sizeBytes: size,
-          nowMs: _nowMs(),
-        );
-      } on Object {
-        // Mejor esfuerzo: la clasificación ya está en el evento y la
-        // fila se puede corregir al reabrir.
+    final Set<String> reconciledGroups = <String>{};
+    int orphans = 0;
+    if (result != null) {
+      _reconciliationState = result.state;
+      _reconciliationError = result.state == ReconciliationState.failed
+          ? result.errorCode
+          : null;
+      _lastRecovery = result.usableSegments;
+      final Map<String, List<RecoveredSegmentInfo>> byRecording =
+          <String, List<RecoveredSegmentInfo>>{};
+      for (final RecoveredSegmentInfo segment in result.segments) {
+        byRecording
+            .putIfAbsent(segment.recordingId, () => <RecoveredSegmentInfo>[])
+            .add(segment);
       }
+      for (final MapEntry<String, List<RecoveredSegmentInfo>> entry
+          in byRecording.entries) {
+        reconciledGroups.add(entry.key);
+        final bool usable = entry.value.any((s) => s.usable);
+        final int duration = entry.value
+            .where((s) => s.usable)
+            .fold<int>(0, (sum, s) => sum + (s.durationMs ?? 0));
+        final int size = entry.value
+            .where((s) => s.usable)
+            .fold<int>(0, (sum, s) => sum + s.sizeBytes);
+        final String status = usable ? 'ready' : 'corrupt';
+        try {
+          final RecordingRow? existing =
+              await _recordings.byRecordingId(entry.key);
+          if (existing == null) {
+            // Fila ausente (U10): se reconstruye desde sidecar +
+            // archivos; `partial` colapsa a `ready` en v2.
+            await _recordings.insertReconciledRow(
+              recordingId: entry.key,
+              status: status,
+              durationMs: duration,
+              sizeBytes: size,
+              nowMs: _nowMs(),
+            );
+            orphans++;
+          } else if (existing.status == 'recording' ||
+              existing.status == 'finalizing') {
+            await _recordings.updateOnStop(
+              recordingId: entry.key,
+              status: status,
+              durationMs: duration,
+              sizeBytes: size,
+              nowMs: _nowMs(),
+            );
+          }
+          // `ready`/`corrupt`/`deleted`: se deja como está.
+          _pendingReconciliationIds.remove(entry.key);
+        } on Object {
+          // Mejor esfuerzo: la clasificación ya está en el resumen
+          // y la fila se puede corregir al reabrir.
+        }
+      }
+      _orphansReconstructed = orphans;
+      _lastReconciliation = result.summary.copyWith(
+        orphansReconstructed: orphans,
+      );
+    }
+    // Filas en `recording`/`finalizing` sin grupo en el resultado
+    // (U11): quedan marcadas para reconciliación. No se inventan
+    // segmentos, no se borra la fila. La grabación en curso y los
+    // grupos `skipped_active` no se marcan: su fila la actualiza
+    // `stop()` y la siguiente pasada los reconcilia.
+    try {
+      final List<RecordingRow> pendingRows =
+          await _recordings.interrupted();
+      for (final RecordingRow row in pendingRows) {
+        final String id = row.recordingId;
+        if (reconciledGroups.contains(id)) {
+          continue;
+        }
+        if (result != null && result.groupsSkippedActive.contains(id)) {
+          continue;
+        }
+        if (_state != RecordingState.idle &&
+            _state != RecordingState.error &&
+            id == _recordingId) {
+          continue;
+        }
+        _pendingReconciliationIds.add(id);
+      }
+    } on Object {
+      // Mejor esfuerzo: sin filas no hay nada que marcar.
     }
     notifyListeners();
   }
@@ -792,6 +959,10 @@ class RecordingController extends ChangeNotifier {
           recordingId: id,
           exceptionClass: e.runtimeType.toString(),
         );
+        // U14: la grabación sigue y la fila queda marcada como
+        // «pendiente de reconciliación»: la siguiente pasada la
+        // reconstruye desde sidecar + archivos.
+        _pendingReconciliationIds.add(id);
       }
       if (_state == RecordingState.starting) {
         // El evento `recording_started` puede llegar después del

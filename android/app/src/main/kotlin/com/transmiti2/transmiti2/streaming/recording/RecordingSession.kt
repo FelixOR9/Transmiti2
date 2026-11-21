@@ -364,18 +364,6 @@ data class RecordingStatusSnapshot(
     )
 }
 
-/** Segmento interrumpido (`.tmp.mp4`) clasificado en la recuperación. */
-data class InterruptedSegmentInfo(
-    val recordingId: String,
-    val index: Int,
-    val fileName: String,
-    val filePath: String,
-    val status: SegmentStatus,
-    val durationMs: Long?,
-    val sizeBytes: Long,
-    val reason: String?,
-)
-
 /**
  * Caso de reconciliación de un segmento (subetapa 0, grupo 0-d1;
  * plan §2.5). C1–C2 confían en el sidecar (E1–E6); C3–C5 verifican;
@@ -3482,36 +3470,12 @@ open class RecordingSession(
     }
 
     /**
-     * Envoltura fina sobre [reconcileRecordings] (subetapa 0, grupo
-     * 0-d1): el canal y Dart aún usan este nombre y formato hasta que
-     * Dart migre en 0-d2. No hay dos implementaciones: toda la lógica
-     * vive en `reconcileRecordings()`. Filtra al formato antiguo:
-     * solo los segmentos que eran `.tmp` en el inventario (los
-     * «interrumpidos» que Dart ya conoce) y solo los certificados
-     * (`status` no nulo). Los `PENDING_VERIFICATION` no se emiten: no
-     * son utilizables ni corruptos; quedan listados en el resumen
-     * para reintento y 0-d2 los expondrá por el canal nuevo.
+     * La envoltura fina `recoverInterrupted()` (0-d1) se eliminó en
+     * 0-d2 con el renombre del canal a `reconcileRecordings()`: toda
+     * la lógica vive en [reconcileRecordings] y no hay dos caminos.
+     * Dart migra con ella (el controlador llama a
+     * `reconcileRecordings()` y recibe el resumen por grupo).
      */
-    open suspend fun recoverInterrupted(): List<InterruptedSegmentInfo> {
-        val summary = reconcileRecordings()
-        return summary.segments
-            .filter { it.wasStaging && it.status != null }
-            .map {
-                InterruptedSegmentInfo(
-                    recordingId = it.recordingId,
-                    index = it.index,
-                    fileName = it.fileName,
-                    filePath = it.filePath,
-                    status = it.status!!,
-                    durationMs = it.durationMs,
-                    sizeBytes = it.sizeBytes,
-                    reason = it.reason,
-                )
-            }
-            .sortedWith(
-                compareBy({ it.recordingId }, { it.index }),
-            )
-    }
 
     /** Libera encoder y muxer (cierre del motor). Idempotente. */
     open suspend fun release() {

@@ -945,7 +945,10 @@ class RecordingSessionTest {
             staging0.writeText("a")
             staging1.writeText("b")
             fakeVerifier.result = partialVerification()
-            val found = session.recoverInterrupted()
+            // 0-d2: la envoltura `recoverInterrupted()` se eliminó;
+            // el resumen lleva los segmentos reconciliados.
+            val summary = session.reconcileRecordings()
+            val found = summary.segments
             assertEquals(2, found.size)
             assertEquals("rec_1", found[0].recordingId)
             assertEquals(0, found[0].index)

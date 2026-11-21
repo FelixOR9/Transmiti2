@@ -3,7 +3,6 @@ package com.transmiti2.transmiti2.streaming
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.view.Surface
-import com.transmiti2.transmiti2.streaming.recording.InterruptedSegmentInfo
 import com.transmiti2.transmiti2.streaming.recording.RecordingException
 import com.transmiti2.transmiti2.streaming.recording.RecordingFileStore
 import com.transmiti2.transmiti2.streaming.recording.RecordingResult
@@ -11,6 +10,9 @@ import com.transmiti2.transmiti2.streaming.recording.RecordingSegmentResult
 import com.transmiti2.transmiti2.streaming.recording.RecordingSession
 import com.transmiti2.transmiti2.streaming.recording.RecordingStartedInfo
 import com.transmiti2.transmiti2.streaming.recording.RecordingStatusSnapshot
+import com.transmiti2.transmiti2.streaming.recording.ReconciledSegmentOutcome
+import com.transmiti2.transmiti2.streaming.recording.ReconciliationCase
+import com.transmiti2.transmiti2.streaming.recording.ReconciliationSummary
 import com.transmiti2.transmiti2.streaming.recording.SegmentStatus
 import com.transmiti2.transmiti2.streaming.recording.SegmentVerification
 import com.transmiti2.transmiti2.streaming.recording.SegmentVerifier
@@ -190,7 +192,29 @@ class StreamEngineRecordingTest {
         var fakeAudioReason: String? = null
         var startError: RecordingException? = null
         var stopResult: RecordingResult = RecordingResult.empty()
-        var recoverResult: List<InterruptedSegmentInfo> = emptyList()
+        /** Resumen que devuelve `reconcileRecordings()` (0-d2). */
+        var reconcileResult: ReconciliationSummary = ReconciliationSummary(
+            runId = "run-0",
+            startedAtMs = 0L,
+            finishedAtMs = 0L,
+            groupsTotal = 0,
+            groupsReconciled = 0,
+            groupsSkippedActive = emptyList(),
+            groupsFailed = emptyList(),
+            segments = emptyList(),
+            segmentsTrusted = 0,
+            segmentsVerified = 0,
+            segmentsRenamed = 0,
+            segmentsPending = emptyList(),
+            segmentsQuarantined = 0,
+            unknownFiles = emptyList(),
+            missingFiles = emptyList(),
+            orphanWriteTestFilesSwept = 0,
+            reservationTokens = emptyMap(),
+            foreignReleaseRejected = 0,
+            conflicts = 0,
+        )
+        var reconcileCalls = 0
         var startedInfo = RecordingStartedInfo(
             recordingId = "rec_20261118_120000_ab12",
             matchId = null,
@@ -256,8 +280,9 @@ class StreamEngineRecordingTest {
             return stopResult
         }
 
-        override suspend fun recoverInterrupted(): List<InterruptedSegmentInfo> {
-            return recoverResult
+        override suspend fun reconcileRecordings(): ReconciliationSummary {
+            reconcileCalls++
+            return reconcileResult
         }
     }
 
@@ -791,29 +816,61 @@ class StreamEngineRecordingTest {
     }
 
     @Test
-    fun `recuperar interrupciones delega en la sesion`() = runBlocking {
+    fun `reconciliar interrupciones delega en la sesion y expone el pendiente por el canal`() =
+        runBlocking {
         val fixture = Fixture()
-        fixture.recording.recoverResult = listOf(
-            InterruptedSegmentInfo(
-                recordingId = "rec_20261118_120000_ab12",
-                index = 0,
-                fileName = "rec_20261118_120000_ab12_seg000.tmp.mp4",
-                filePath = "/docs/recordings/" +
-                    "rec_20261118_120000_ab12_seg000.tmp.mp4",
-                status = SegmentStatus.PARTIAL,
-                durationMs = 4_400,
-                sizeBytes = 1_600_000,
-                reason = null,
+        fixture.recording.reconcileResult = ReconciliationSummary(
+            runId = "run-1",
+            startedAtMs = 1_000L,
+            finishedAtMs = 1_100L,
+            groupsTotal = 1,
+            groupsReconciled = 1,
+            groupsSkippedActive = emptyList(),
+            groupsFailed = emptyList(),
+            segments = listOf(
+                ReconciledSegmentOutcome(
+                    recordingId = "rec_20261118_120000_ab12",
+                    index = 0,
+                    fileName = "rec_20261118_120000_ab12_seg000.mp4",
+                    filePath = "/docs/recordings/" +
+                        "rec_20261118_120000_ab12_seg000.mp4",
+                    status = SegmentStatus.PARTIAL,
+                    case = ReconciliationCase.C2_TRUSTED_STAGING,
+                    durationMs = 4_400,
+                    sizeBytes = 1_600_000,
+                    reason = null,
+                    verified = false,
+                    trusted = true,
+                    renamed = true,
+                    wasStaging = true,
+                ),
             ),
+            segmentsTrusted = 1,
+            segmentsVerified = 0,
+            segmentsRenamed = 1,
+            segmentsPending = emptyList(),
+            segmentsQuarantined = 0,
+            unknownFiles = emptyList(),
+            missingFiles = emptyList(),
+            orphanWriteTestFilesSwept = 0,
+            reservationTokens = mapOf(
+                "rec_20261118_120000_ab12" to 1L,
+            ),
+            foreignReleaseRejected = 0,
+            conflicts = 0,
         )
         val engine = fixture.engine()
 
-        val recovered = engine.recoverInterruptedRecordings()
+        val summary = engine.reconcileRecordings()
 
-        assertEquals(1, recovered.size)
-        assertEquals(SegmentStatus.PARTIAL, recovered[0].status)
-        val map = engine.recoveredSegmentMap(recovered[0])
+        assertEquals(1, fixture.recording.reconcileCalls)
+        assertEquals(1, summary.segments.size)
+        assertEquals(SegmentStatus.PARTIAL, summary.segments[0].status)
+        val map = engine.reconciledSegmentMap(summary.segments[0])
         assertEquals("partial", map["status"])
         assertEquals(4_400L, map["durationMs"])
+        // El resumen por grupo viaja en el payload del canal.
+        val resultMap = engine.reconciliationResultMap(summary)
+        assertEquals("DONE", resultMap["state"])
     }
 }

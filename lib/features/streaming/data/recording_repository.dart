@@ -95,6 +95,23 @@ abstract class RecordingRepository {
     required int nowMs,
   });
 
+  /// Inserta la fila ausente de una grabación reconciliada (subetapa
+  /// 0, grupo 0-d2; U10): la fila se reconstruye desde sidecar +
+  /// archivos (status agregado, duración/tamaño sumados; `partial`
+  /// colapsa a `ready` en v2). `resolution`/`fps`/`videoBitrateBps`
+  /// no se conocen desde los archivos: NO se inventan; se omiten y
+  /// la tabla aplica sus `DEFAULT` (`'720p'`/30/2500000). La fila
+  /// nace ya clasificada (`ready` si hay algún segmento utilizable,
+  /// `corrupt` si no), nunca en `recording`: una fila reconciliada
+  /// no es una grabación en curso. Sin migración (v2).
+  Future<RecordingRow> insertReconciledRow({
+    required String recordingId,
+    required String status,
+    int? durationMs,
+    int? sizeBytes,
+    required int nowMs,
+  });
+
   /// Filas de grabaciones interrumpidas (`recording` o `finalizing`):
   /// la recuperación las clasifica al arrancar (plan §7.3).
   Future<List<RecordingRow>> interrupted();
@@ -177,6 +194,40 @@ class SqliteRecordingRepository implements RecordingRepository {
       return null;
     }
     return _fromRow(rows.first);
+  }
+
+  @override
+  Future<RecordingRow> insertReconciledRow({
+    required String recordingId,
+    required String status,
+    int? durationMs,
+    int? sizeBytes,
+    required int nowMs,
+  }) async {
+    if (!recordingRowStatuses.contains(status)) {
+      throw ArgumentError('Estado de grabación no admitido: $status');
+    }
+    if (status == 'recording' || status == 'finalizing') {
+      throw ArgumentError(
+        'Una fila reconciliada no puede nacer en curso: $status',
+      );
+    }
+    final String fileName = '${recordingId}_final.mp4';
+    final int id = await _db.insert('recordings', <String, Object?>{
+      'match_id': null,
+      'stream_session_id': null,
+      'file_path': p.join(recordingsDirPath, fileName),
+      'file_name': fileName,
+      // `resolution`/`fps`/`video_bitrate_bps` se omiten a propósito:
+      // la tabla aplica sus DEFAULT; no se inventan valores medidos.
+      'duration_ms': durationMs,
+      'size_bytes': sizeBytes,
+      'status': status,
+      'created_at_ms': nowMs,
+      'updated_at_ms': nowMs,
+    });
+    final RecordingRow? created = await byId(id);
+    return created!;
   }
 
   @override

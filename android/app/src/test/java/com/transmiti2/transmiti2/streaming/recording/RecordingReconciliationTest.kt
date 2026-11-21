@@ -464,8 +464,10 @@ class RecordingReconciliationTest {
             assertTrue(staging.exists())
             assertFalse(fileStore.segmentFile("rec_1", 0).exists())
             assertEquals(0, summary.segmentsRenamed)
-            // La envoltura antigua no lo emite: no es utilizable ni corrupto.
-            assertTrue(session.recoverInterrupted().isEmpty())
+            // 0-d2: los PENDING_VERIFICATION ya no se filtran a una
+            // lista aparte: viajan en el resumen (`segmentsPending`)
+            // y en el payload del canal con `status = "pending"`.
+            assertTrue(summary.segments.none { it.usable })
             // Reintento: la siguiente pasada vuelve a intentarlo.
             fakeVerifier.throwOnVerify = null
             fakeVerifier.result = readyVerification()

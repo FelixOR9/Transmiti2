@@ -186,4 +186,67 @@ void main() {
       isNull,
     );
   });
+
+  test('U10 insertReconciledRow reconstruye la fila con los DEFAULT '
+      'del esquema', () async {
+    final SqliteRecordingRepository repo = await open();
+
+    final RecordingRow row = await repo.insertReconciledRow(
+      recordingId: 'rec_20261118_110000_zz99',
+      status: 'ready',
+      durationMs: 5000,
+      sizeBytes: 1500000,
+      nowMs: 2000,
+    );
+
+    // La fila nace ya clasificada, con la ruta canónica, y sin
+    // valores inventados: resolución/fps/bitrate son los DEFAULT de
+    // la tabla (`'720p'`/30/2500000), no mediciones.
+    expect(row.status, 'ready');
+    expect(row.fileName, 'rec_20261118_110000_zz99_final.mp4');
+    expect(
+      row.filePath,
+      '/docs/recordings/rec_20261118_110000_zz99_final.mp4',
+    );
+    expect(row.durationMs, 5000);
+    expect(row.sizeBytes, 1500000);
+    expect(row.resolution, '720p');
+    expect(row.fps, 30);
+    expect(row.videoBitrateBps, 2500000);
+  });
+
+  test('insertReconciledRow rechaza nacer en recording o finalizing',
+      () async {
+    final SqliteRecordingRepository repo = await open();
+
+    expect(
+      () => repo.insertReconciledRow(
+        recordingId: 'rec_20261118_110000_zz99',
+        status: 'recording',
+        nowMs: 2000,
+      ),
+      throwsArgumentError,
+    );
+    expect(
+      () => repo.insertReconciledRow(
+        recordingId: 'rec_20261118_110000_zz99',
+        status: 'finalizing',
+        nowMs: 2000,
+      ),
+      throwsArgumentError,
+    );
+  });
+
+  test('insertReconciledRow rechaza un estado no admitido', () async {
+    final SqliteRecordingRepository repo = await open();
+
+    expect(
+      () => repo.insertReconciledRow(
+        recordingId: 'rec_20261118_110000_zz99',
+        status: 'partial',
+        nowMs: 2000,
+      ),
+      throwsArgumentError,
+    );
+  });
 }

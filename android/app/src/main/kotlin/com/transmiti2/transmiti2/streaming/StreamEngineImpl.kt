@@ -7,18 +7,23 @@ import android.view.Display
 import android.view.Surface
 import android.view.WindowManager
 import com.transmiti2.transmiti2.streaming.recording.DefaultSegmentVerifier
-import com.transmiti2.transmiti2.streaming.recording.InterruptedSegmentInfo
 import com.transmiti2.transmiti2.streaming.recording.RecordingException
 import com.transmiti2.transmiti2.streaming.recording.RecordingFileStore
 import com.transmiti2.transmiti2.streaming.recording.RecordingResult
 import com.transmiti2.transmiti2.streaming.recording.RecordingSession
 import com.transmiti2.transmiti2.streaming.recording.RecordingStatusSnapshot
+import com.transmiti2.transmiti2.streaming.recording.ReconciledSegmentOutcome
+import com.transmiti2.transmiti2.streaming.recording.ReconciliationSummary
+import com.transmiti2.transmiti2.streaming.recording.SegmentStatus
 import java.io.File
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -55,6 +60,34 @@ fun displayRotationDegrees(context: Context): Int {
 
 /** Fábrica de sesiones de vista previa (la de producción usa Camera2). */
 typealias PreviewSessionFactory = (SurfaceProducerHandle) -> PreviewSession
+
+/**
+ * Estado de la puerta única de reconciliación por proceso (subetapa 0,
+ * grupo 0-d2; plan §2.6). `NOT_STARTED` → `RUNNING` → `DONE` | `FAILED`.
+ */
+enum class ReconciliationGateState {
+    NOT_STARTED,
+    RUNNING,
+    DONE,
+    FAILED,
+}
+
+/** Motivo de una puerta en `FAILED` (código + mensaje; ambos viajan a Dart). */
+data class ReconciliationFailure(
+    val code: String,
+    val message: String,
+)
+
+/**
+ * La pasada de reconciliación de la puerta falló (o no pudo arrancar).
+ * El manejador la traduce a payload `FAILED` y Dart sigue reconciliando
+ * las filas desde `interrupted()` (U11/U34: nunca una lista falsa ni
+ * vacía como final).
+ */
+class ReconciliationFailedException(
+    val code: String,
+    message: String,
+) : Exception(message)
 
 /**
  * Motor de vista previa real (subetapa 3.1.1).
@@ -186,6 +219,339 @@ class StreamEngineImpl(
                     emitEvent = emit,
                 )
             }
+    }
+
+    /**
+     * Puerta única de reconciliación por proceso (subetapa 0, grupo
+     * 0-d2; plan §2.6, revisión 1 §4.2 con el papel reducido de la
+     * revisión 2 §2.4).
+     *
+     * Decisión de ubicación (plan §6 A1/A3): la puerta vive en el
+     * MOTOR, no en la sesión. La sesión es perezosa y su ciclo de
+     * vida es del motor; una puerta en la sesión se evaporaría si la
+     * sesión se recreara alguna vez (R-N4: registro nuevo vacío).
+     * El motor es el único dueño del `scope` y de la fábrica de la
+     * sesión, y el manejador ya lo tiene en la mano para el ancla A.
+     * La sesión sigue haciendo el trabajo (`reconcileRecordings()`);
+     * el motor solo posee el estado «una vez por proceso».
+     *
+     * Papel honesto: la puerta garantiza una ejecución por proceso y
+     * que quien la espera vea `DONE` (o `FAILED` con motivo). NO es
+     * la guarda de la carrera: la seguridad frente a una grabación
+     * activa la da el registro con tokens (0-c), no la puerta.
+     * Iniciar una grabación NO espera a la puerta.
+     */
+    private val _reconciliationState =
+        MutableStateFlow(ReconciliationGateState.NOT_STARTED)
+
+    /** Estado observable de la puerta (para la biblioteca futura). */
+    val reconciliationState: StateFlow<ReconciliationGateState>
+        get() = _reconciliationState
+
+    /**
+     * Serializa las transiciones de la puerta. Nunca se mantiene
+     * durante la reconciliación (la pasada corre sin el mutex tomado).
+     */
+    private val reconciliationGateMutex = Mutex()
+
+    /**
+     * Pasada en curso o última pasada. Se sustituye solo al reintentar
+     * desde `FAILED`: quien observaba la pasada fallida sigue viendo
+     * su fallo; quien llega después ve la nueva pasada.
+     */
+    private var reconciliationDeferred =
+        CompletableDeferred<ReconciliationSummary>()
+
+    /** Resumen de la última pasada que llegó a `DONE` (`null` antes). */
+    private var lastReconciliationSummary: ReconciliationSummary? = null
+
+    /** Motivo de la última pasada que llegó a `FAILED` (`null` si no). */
+    private var reconciliationFailure: ReconciliationFailure? = null
+
+    /**
+     * La pasada que espera quien llama a `reconcileRecordings()`
+     * (plan §2.6: `reconciliationDone`). Antes del primer disparo no
+     * completa nunca: nadie debe esperarla sin disparar antes (el
+     * disparo es `triggerReconciliation()` o la propia
+     * `reconcileRecordings()`).
+     */
+    val reconciliationDone: Deferred<ReconciliationSummary>
+        get() = reconciliationDeferred
+
+    /**
+     * Transición de la puerta bajo el mutex. Devuelve `true` solo si
+     * quien llama debe ejecutar la pasada: `NOT_STARTED` → `RUNNING`
+     * (primer disparo) y `FAILED` → `RUNNING` (reintento desde cero;
+     * el progreso parcial ya está en disco —sidecars— y la pasada
+     * converge). `RUNNING`/`DONE` → `false`: la pasada en curso o ya
+     * hecha es la que vale; no hay segunda reconciliación.
+     */
+    private fun transitionGateLocked(): Boolean {
+        return when (_reconciliationState.value) {
+            ReconciliationGateState.NOT_STARTED -> {
+                _reconciliationState.value = ReconciliationGateState.RUNNING
+                true
+            }
+            ReconciliationGateState.FAILED -> {
+                reconciliationDeferred = CompletableDeferred()
+                reconciliationFailure = null
+                lastReconciliationSummary = null
+                _reconciliationState.value = ReconciliationGateState.RUNNING
+                true
+            }
+            ReconciliationGateState.RUNNING,
+            ReconciliationGateState.DONE,
+            -> false
+        }
+    }
+
+    /**
+     * Dispara la reconciliación una sola vez por proceso (ancla A: el
+     * manejador la llama al materializar el motor; ancla B: la
+     * biblioteca futura la llama al abrirse). No espera: devuelve en
+     * cuanto la pasada está lanzada (o ya corría, o ya terminó).
+     * Nunca lanza: si no se puede ni lanzar la corrutina, la puerta
+     * queda en `FAILED` con motivo (guard_new_execution_path: el
+     * camino nuevo degrada al último comportamiento que funcionaba —
+     * motor sin reconciliar — en vez de romper la vista previa).
+     */
+    fun triggerReconciliation() {
+        try {
+            scope.launch {
+                val shouldRun = reconciliationGateMutex.withLock {
+                    transitionGateLocked()
+                }
+                if (shouldRun) {
+                    runReconciliation()
+                }
+            }
+        } catch (e: Exception) {
+            Transmiti2Logger.e(
+                "reconciliation: no se pudo lanzar: " +
+                    e.javaClass.simpleName,
+            )
+            failGate(
+                reconciliationDeferred,
+                ReconciliationFailure(
+                    code = StreamContract.RECONCILIATION_FAILED,
+                    message = "No se pudo lanzar la reconciliación.",
+                ),
+            )
+        }
+    }
+
+    /**
+     * Ejecuta la pasada y publica su resultado en la puerta. Nunca
+     * lanza fuera: cualquier excepción —incluida la cancelación del
+     * `scope`— deja la puerta en `FAILED` con motivo, para que nadie
+     * espere eternamente (rev. 1 R19–R23: la puerta que nunca llega
+     * a `DONE` es un fallo con reintento, no un cuelgue). La
+     * cancelación no se re-lanza: el `scope` ya la gestiona y la
+     * puerta debe quedar en estado terminal observable.
+     */
+    private suspend fun runReconciliation() {
+        // La pasada que completa este `run` es la vigente en el
+        // momento de arrancar: ninguna otra transición puede
+        // sustituirla mientras el estado es `RUNNING`.
+        val deferred = reconciliationDeferred
+        try {
+            val session = recordingSession
+            if (session == null) {
+                failGate(
+                    deferred,
+                    ReconciliationFailure(
+                        code = StreamContract.RECONCILIATION_UNAVAILABLE,
+                        message = "No hay sesión de grabación con la " +
+                            "que reconciliar (sin cámara ni textura).",
+                    ),
+                )
+                return
+            }
+            val summary = session.reconcileRecordings()
+            lastReconciliationSummary = summary
+            _reconciliationState.value = ReconciliationGateState.DONE
+            deferred.complete(summary)
+        } catch (e: CancellationException) {
+            failGate(
+                deferred,
+                ReconciliationFailure(
+                    code = StreamContract.RECONCILIATION_FAILED,
+                    message = "Reconciliación cancelada: " +
+                        (e.message ?: "cancelada"),
+                ),
+            )
+        } catch (e: Exception) {
+            Transmiti2Logger.e(
+                "reconciliation: la pasada falló: " +
+                    e.javaClass.simpleName,
+            )
+            failGate(
+                deferred,
+                ReconciliationFailure(
+                    code = StreamContract.RECONCILIATION_FAILED,
+                    message = e.message ?: "La reconciliación falló.",
+                ),
+            )
+        }
+    }
+
+    private fun failGate(
+        deferred: CompletableDeferred<ReconciliationSummary>,
+        failure: ReconciliationFailure,
+    ) {
+        reconciliationFailure = failure
+        _reconciliationState.value = ReconciliationGateState.FAILED
+        deferred.completeExceptionally(
+            ReconciliationFailedException(failure.code, failure.message),
+        )
+    }
+
+    /**
+     * Única entrada a la reconciliación (0-d2; sustituye a
+     * `recoverInterruptedRecordings()`). Dispara la pasada si no ha
+     * empezado (o reintenta si falló) y espera a la MISMA puerta que
+     * el ancla A: nunca hay dos pasadas. En `FAILED` lanza
+     * `ReconciliationFailedException` con el motivo (el manejador lo
+     * traduce a payload `FAILED`; Dart sigue reconciliando las filas
+     * desde `interrupted()`).
+     */
+    suspend fun reconcileRecordings(): ReconciliationSummary {
+        val shouldRun = reconciliationGateMutex.withLock {
+            transitionGateLocked()
+        }
+        if (shouldRun) {
+            runReconciliation()
+        }
+        return reconciliationDeferred.await()
+    }
+
+    /** Mapa de la puerta para `getReconciliationState` (0-d2). */
+    fun reconciliationStateMap(): Map<String, Any?> {
+        val state = _reconciliationState.value
+        val failure = reconciliationFailure
+        return mapOf(
+            "state" to state.name,
+            "summary" to lastReconciliationSummary?.let {
+                reconciliationSummaryMap(it)
+            },
+            "errorCode" to failure?.code,
+            "errorMessage" to failure?.message,
+        )
+    }
+
+    /**
+     * Mapa del resultado de `reconcileRecordings` para el canal
+     * (0-d2; forma fijada en ambos lados a la vez, plan §6 A4).
+     * `segments` lleva TODOS los segmentos del inventario con su
+     * estado certificado (`ready`/`partial`/`corrupt`) o `pending`
+     * (`PENDING_VERIFICATION`, C6: nunca utilizable ni corrupto).
+     * Los `PENDING_VERIFICATION` van también en
+     * `summary.segmentsPending` para reintento.
+     * `orphansReconstructed` no lo conoce Kotlin (las filas las
+     * inserta Dart): no viaja en este mapa; Dart lo rellena al
+     * reconciliar las filas.
+     */
+    fun reconciliationResultMap(
+        summary: ReconciliationSummary,
+    ): Map<String, Any?> {
+        return mapOf(
+            "state" to "DONE",
+            "summary" to reconciliationSummaryMap(summary),
+            "segments" to summary.segments.map { reconciledSegmentMap(it) },
+            "groupsSkippedActive" to summary.groupsSkippedActive,
+            "groupsFailed" to summary.groupsFailed,
+            "unknownFiles" to summary.unknownFiles,
+            "missingFiles" to summary.missingFiles,
+            "errorCode" to null,
+            "errorMessage" to null,
+        )
+    }
+
+    /** Mapa `FAILED` para `reconcileRecordings` cuando la puerta falla. */
+    fun reconciliationFailedMap(
+        failure: ReconciliationFailure,
+    ): Map<String, Any?> {
+        return mapOf(
+            "state" to "FAILED",
+            "summary" to null,
+            "segments" to emptyList<Any>(),
+            "groupsSkippedActive" to emptyList<Any>(),
+            "groupsFailed" to emptyList<Any>(),
+            "unknownFiles" to emptyList<Any>(),
+            "missingFiles" to emptyList<Any>(),
+            "errorCode" to failure.code,
+            "errorMessage" to failure.message,
+        )
+    }
+
+    /**
+     * Resumen en la forma del contrato Dart (`ReconciliationSummary`):
+     * los contadores nunca se inventan y las claves son las que
+     * `fromMap` lee. `claimToken` no existe a este nivel (el token
+     * del claim del grabador es privado de la sesión y la puerta no
+     * graba): los tokens viajan como mapa grupo → token
+     * (`reservationTokens`).
+     */
+    fun reconciliationSummaryMap(
+        summary: ReconciliationSummary,
+    ): Map<String, Any?> {
+        return mapOf(
+            "runId" to summary.runId,
+            "state" to "DONE",
+            "startedAtMs" to summary.startedAtMs,
+            "finishedAtMs" to summary.finishedAtMs,
+            "durationMs" to summary.durationMs,
+            "groupsTotal" to summary.groupsTotal,
+            "recordingsReconciled" to summary.groupsReconciled,
+            "segmentsRenamed" to summary.segmentsRenamed,
+            "segmentsClassified" to
+                summary.segmentsTrusted + summary.segmentsVerified,
+            "segmentsTrusted" to summary.segmentsTrusted,
+            "segmentsVerified" to summary.segmentsVerified,
+            "duplicatesQuarantined" to summary.segmentsQuarantined,
+            "pending" to summary.segmentsPending.size,
+            "segmentsPending" to summary.segmentsPending.map {
+                mapOf(
+                    "recordingId" to it.recordingId,
+                    "segmentIndex" to it.index,
+                    "fileName" to it.fileName,
+                    "reason" to it.reason,
+                )
+            },
+            "skipped_active" to summary.groupsSkippedActive.size,
+            "groupsSkippedActive" to summary.groupsSkippedActive,
+            "groupsFailed" to summary.groupsFailed,
+            "reservationTokens" to summary.reservationTokens,
+            "foreignReleaseRejected" to summary.foreignReleaseRejected,
+            "orphanWriteTestFiles" to summary.orphanWriteTestFilesSwept,
+            "conflicts" to summary.conflicts,
+        )
+    }
+
+    /** Mapa de un segmento reconciliado para el canal (0-d2). */
+    fun reconciledSegmentMap(
+        segment: ReconciledSegmentOutcome,
+    ): Map<String, Any?> {
+        return mapOf(
+            "recordingId" to segment.recordingId,
+            "segmentIndex" to segment.index,
+            "fileName" to segment.fileName,
+            "filePath" to segment.filePath,
+            "status" to when (segment.status) {
+                SegmentStatus.READY -> "ready"
+                SegmentStatus.PARTIAL -> "partial"
+                SegmentStatus.CORRUPT -> "corrupt"
+                null -> "pending"
+            },
+            "durationMs" to segment.durationMs,
+            "sizeBytes" to segment.sizeBytes,
+            "reason" to segment.reason,
+            "case" to segment.case.name,
+            "verified" to segment.verified,
+            "trusted" to segment.trusted,
+            "renamed" to segment.renamed,
+            "wasStaging" to segment.wasStaging,
+        )
     }
 
     /**
@@ -655,31 +1021,12 @@ class StreamEngineImpl(
     }
 
     /**
-     * Recupera los `.tmp.mp4` que quedaron de una muerte del proceso
-     * (plan §7.3). Delega en `RecordingSession.recoverInterrupted()`,
-     * envoltura fina sobre `reconcileRecordings()` (subetapa 0, grupo
-     * 0-d1): la reconciliación renombra los utilizables a `.mp4` y
-     * persiste cada verificación en el sidecar; nunca borra ni
-     * sobrescribe nada. Devuelve la lista clasificada para que Dart
-     * actualice las filas de `recordings`.
+     * La reconciliación vive en la puerta (0-d2): `reconcileRecordings()`
+     * más arriba dispara o espera la única pasada del proceso y
+     * `reconciliationResultMap()` construye su payload. El método
+     * antiguo `recoverInterruptedRecordings()` y `recoveredSegmentMap()`
+     * se eliminaron con el nombre de canal antiguo: no hay dos caminos.
      */
-    suspend fun recoverInterruptedRecordings(): List<InterruptedSegmentInfo> {
-        return recordingSession?.recoverInterrupted() ?: emptyList()
-    }
-
-    /** Mapa de un segmento recuperado para el canal de métodos. */
-    fun recoveredSegmentMap(segment: InterruptedSegmentInfo): Map<String, Any?> {
-        return mapOf(
-            "recordingId" to segment.recordingId,
-            "segmentIndex" to segment.index,
-            "fileName" to segment.fileName,
-            "filePath" to segment.filePath,
-            "status" to segment.status.name.lowercase(),
-            "durationMs" to segment.durationMs,
-            "sizeBytes" to segment.sizeBytes,
-            "reason" to segment.reason,
-        )
-    }
 
     /**
      * `true` cuando el FGS está disponible para grabar (hay sesión de

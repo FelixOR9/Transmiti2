@@ -52,8 +52,8 @@ class FakeStreamingService implements StreamingService {
   /// `recordingId` y cuenta las llamadas, salvo que
   /// `startRecordingError` fije un código de error para lanzar.
   /// `getRecordingStatus` devuelve `recordingStatus` (idle por
-  /// defecto) y `recoverInterruptedRecordings` devuelve
-  /// `recoveredSegments`.
+  /// defecto) y `reconcileRecordings` devuelve `reconciliationResult`
+  /// (pasada `DONE` vacía por defecto).
   String recordingId = 'rec_20261118_120000_ab12';
   String? startRecordingError;
   String? startRecordingErrorMessage;
@@ -95,8 +95,22 @@ class FakeStreamingService implements StreamingService {
   RecordingOptions? lastRecordingOptions;
   RecordingStatusSnapshot recordingStatus =
       RecordingStatusSnapshot.idle();
-  List<RecoveredSegmentInfo> recoveredSegments =
-      const <RecoveredSegmentInfo>[];
+
+  /// Reconciliación (subetapa 0, grupo 0-d2): lo que devuelve
+  /// `reconcileRecordings()` (pasada `DONE` vacía por defecto).
+  /// `reconciliationError` fija una excepción a lanzar en su lugar
+  /// (fallo del canal). `reconcileRecordingsOverride` sustituye la
+  /// implementación (para futuros controlables: puerta en `RUNNING`).
+  ReconciliationResult reconciliationResult =
+      const ReconciliationResult(state: ReconciliationState.done);
+  Object? reconciliationError;
+  Future<ReconciliationResult> Function()? reconcileRecordingsOverride;
+  int reconcileRecordingsCalls = 0;
+
+  /// Estado de la puerta que devuelve `getReconciliationState()`.
+  ReconciliationSummary reconciliationStateSummary =
+      const ReconciliationSummary(state: ReconciliationState.notStarted);
+  int getReconciliationStateCalls = 0;
 
   final StreamController<Map<String, Object?>> _eventsController =
       StreamController<Map<String, Object?>>.broadcast();
@@ -262,8 +276,24 @@ class FakeStreamingService implements StreamingService {
   }
 
   @override
-  Future<List<RecoveredSegmentInfo>> recoverInterruptedRecordings() async {
-    return List<RecoveredSegmentInfo>.unmodifiable(recoveredSegments);
+  Future<ReconciliationResult> reconcileRecordings() async {
+    reconcileRecordingsCalls++;
+    final Future<ReconciliationResult> Function()? override =
+        reconcileRecordingsOverride;
+    if (override != null) {
+      return override();
+    }
+    final Object? error = reconciliationError;
+    if (error != null) {
+      throw error;
+    }
+    return reconciliationResult;
+  }
+
+  @override
+  Future<ReconciliationSummary> getReconciliationState() async {
+    getReconciliationStateCalls++;
+    return reconciliationStateSummary;
   }
 
   /// Ruta canónica (subetapa 0, 3.1.4): por defecto devuelve
@@ -396,6 +426,10 @@ class InMemoryRecordingRepository implements RecordingRepository {
 
   List<RecordingRow> get rows => List<RecordingRow>.unmodifiable(_rows);
 
+  /// Si es `true`, `insertRecording` lanza (U14: la grabación sigue
+  /// y la fila queda marcada como pendiente de reconciliación).
+  bool failInsertRecording = false;
+
   @override
   Future<RecordingRow> insertRecording({
     required String recordingId,
@@ -405,6 +439,9 @@ class InMemoryRecordingRepository implements RecordingRepository {
     required int videoBitrateBps,
     required int nowMs,
   }) async {
+    if (failInsertRecording) {
+      throw StateError('Fallo simulado de insertRecording');
+    }
     final String fileName = '${recordingId}_final.mp4';
     final RecordingRow created = RecordingRow(
       id: _nextId++,
@@ -415,6 +452,43 @@ class InMemoryRecordingRepository implements RecordingRepository {
       fps: fps,
       videoBitrateBps: videoBitrateBps,
       status: 'recording',
+      createdAtMs: nowMs,
+      updatedAtMs: nowMs,
+    );
+    _rows.add(created);
+    return created;
+  }
+
+  @override
+  Future<RecordingRow> insertReconciledRow({
+    required String recordingId,
+    required String status,
+    int? durationMs,
+    int? sizeBytes,
+    required int nowMs,
+  }) async {
+    if (!recordingRowStatuses.contains(status)) {
+      throw ArgumentError('Estado de grabación no admitido: $status');
+    }
+    if (status == 'recording' || status == 'finalizing') {
+      throw ArgumentError(
+        'Una fila reconciliada no puede nacer en curso: $status',
+      );
+    }
+    // Espejo de los DEFAULT del esquema (`'720p'`/30/2500000): la
+    // producción los omite y la tabla los aplica; el falso los
+    // escribe explícitos con los mismos valores.
+    final String fileName = '${recordingId}_final.mp4';
+    final RecordingRow created = RecordingRow(
+      id: _nextId++,
+      filePath: '/docs/recordings/$fileName',
+      fileName: fileName,
+      resolution: '720p',
+      fps: 30,
+      videoBitrateBps: 2500000,
+      durationMs: durationMs,
+      sizeBytes: sizeBytes,
+      status: status,
       createdAtMs: nowMs,
       updatedAtMs: nowMs,
     );

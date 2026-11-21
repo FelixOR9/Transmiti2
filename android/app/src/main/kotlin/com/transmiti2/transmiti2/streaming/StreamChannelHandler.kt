@@ -171,7 +171,7 @@ internal fun recordingInfoMap(info: RecordingInfo): Map<String, Any?> {
  * `details` a Dart; solo instrumentación, sin corrección funcional.
  *
  * Fase B, 3.1.2: `startRecording`, `stopRecording`,
- * `getRecordingStatus` y `recoverInterruptedRecordings` son reales
+ * `getRecordingStatus` y `reconcileRecordings` son reales
  * (grabación local sin audio, FGS tipo `camera`); `startStream` sigue
  * devolviendo `not_available_in_phase_3_0` (Fase 3.2). En 3.1.3 el
  * audio pasa real al motor (plan §6 D8–D9): el escenario del FGS y el
@@ -200,7 +200,19 @@ class StreamChannelHandler(
 
     private var store: SecureCredentialStore? = null
 
-    /** Motor de vista previa real (3.1.1), creado perezosamente. */
+    /**
+     * Motor de vista previa real (3.1.1), creado perezosamente.
+     *
+     * Ancla A (subetapa 0, grupo 0-d2; plan §2.6): al materializarse
+     * el motor por primera vez se dispara la reconciliación, una
+     * sola vez por proceso, guardada por el estado de la puerta del
+     * motor. La creación del motor NO espera a que termine (el
+     * disparo es fire-and-forget; quien necesite el resultado espera
+     * a la puerta con `reconcileRecordings()`). Si el disparo falla,
+     * la vista previa sigue funcionando exactamente como antes: la
+     * puerta queda en `FAILED` con motivo y la reconciliación se
+     * reintenta al llamarla (guard_new_execution_path).
+     */
     private val previewEngine: StreamEngineImpl? by lazy {
         val registry = textureRegistry ?: return@lazy null
         val manager = cameraManager ?: return@lazy null
@@ -231,7 +243,16 @@ class StreamChannelHandler(
             context = context,
             cameraManager = manager,
             foregroundService = RealForegroundServiceControl(context),
-        )
+        ).also { engine ->
+            try {
+                engine.triggerReconciliation()
+            } catch (e: Exception) {
+                Transmiti2Logger.e(
+                    "reconciliation: el ancla A no pudo disparar: " +
+                        e.javaClass.simpleName,
+                )
+            }
+        }
     }
 
     /** Resultado pendiente de una solicitud de permisos en curso. */
@@ -297,8 +318,10 @@ class StreamChannelHandler(
             StreamContract.START_RECORDING -> startRecording(call, result)
             StreamContract.STOP_RECORDING -> stopRecording(result)
             StreamContract.GET_RECORDING_STATUS -> getRecordingStatus(result)
-            StreamContract.RECOVER_INTERRUPTED_RECORDINGS ->
-                recoverInterruptedRecordings(result)
+            StreamContract.RECONCILE_RECORDINGS ->
+                reconcileRecordings(result)
+            StreamContract.GET_RECONCILIATION_STATE ->
+                getReconciliationState(result)
             StreamContract.GET_RECORDINGS_DIR -> getRecordingsDir(call, result)
             StreamContract.START_STREAM ->
                 result.error(
@@ -559,32 +582,100 @@ class StreamChannelHandler(
     }
 
     /**
-     * Reconcilia los `.tmp.mp4` que quedaron de una muerte del proceso
-     * (Fase B, 3.1.2, plan §7.3; subetapa 0, grupo 0-d1): la
-     * reconciliación renombra los utilizables a `.mp4` y persiste cada
-     * verificación en el sidecar; nunca borra ni sobrescribe nada.
-     * Dart actualiza las filas de `recordings` con la clasificación.
+     * Reconcilia las grabaciones interrumpidas (subetapa 0, grupo
+     * 0-d2; sustituye a `recoverInterruptedRecordings()`).
+     *
+     * Ancla B (plan §2.6/§6 A3): forzar la materialización del motor
+     * y esperar a la MISMA puerta del ancla A. Acceder a
+     * `previewEngine` materializa el motor (y con él dispara la
+     * puerta); `engine.reconcileRecordings()` espera a esa pasada
+     * única, sin lanzar una segunda. Sin consumidor real en la 0
+     * (ReplaysScreen es placeholder): el mecanismo es este método
+     * de canal, que el controlador llama al arrancar y que la
+     * biblioteca futura (3.1.4-C) llamará al abrirse. No se simula
+     * ninguna biblioteca.
+     *
+     * El fallo de la puerta viaja DENTRO del payload (`state`
+     * `FAILED` + `errorCode`/`errorMessage`), nunca como
+     * `PlatformException`: Dart debe seguir reconciliando las filas
+     * desde `interrupted()` (U11/U34). Sin motor (sin cámara ni
+     * textura) no hay sesión que reconciliar: mismo payload `FAILED`
+     * con `reconciliation_unavailable`, nunca una lista vacía como
+     * éxito final.
      */
-    private fun recoverInterruptedRecordings(result: MethodChannel.Result) {
+    private fun reconcileRecordings(result: MethodChannel.Result) {
         val engine = previewEngine
         if (engine == null) {
-            result.success(mapOf<String, Any?>("recovered" to emptyList<Any>()))
+            result.success(
+                engineReconciliationUnavailableMap(),
+            )
             return
         }
         scope.launch {
             try {
-                val recovered = engine.recoverInterruptedRecordings()
+                val summary = engine.reconcileRecordings()
+                result.success(engine.reconciliationResultMap(summary))
+            } catch (e: ReconciliationFailedException) {
                 result.success(
-                    mapOf<String, Any?>(
-                        "recovered" to recovered.map {
-                            engine.recoveredSegmentMap(it)
-                        },
+                    engine.reconciliationFailedMap(
+                        ReconciliationFailure(e.code, e.message ?: ""),
                     ),
                 )
             } catch (e: Exception) {
-                failRecording(result, e)
+                Transmiti2Logger.e(
+                    "reconciliation: fallo inesperado del canal: " +
+                        e.javaClass.simpleName,
+                )
+                result.success(
+                    engine.reconciliationFailedMap(
+                        ReconciliationFailure(
+                            code = StreamContract.RECONCILIATION_FAILED,
+                            message = e.message
+                                ?: "La reconciliación falló.",
+                        ),
+                    ),
+                )
             }
         }
+    }
+
+    /**
+     * Estado de la puerta para `getReconciliationState` (0-d2).
+     * Observar el estado materializa el motor (ancla B) y con él
+     * dispara la puerta si aún no corría; la respuesta es el estado
+     * actual, nunca espera a `DONE`. Sin motor, `FAILED` con
+     * `reconciliation_unavailable`.
+     */
+    private fun getReconciliationState(result: MethodChannel.Result) {
+        val engine = previewEngine
+        if (engine == null) {
+            result.success(
+                mapOf<String, Any?>(
+                    "state" to ReconciliationGateState.FAILED.name,
+                    "summary" to null,
+                    "errorCode" to StreamContract.RECONCILIATION_UNAVAILABLE,
+                    "errorMessage" to "No hay motor de grabación en " +
+                        "este dispositivo (sin cámara ni textura).",
+                ),
+            )
+            return
+        }
+        result.success(engine.reconciliationStateMap())
+    }
+
+    private fun engineReconciliationUnavailableMap(): Map<String, Any?> {
+        return mapOf<String, Any?>(
+            "state" to ReconciliationGateState.FAILED.name,
+            "summary" to null,
+            "segments" to emptyList<Any>(),
+            "groupsSkippedActive" to emptyList<Any>(),
+            "groupsFailed" to emptyList<Any>(),
+            "unknownFiles" to emptyList<Any>(),
+            "missingFiles" to emptyList<Any>(),
+            "errorCode" to StreamContract.RECONCILIATION_UNAVAILABLE,
+            "errorMessage" to "No hay motor de grabación en este " +
+                "dispositivo (sin cámara ni textura).",
+        )
     }
 
     /**

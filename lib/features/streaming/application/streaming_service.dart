@@ -76,9 +76,22 @@ abstract class StreamingService {
   /// grabación continúa por el FGS aunque la UI se haya ido).
   Future<RecordingStatusSnapshot> getRecordingStatus();
 
-  /// Clasifica los `.tmp.mp4` que quedaron de una muerte del proceso
-  /// (Fase B, 3.1.2). Nunca borra ni modifica nada.
-  Future<List<RecoveredSegmentInfo>> recoverInterruptedRecordings();
+  /// Reconcilia las grabaciones interrumpidas (subetapa 0, grupo
+  /// 0-d2; sustituye a `recoverInterruptedRecordings()`). Dispara o
+  /// espera la única pasada de reconciliación del proceso y devuelve
+  /// el resumen por grupo con todos los segmentos (certificados o
+  /// `pending`). En `FAILED` el resultado lleva el motivo y los
+  /// segmentos vacíos: nunca una lista vacía como éxito final.
+  /// Una respuesta nula es un error de contrato
+  /// (`recordings_channel_contract_error`).
+  Future<ReconciliationResult> reconcileRecordings();
+
+  /// Estado actual de la puerta única de reconciliación
+  /// (`NOT_STARTED` → `RUNNING` → `DONE` | `FAILED`). Observar el
+  /// estado materializa el motor y dispara la puerta si aún no
+  /// corría; nunca espera a `DONE`. Una respuesta nula es un error
+  /// de contrato (`recordings_channel_contract_error`).
+  Future<ReconciliationSummary> getReconciliationState();
 
   /// Ruta canónica de grabaciones (subetapa 0, 3.1.4): la ruta
   /// absoluta `<filesDir>/recordings/` o un `PlatformException` con
@@ -312,22 +325,45 @@ class MethodChannelStreamingService implements StreamingService {
   }
 
   @override
-  Future<List<RecoveredSegmentInfo>> recoverInterruptedRecordings() async {
+  Future<ReconciliationResult> reconcileRecordings() async {
     try {
       final Map<Object?, Object?>? result = await _channel
           .invokeMapMethod<String, Object?>(
-            StreamContract.recoverInterruptedRecordings,
+            StreamContract.reconcileRecordings,
           );
       if (result == null) {
-        return const <RecoveredSegmentInfo>[];
+        throw const StreamingException(
+          StreamContract.recordingsChannelContractError,
+        );
       }
-      final List<Object?> raw =
-          (result['recovered'] as List?)?.cast<Object?>() ??
-          <Object?>[];
-      return raw
-          .whereType<Map<Object?, Object?>>()
-          .map(RecoveredSegmentInfo.fromMap)
-          .toList();
+      return ReconciliationResult.fromMap(result);
+    } on PlatformException catch (e) {
+      throw _fromPlatform(e);
+    }
+  }
+
+  @override
+  Future<ReconciliationSummary> getReconciliationState() async {
+    try {
+      final Map<Object?, Object?>? result = await _channel
+          .invokeMapMethod<String, Object?>(
+            StreamContract.getReconciliationState,
+          );
+      if (result == null) {
+        throw const StreamingException(
+          StreamContract.recordingsChannelContractError,
+        );
+      }
+      final ReconciliationState state =
+          ReconciliationState.fromWireName(result['state'] as String?);
+      final Map<Object?, Object?>? rawSummary =
+          result['summary'] as Map<Object?, Object?>?;
+      if (rawSummary == null) {
+        return ReconciliationSummary(state: state);
+      }
+      return ReconciliationSummary.fromMap(rawSummary).copyWith(
+        state: state,
+      );
     } on PlatformException catch (e) {
       throw _fromPlatform(e);
     }

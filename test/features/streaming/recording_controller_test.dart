@@ -693,18 +693,25 @@ void main() {
         nowMs: now,
       );
       recording.detach();
-      service.recoveredSegments = <RecoveredSegmentInfo>[
-        const RecoveredSegmentInfo(
-          recordingId: 'rec_20261118_110000_zz99',
-          index: 0,
-          fileName: 'rec_20261118_110000_zz99_seg000.tmp.mp4',
-          filePath:
-              '/docs/recordings/rec_20261118_110000_zz99_seg000.tmp.mp4',
-          status: 'partial',
-          durationMs: 4400,
-          sizeBytes: 1600000,
+      service.reconciliationResult = const ReconciliationResult(
+        state: ReconciliationState.done,
+        summary: ReconciliationSummary(
+          state: ReconciliationState.done,
+          recordingsReconciled: 1,
         ),
-      ];
+        segments: <RecoveredSegmentInfo>[
+          RecoveredSegmentInfo(
+            recordingId: 'rec_20261118_110000_zz99',
+            index: 0,
+            fileName: 'rec_20261118_110000_zz99_seg000.tmp.mp4',
+            filePath:
+                '/docs/recordings/rec_20261118_110000_zz99_seg000.tmp.mp4',
+            status: 'partial',
+            durationMs: 4400,
+            sizeBytes: 1600000,
+          ),
+        ],
+      );
       recording.attach();
       await tester.pump();
 

@@ -34,17 +34,20 @@ object StreamContract {
     const val STOP_ALL = "stopAll"
 
     /**
-     * Estado de la grabación y recuperación de interrupciones (Fase B,
-     * 3.1.2, componente 3): `getRecordingStatus` devuelve la
-     * instantánea del estado (`RecordingStatusSnapshot`) para
-     * re-sincronizar la UI al volver a la pantalla;
-     * `recoverInterruptedRecordings` reconcilia los `.tmp.mp4` que
-     * quedaron de una muerte del proceso y devuelve la lista
-     * clasificada (renombra los utilizables a `.mp4` y persiste cada
-     * verificación en el sidecar; nunca borra ni sobrescribe nada).
+     * Estado de la grabación y reconciliación de interrupciones
+     * (Fase B, 3.1.2, componente 3; subetapa 0, grupo 0-d2):
+     * `getRecordingStatus` devuelve la instantánea del estado
+     * (`RecordingStatusSnapshot`) para re-sincronizar la UI al volver
+     * a la pantalla; `reconcileRecordings` ejecuta (o espera, si ya
+     * corre) la única pasada de reconciliación del proceso y devuelve
+     * el resumen por grupo (renombres, clasificaciones, pendientes
+     * `PENDING_VERIFICATION`, `skipped_active`). El nombre antiguo
+     * `recoverInterruptedRecordings` se eliminó en 0-d2: no hay dos
+     * caminos; la envoltura fina `RecordingSession.recoverInterrupted()`
+     * se eliminó con él.
      */
     const val GET_RECORDING_STATUS = "getRecordingStatus"
-    const val RECOVER_INTERRUPTED_RECORDINGS = "recoverInterruptedRecordings"
+    const val RECONCILE_RECORDINGS = "reconcileRecordings"
 
     /**
      * Ruta canónica de grabaciones y estado de la puerta de
@@ -165,4 +168,21 @@ object StreamContract {
     const val RECORDINGS_CHANNEL_UNAVAILABLE = "recordings_channel_unavailable"
     const val RECORDINGS_CHANNEL_CONTRACT_ERROR = "recordings_channel_contract_error"
     const val RECORDINGS_CHANNEL_TIMEOUT = "recordings_channel_timeout"
+
+    /**
+     * Fallos de la puerta de reconciliación (subetapa 0, grupo 0-d2).
+     * `reconciliation_unavailable`: no hay sesión de grabación con
+     * la que reconciliar (motor sin `context` ni fábrica: sin
+     * cámara/textura en el dispositivo). `reconciliation_failed`: la
+     * pasada lanzó una excepción inesperada fuera de los grupos (los
+     * fallos por grupo no tumban la pasada y van en
+     * `groupsFailed` del resumen). Ambos viajan DENTRO del payload
+     * de `reconcileRecordings`/`getReconciliationState` (`state`
+     * `FAILED` + `errorCode`), nunca como `PlatformException`: el
+     * fallo de la puerta no es un error del canal y Dart debe seguir
+     * reconciliando las filas desde `interrupted()`. Espejo en
+     * `lib/features/streaming/domain/stream_contract.dart`.
+     */
+    const val RECONCILIATION_UNAVAILABLE = "reconciliation_unavailable"
+    const val RECONCILIATION_FAILED = "reconciliation_failed"
 }
