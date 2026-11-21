@@ -388,6 +388,10 @@ class RecordingSessionTest {
         /** Concurrencia observada dentro de `verify()`. */
         val currentConcurrent = AtomicInteger(0)
         val maxConcurrent = AtomicInteger(0)
+        /** Archivos verificados, en orden (0-d1: U36/I7). */
+        val verifiedFiles = mutableListOf<String>()
+        /** Bloqueo opcional al entrar en `verify()` (0-d1: U36/I7). */
+        var blockBeforeVerify: (() -> Unit)? = null
 
         override suspend fun verify(
             file: File,
@@ -404,6 +408,8 @@ class RecordingSessionTest {
             lastExpectedAudio = expectedAudio
             lastExpectedSampleRate = expectedSampleRate
             lastExpectedChannels = expectedChannels
+            synchronized(verifiedFiles) { verifiedFiles += file.name }
+            blockBeforeVerify?.invoke()
             val current = currentConcurrent.incrementAndGet()
             maxConcurrent.updateAndGet { max -> maxOf(max, current) }
             try {
@@ -470,7 +476,7 @@ class RecordingSessionTest {
     private lateinit var muxers: MutableList<FakeSessionMuxer>
     private lateinit var events: MutableList<Pair<String, Map<String, Any?>>>
     private lateinit var previewConfig: PreviewConfig
-    private var freeBytes: Long = Long.MAX_VALUE
+    private var freeBytes: Long? = Long.MAX_VALUE
     private var fixedClockMs: Long = 1_792_000_000_000L
 
     private fun buildSession(
@@ -479,6 +485,7 @@ class RecordingSessionTest {
         audioFormatTimeoutMs: Long = 2_000L,
         muxerFactory: ((String) -> RecordingMuxer)? = null,
         registry: ActiveRecordingRegistry = ActiveRecordingRegistry(),
+        freeSpaceBytes: (() -> Long?)? = null,
     ): RecordingSession {
         return RecordingSession(
             scope = CoroutineScope(Dispatchers.Unconfined),
@@ -505,7 +512,7 @@ class RecordingSessionTest {
                 AudioSetup(fakeAudioEncoder.config, "OMX.google.aac.encoder")
             },
             audioFormatTimeoutMs = audioFormatTimeoutMs,
-            freeSpaceBytes = { freeBytes },
+            freeSpaceBytes = freeSpaceBytes ?: { freeBytes },
             clockMs = { fixedClockMs },
             formatTimeoutMs = formatTimeoutMs,
             eosTimeoutMs = eosTimeoutMs,
@@ -723,6 +730,138 @@ class RecordingSessionTest {
     }
 
     @Test
+    fun `U20 StatFs que lanza en start da storage_check_unavailable sin encoder`() =
+        runBlocking {
+            val session = buildSession(
+                freeSpaceBytes = {
+                    throw IllegalStateException("statfs roto")
+                },
+            )
+            val thrown = assertThrows(RecordingException::class.java) {
+                runBlocking { startRecording(session) }
+            }
+            assertEquals(
+                StreamContract.STORAGE_CHECK_UNAVAILABLE,
+                thrown.code,
+            )
+            assertEquals("start", thrown.details["stage"])
+            assertEquals("free_space_check", thrown.details["check"])
+            assertEquals(
+                "IllegalStateException",
+                thrown.details["exceptionClass"],
+            )
+            assertNull(thrown.details["freeBytes"])
+            assertEquals(RecordingState.ERROR, session.currentState())
+            assertEquals(0, fakeEncoder.configureCalls)
+            // Sin encoder, sin segmento, sin fila: la re-validación
+            // V1–V4 pasó y el inicio no llegó a crear nada.
+            assertTrue(dir.listFiles().isNullOrEmpty())
+        }
+
+    @Test
+    fun `U20b espacio no medible en rotacion hace parada limpia`() =
+        runBlocking {
+            // Espacio medible al arrancar y `null` al llegar la
+            // rotación: el cambio se hace desde el propio lambda.
+            var calls = 0
+            val session = buildSession(
+                freeSpaceBytes = {
+                    calls++
+                    if (calls <= 1) 10L * 1024 * 1024 * 1024 else null
+                },
+            )
+            startRecording(session)
+            // Muestras cada 1 s; keyframe cada 2 s (como la rotación
+            // por keyframe a los 60 s).
+            for (second in 0..60) {
+                fakeEncoder.deliverSample(
+                    second * 1_000_000L,
+                    second % 2 == 0,
+                )
+            }
+            awaitState(session, RecordingState.ERROR)
+            val result = session.stop()
+            assertEquals(
+                StreamContract.STORAGE_CHECK_UNAVAILABLE,
+                result.errorCode,
+            )
+            // Segmentos previos intactos: el segmento 0 se cerró y
+            // su archivo existe.
+            assertEquals(1, result.segments.size)
+            assertTrue(File(dir, result.segments[0].fileName).exists())
+        }
+
+    @Test
+    fun `U20c espacio null nunca es storage_full ni lowStorageWarning`() =
+        runBlocking {
+            val session = buildSession(freeSpaceBytes = { null })
+            val thrown = assertThrows(RecordingException::class.java) {
+                runBlocking { startRecording(session) }
+            }
+            // El camino `null` es `storage_check_unavailable`, nunca
+            // `storage_full` (un `null` tratado como 0 caería ahí).
+            assertEquals(
+                StreamContract.STORAGE_CHECK_UNAVAILABLE,
+                thrown.code,
+            )
+            assertEquals(RecordingState.ERROR, session.currentState())
+            // Sin arranque no hay `RecordingStartedInfo`: el aviso
+            // `lowStorageWarning` nunca se calculó como `true`.
+            assertFalse(
+                eventTypes().contains(StreamContract.EVENT_RECORDING_STARTED),
+            )
+        }
+
+    @Test
+    fun `U21 start con directorio invalido se bloquea antes de ensureDir`() =
+        runBlocking {
+            // El directorio de grabación cuelga de un ARCHIVO: V2 no
+            // puede crear `<archivo>/recordings` → `mkdirs_failed`.
+            val blocker = File(dir, "bloqueador")
+            blocker.writeText("no es un directorio")
+            val badStore = RecordingFileStore(File(blocker, "recordings"))
+            val session = RecordingSession(
+                scope = CoroutineScope(Dispatchers.Unconfined),
+                fileStore = badStore,
+                verifier = fakeVerifier,
+                emitEvent = { type, payload ->
+                    synchronized(events) { events += type to payload }
+                },
+                encoderFactory = { fakeEncoder },
+                muxerFactory = { path ->
+                    FakeSessionMuxer(path).also { muxers += it }
+                },
+                capabilityCheck = { _, _, _, _ ->
+                    EncoderCapabilities(
+                        encoderName = "c2.qti.avc.encoder",
+                        profiles = listOf(1),
+                        levels = listOf(131072),
+                        cbrSupported = true,
+                        cameraSupportsSize = true,
+                    )
+                },
+                audioEncoderFactory = { fakeAudioEncoder },
+                audioCapabilityCheck = {
+                    AudioSetup(fakeAudioEncoder.config, "OMX.google.aac.encoder")
+                },
+                freeSpaceBytes = { freeBytes },
+                clockMs = { fixedClockMs },
+            )
+            val thrown = assertThrows(RecordingException::class.java) {
+                runBlocking { startRecording(session) }
+            }
+            assertEquals(
+                StreamContract.RECORDINGS_DIR_UNAVAILABLE,
+                thrown.code,
+            )
+            assertEquals("mkdirs_failed", thrown.details["stage"])
+            assertEquals(RecordingState.ERROR, session.currentState())
+            assertEquals(0, fakeEncoder.configureCalls)
+            assertEquals(0, muxers.size)
+            assertTrue(dir.listFiles()?.none { it.name.endsWith(".mp4") } ?: true)
+        }
+
+    @Test
     fun `sin formato del encoder en 5 s el inicio falla con encoder_error`() =
         runBlocking {
             fakeEncoder.deliverFormatOnStart = false
@@ -798,7 +937,7 @@ class RecordingSessionTest {
         }
 
     @Test
-    fun `recuperacion clasifica los tmp como partial sin borrarlos`() =
+    fun `recuperacion renombra los tmp utilizables y persiste el sidecar`() =
         runBlocking {
             val session = buildSession()
             val staging0 = fileStore.segmentStagingFile("rec_1", 0)
@@ -813,10 +952,19 @@ class RecordingSessionTest {
             assertEquals(1, found[1].index)
             assertEquals(SegmentStatus.PARTIAL, found[0].status)
             assertEquals(false, fakeVerifier.lastClosedCleanly)
-            // Los originales se conservan.
-            assertTrue(staging0.exists())
-            assertTrue(staging1.exists())
+            // 0-d1: la reconciliación repara (renombra) en vez de
+            // solo clasificar; nada se borra.
+            assertEquals("rec_1_seg000.mp4", found[0].fileName)
+            assertEquals("rec_1_seg001.mp4", found[1].fileName)
+            assertFalse(staging0.exists())
+            assertFalse(staging1.exists())
+            assertTrue(fileStore.segmentFile("rec_1", 0).exists())
+            assertTrue(fileStore.segmentFile("rec_1", 1).exists())
             assertEquals(2, fakeVerifier.verifyCalls)
+            val sidecar = fileStore.readSidecar("rec_1")
+            assertTrue(sidecar != null)
+            assertEquals(2, sidecar!!.segments.size)
+            assertTrue(sidecar.segments.all { it.status == "partial" })
         }
 
     @Test
@@ -2057,4 +2205,194 @@ class RecordingSessionTest {
             assertTrue(snapshot.activeClaims.isEmpty())
             assertTrue(snapshot.reservedGroups.isEmpty())
         }
+
+    // --- Subetapa 0, grupo 0-d1: renombre tras verificación (U3/U4),
+    // fileName y evidencia en el sidecar (U6), salto por reserva
+    // (U35), inicio durante la reconciliación (U36, I7). ---
+
+    @Test
+    fun `U3 renombre tras verificacion el sidecar refleja el nombre real`() =
+        runBlocking {
+            val session = buildSession()
+            val info = startRecording(session)
+            fakeEncoder.deliverSample(0L, true)
+            fakeEncoder.deliverSample(33_333L, false)
+            val result = session.stop()
+            assertEquals(1, result.segments.size)
+            assertEquals(SegmentStatus.READY, result.segments[0].status)
+            val final = fileStore.segmentFile(info.recordingId, 0)
+            assertTrue(final.exists())
+            assertFalse(fileStore.segmentStagingFile(info.recordingId, 0).exists())
+            val sidecar = fileStore.readSidecar(info.recordingId)
+            assertTrue(sidecar != null)
+            assertEquals(1, sidecar!!.segments.size)
+            assertEquals("${info.recordingId}_seg000.mp4", sidecar.segments[0].fileName)
+            assertEquals("ready", sidecar.segments[0].status)
+        }
+
+    @Test
+    fun `U4 renombre fallido parcial nunca ready y log especifico`() =
+        runBlocking {
+            val logs = mutableListOf<String>()
+            Transmiti2Logger.sink = { _, message ->
+                synchronized(logs) { logs += message }
+            }
+            val session = buildSession()
+            val info = startRecording(session)
+            fakeEncoder.deliverSample(0L, true)
+            fakeEncoder.deliverSample(33_333L, false)
+            // Destino ya ocupado: el renombre no puede sobrescribirlo.
+            fileStore.segmentFile(info.recordingId, 0).writeText("ocupado")
+            val result = session.stop()
+            assertEquals(1, result.segments.size)
+            assertEquals(SegmentStatus.PARTIAL, result.segments[0].status)
+            assertEquals("partial", result.status)
+            assertFalse(result.segments[0].closedCleanly)
+            assertTrue(logs.any { it.contains("renombre del segmento 0") })
+            assertTrue(fileStore.segmentStagingFile(info.recordingId, 0).exists())
+            assertEquals(
+                "ocupado",
+                fileStore.segmentFile(info.recordingId, 0).readText(),
+            )
+        }
+
+    @Test
+    fun `U6 fileName y evidencia de verificacion en el sidecar tras verifyAndRecord`() =
+        runBlocking {
+            val session = buildSession()
+            val info = startRecording(session)
+            fakeEncoder.deliverSample(0L, true)
+            fakeEncoder.deliverSample(33_333L, false)
+            session.stop()
+            val sidecar = fileStore.readSidecar(info.recordingId)
+            assertTrue(sidecar != null)
+            val entry = sidecar!!.segments[0]
+            assertEquals("${info.recordingId}_seg000.mp4", entry.fileName)
+            assertEquals("ready", entry.status)
+            assertEquals(3000L, entry.durationMs)
+            assertEquals(1_792_000_000_000L, entry.verifiedAtMs)
+            assertEquals(1, entry.verifierVersion)
+            assertNull(entry.verificationReason)
+            assertEquals(30.0, entry.fpsMeasured)
+        }
+
+    @Test
+    fun `U35 reconciliacion salta la grabacion activa por reserva no por id`() =
+        runBlocking {
+            val registry = ActiveRecordingRegistry()
+            val session = buildSession(registry = registry)
+            val info = startRecording(session)
+            fakeEncoder.deliverSample(0L, true)
+            // Otra grabación interrumpida en disco.
+            fileStore.segmentStagingFile("rec_9", 0).writeText("01234567890")
+            fakeVerifier.result = readyVerification()
+            val summary = session.reconcileRecordings()
+            assertEquals(listOf(info.recordingId), summary.groupsSkippedActive)
+            assertEquals(1, summary.groupsReconciled)
+            assertEquals(1, summary.segments.size)
+            assertEquals("rec_9", summary.segments[0].recordingId)
+            // El grupo activo no se toca: sigue en staging, sin verificar.
+            assertTrue(fileStore.segmentStagingFile(info.recordingId, 0).exists())
+            assertFalse(fileStore.segmentFile(info.recordingId, 0).exists())
+            assertFalse(fakeVerifier.verifiedFiles.any {
+                it.startsWith(info.recordingId)
+            })
+            // El claim sigue vivo en el registro: el salto fue por reserva.
+            val snapshot = registry.snapshot()
+            assertTrue(snapshot.activeClaims.containsKey(info.recordingId))
+            assertTrue(snapshot.reservedGroups.isEmpty())
+            // La grabación continúa y para con normalidad.
+            fakeEncoder.deliverSample(33_333L, false)
+            val result = session.stop()
+            assertEquals("ready", result.status)
+        }
+
+    @Test
+    fun `U36 grabacion que empieza durante la reconciliacion no espera y su tmp no se toca`() =
+        runBlocking {
+            val registry = ActiveRecordingRegistry()
+            val session = buildSession(registry = registry)
+            fileStore.segmentStagingFile("rec_old", 0).writeText("01234567890")
+            fakeVerifier.result = readyVerification()
+            val latch = CountDownLatch(1)
+            fakeVerifier.blockBeforeVerify = {
+                latch.await(10, TimeUnit.SECONDS)
+            }
+            val reconcileJob = async(Dispatchers.IO) {
+                session.reconcileRecordings()
+            }
+            // Esperar a que la reconciliación entre en la verificación.
+            withTimeout(5_000L) {
+                while (fakeVerifier.verifyCalls == 0) delay(10)
+            }
+            // El inicio con id nuevo completa sin esperar a la reconciliación.
+            val info = withTimeout(5_000L) { startRecording(session) }
+            assertEquals(RecordingState.RECORDING, session.currentState())
+            fakeEncoder.deliverSample(0L, true)
+            assertTrue(fileStore.segmentStagingFile(info.recordingId, 0).exists())
+            // Soltar la verificación y esperar a la reconciliación.
+            latch.countDown()
+            val summary = reconcileJob.await()
+            assertEquals(1, summary.groupsReconciled)
+            // El grupo nuevo nunca se procesó: no está en el resumen (el
+            // inventario ya había corrido) ni se verificó su `.tmp`.
+            assertTrue(summary.segments.none { it.recordingId == info.recordingId })
+            assertFalse(fakeVerifier.verifiedFiles.any {
+                it.startsWith(info.recordingId)
+            })
+            assertTrue(fileStore.segmentStagingFile(info.recordingId, 0).exists())
+            assertFalse(fileStore.segmentFile(info.recordingId, 0).exists())
+            fakeEncoder.deliverSample(33_333L, false)
+            val result = session.stop()
+            assertEquals("ready", result.status)
+        }
+
+    @Test
+    fun `I7 inicio simultaneo controlado la reserva protege el grupo y se libera en finally`() =
+        runBlocking {
+            val registry = ActiveRecordingRegistry()
+            val session = buildSession(registry = registry)
+            fileStore.segmentStagingFile("rec_old", 0).writeText("01234567890")
+            fakeVerifier.result = readyVerification()
+            val latch = CountDownLatch(1)
+            fakeVerifier.blockBeforeVerify = {
+                latch.await(10, TimeUnit.SECONDS)
+            }
+            val reconcileJob = async(Dispatchers.IO) {
+                session.reconcileRecordings()
+            }
+            withTimeout(5_000L) {
+                while (fakeVerifier.verifyCalls == 0) delay(10)
+            }
+            // (1) G está en `reservedGroups` con un token mientras el
+            // verificador está bloqueado.
+            val during = registry.snapshot()
+            val reserved = during.reservedGroups["rec_old"]
+            assertNotNull(reserved)
+            assertTrue(reserved!!.token > 0)
+            // (2) Ningún segundo intento de reservar G tiene éxito.
+            assertNull(registry.tryReserveGroup("rec_old", "reconcile:otro"))
+            assertNull(registry.tryClaimRecording("rec_old"))
+            // El inicio con id nuevo completa en ese instante.
+            val info = withTimeout(5_000L) { startRecording(session) }
+            fakeEncoder.deliverSample(0L, true)
+            assertEquals(RecordingState.RECORDING, session.currentState())
+            latch.countDown()
+            val summary = reconcileJob.await()
+            assertEquals(1, summary.groupsReconciled)
+            assertTrue(summary.segments.any { it.recordingId == "rec_old" })
+            assertTrue(summary.segments.none { it.recordingId == info.recordingId })
+            assertEquals(reserved.token, summary.reservationTokens["rec_old"])
+            // (3) Tras DONE, el token de G desaparece (liberación en
+            // `finally` verificada de extremo a extremo).
+            val after = registry.snapshot()
+            assertFalse(after.reservedGroups.containsKey("rec_old"))
+            assertEquals(info.recordingId, after.activeClaims.keys.single())
+            // El `.tmp` nuevo no aparece en ningún resultado.
+            assertTrue(fileStore.segmentStagingFile(info.recordingId, 0).exists())
+            fakeEncoder.deliverSample(33_333L, false)
+            val result = session.stop()
+            assertEquals("ready", result.status)
+        }
+
 }

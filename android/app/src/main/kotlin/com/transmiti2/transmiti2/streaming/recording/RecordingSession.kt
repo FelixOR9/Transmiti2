@@ -15,6 +15,7 @@ import com.transmiti2.transmiti2.streaming.StreamContract
 import com.transmiti2.transmiti2.streaming.Transmiti2Logger
 import java.io.File
 import java.nio.ByteBuffer
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -376,6 +377,132 @@ data class InterruptedSegmentInfo(
 )
 
 /**
+ * Caso de reconciliación de un segmento (subetapa 0, grupo 0-d1;
+ * plan §2.5). C1–C2 confían en el sidecar (E1–E6); C3–C5 verifican;
+ * C6 es lo no verificable (`PENDING_VERIFICATION`, estado local de
+ * reconciliación, no un `SegmentStatus`).
+ */
+enum class ReconciliationCase {
+    /** Confiable, `.mp4`: se confía en el `status` del sidecar. */
+    C1_TRUSTED_FINAL,
+    /** Confiable, `.tmp`: renombrado con guarda, se confía en el `status`. */
+    C2_TRUSTED_STAGING,
+    /** Incompleto (falta algún E1–E6): verificado. */
+    C3_INCOMPLETE,
+    /** Sin sidecar: verificado y registro creado. */
+    C4_NO_SIDECAR,
+    /** Contradictorio: verificado, campos sobrescritos con los medidos. */
+    C5_CONTRADICTORY,
+    /** No verificable: `PENDING_VERIFICATION`. */
+    C6_PENDING,
+}
+
+/** Resultado de reconciliar un segmento. */
+data class ReconciledSegmentOutcome(
+    val recordingId: String,
+    val index: Int,
+    /** Nombre real en disco tras la reconciliación. */
+    val fileName: String,
+    val filePath: String,
+    /**
+     * Estado certificado (`READY`/`PARTIAL`/`CORRUPT`); `null` ⟺
+     * `PENDING_VERIFICATION` (caso C6): nunca `ready`, nunca se
+     * elimina, excluido de lo utilizable, listado para reintento.
+     */
+    val status: SegmentStatus?,
+    val case: ReconciliationCase,
+    val durationMs: Long?,
+    val sizeBytes: Long,
+    val reason: String?,
+    /** El verificador corrió en esta pasada (C3–C5). */
+    val verified: Boolean,
+    /** El sidecar pasó E1–E6 sin verificar (C1–C2). */
+    val trusted: Boolean,
+    /** El `.tmp` pasó a `.mp4` en esta pasada. */
+    val renamed: Boolean,
+    /** El archivo era `.tmp.mp4` en el inventario. */
+    val wasStaging: Boolean,
+) {
+    /** Utilizable para reproducir (`ready` o `partial`). */
+    val usable: Boolean get() = status == SegmentStatus.READY ||
+        status == SegmentStatus.PARTIAL
+    /** `true` ⟺ `PENDING_VERIFICATION` (caso C6). */
+    val pending: Boolean get() = status == null
+}
+
+/** Referencia a un segmento pendiente de verificación (caso C6). */
+data class ReconciledSegmentRef(
+    val recordingId: String,
+    val index: Int,
+    val fileName: String,
+    val reason: String?,
+)
+
+/**
+ * Resumen de una pasada de reconciliación (subetapa 0, grupo 0-d1;
+ * plan §2.6 + instrumentación F7b): inicio/fin, grupos reservados,
+ * `skipped_active`, conflictos, tokens y contador de liberaciones
+ * ajenas. Lo consume el diagnóstico (y en 0-d2, el canal a Dart).
+ */
+data class ReconciliationSummary(
+    val runId: String,
+    val startedAtMs: Long,
+    val finishedAtMs: Long,
+    val groupsTotal: Int,
+    val groupsReconciled: Int,
+    val groupsSkippedActive: List<String>,
+    /** Grupos que fallaron con excepción (no tumban la pasada). */
+    val groupsFailed: List<String>,
+    val segments: List<ReconciledSegmentOutcome>,
+    val segmentsTrusted: Int,
+    val segmentsVerified: Int,
+    val segmentsRenamed: Int,
+    val segmentsPending: List<ReconciledSegmentRef>,
+    val segmentsQuarantined: Int,
+    val unknownFiles: List<String>,
+    val missingFiles: List<String>,
+    val orphanWriteTestFilesSwept: Int,
+    /** Grupo → token de reserva que lo procesó. */
+    val reservationTokens: Map<String, OwnershipToken>,
+    /** Liberaciones ajenas rechazadas por el registro (acumulado). */
+    val foreignReleaseRejected: Long,
+    /** Conflictos de destino duplicado encontrados. */
+    val conflicts: Int,
+) {
+    /** Duración medida de la pasada (ms). */
+    val durationMs: Long get() = finishedAtMs - startedAtMs
+
+    fun toMap(): Map<String, Any?> = mapOf(
+        "runId" to runId,
+        "startedAtMs" to startedAtMs,
+        "finishedAtMs" to finishedAtMs,
+        "durationMs" to durationMs,
+        "groupsTotal" to groupsTotal,
+        "groupsReconciled" to groupsReconciled,
+        "groupsSkippedActive" to groupsSkippedActive,
+        "groupsFailed" to groupsFailed,
+        "segmentsTrusted" to segmentsTrusted,
+        "segmentsVerified" to segmentsVerified,
+        "segmentsRenamed" to segmentsRenamed,
+        "segmentsPending" to segmentsPending.map {
+            mapOf(
+                "recordingId" to it.recordingId,
+                "segmentIndex" to it.index,
+                "fileName" to it.fileName,
+                "reason" to it.reason,
+            )
+        },
+        "segmentsQuarantined" to segmentsQuarantined,
+        "unknownFiles" to unknownFiles,
+        "missingFiles" to missingFiles,
+        "orphanWriteTestFilesSwept" to orphanWriteTestFilesSwept,
+        "reservationTokens" to reservationTokens,
+        "foreignReleaseRejected" to foreignReleaseRejected,
+        "conflicts" to conflicts,
+    )
+}
+
+/**
  * Configuración de audio decidida para una grabación (3.1.3): la
  * configuración AAC elegida por la escalera (§2 D1) y el nombre del
  * codificador AAC real. La produce `audioCapabilityCheck`; el nombre
@@ -507,9 +634,9 @@ open class RecordingSession(
      * una decodifica un segmento completo y prepara ExoPlayer en el
      * hilo principal). Con una a la vez, cada verificación dispone de
      * todo el presupuesto sin competir con la siguiente. La
-     * recuperación (`recoverInterrupted`) llama al verificador
-     * directamente, pero solo corre en `idle`, así que no puede
-     * solaparse con una rotación.
+     * reconciliación (`reconcileRecordings`) llama al verificador
+     * bajo este mutex, igual que `verifyAndRecord`, así que tampoco
+     * puede solaparse con una rotación.
      */
     private val verificationMutex = Mutex()
 
@@ -530,6 +657,13 @@ open class RecordingSession(
      * puede observar el token con otro id).
      */
     private var activeClaimToken: OwnershipToken? = null
+    /**
+     * Contador de pasadas de reconciliación (subetapa 0, grupo 0-d1):
+     * distingue dos pasadas en el diagnóstico (`owner =
+     * "reconcile:<runId>"`); la identidad es el token, nunca el
+     * `owner`.
+     */
+    private val reconcileRunCounter = AtomicLong(0)
     private var matchId: String? = null
     private var recordingStartWallMs: Long = 0
     private var previewSession: PreviewSession? = null
@@ -2172,6 +2306,41 @@ open class RecordingSession(
     }
 
     /**
+     * Renombre staging → final con un reintento (subetapa 0, grupo
+     * 0-d1): si el destino ya existe, no se reintenta (la guarda de
+     * `renameStagingToFinal` lo impide: nunca sobrescribir); si el
+     * primer intento falla por otra causa, log específico + un intento
+     * más; si sigue fallando, `false` y el llamador degrada
+     * (`closedCleanly = false` → como mucho `PARTIAL`, nunca `READY`,
+     * como hoy). Nunca lanza.
+     */
+    private fun renameStagingWithRetry(
+        staging: File,
+        final: File,
+        index: Int,
+    ): Boolean {
+        if (final.exists()) {
+            Transmiti2Logger.e(
+                "recording: renombre del segmento $index imposible: " +
+                    "el destino ${final.name} ya existe; el segmento " +
+                    "queda en staging como parcial, nunca ready",
+            )
+            return false
+        }
+        if (fileStore.renameStagingToFinal(staging, final)) return true
+        Transmiti2Logger.e(
+            "recording: renombre del segmento $index falló " +
+                "(${staging.name} -> ${final.name}), reintentando una vez",
+        )
+        if (fileStore.renameStagingToFinal(staging, final)) return true
+        Transmiti2Logger.e(
+            "recording: renombre del segmento $index falló de nuevo; " +
+                "el segmento queda en staging como parcial, nunca ready",
+        )
+        return false
+    }
+
+    /**
      * Cierra el segmento actual (hilo del encoder): `stop()` del
      * muxer, `release()` y renombrado del staging al nombre final.
      * Devuelve el segmento cerrado o `null` si no había muxer.
@@ -2211,9 +2380,20 @@ open class RecordingSession(
         segmentStagingFile = null
         val final = fileStore.segmentFile(id, index)
         val renamed = if (closedCleanly) {
-            fileStore.renameStagingToFinal(staging, final)
+            renameStagingWithRetry(staging, final, index)
         } else {
             false
+        }
+        if (renamed) {
+            // El sidecar debe reflejar el nombre real (0-d1, primer
+            // punto; `verifyAndRecord` lo repite defensivamente). Si
+            // la escritura falla, el sidecar queda con el nombre
+            // staging y la reconciliación lo corrige (C5).
+            scope.launch {
+                updateSegmentMetadata(index) {
+                    it.copy(fileName = final.name)
+                }
+            }
         }
         // Desplazamiento del primer PTS de audio respecto al origen
         // común (ms): `null` sin audio o sin primer PTS.
@@ -2281,12 +2461,26 @@ open class RecordingSession(
                 expectedChannels = closed.audioChannels,
             )
         }
+        // Invariante 3 (plan §2.8): un `.tmp` nunca es `ready`. El
+        // verificador real ya lo garantiza (`classifyIncomplete`),
+        // pero la sesión lo impone también aquí: si el cierre no fue
+        // limpio, un `READY` del verificador se degrada a `PARTIAL`.
+        // Sin este tope, un verificador que devolviera `READY` para
+        // un cierre no limpio colaría un `.tmp` como utilizable.
+        val effectiveStatus = if (
+            !closed.closedCleanly &&
+            verification.status == SegmentStatus.READY
+        ) {
+            SegmentStatus.PARTIAL
+        } else {
+            verification.status
+        }
         val result = RecordingSegmentResult(
             recordingId = closed.recordingId,
             index = closed.index,
             fileName = closed.fileName,
             filePath = closed.file.absolutePath,
-            status = verification.status,
+            status = effectiveStatus,
             durationMs = verification.checks.durationMs,
             sizeBytes = closed.file.length(),
             sampleCount = closed.sampleCount,
@@ -2313,6 +2507,10 @@ open class RecordingSession(
         synchronized(segmentResults) { segmentResults.add(result) }
         updateSegmentMetadata(closed.index) {
             it.copy(
+                // Segundo punto defensivo (0-d1): el sidecar refleja
+                // el nombre real tras el renombre (el primer punto es
+                // `closeCurrentSegment`).
+                fileName = closed.fileName,
                 status = result.status.name.lowercase(),
                 durationMs = result.durationMs,
                 sizeBytes = result.sizeBytes,
@@ -2321,6 +2519,12 @@ open class RecordingSession(
                 audioSampleCount = result.audioSampleCount,
                 audioStartOffsetMs = closed.audioStartOffsetMs,
                 audioReason = result.audioReason,
+                // Evidencia de verificación (0-d1, plan §2.5): la
+                // reconciliación confía en el sidecar solo con E1–E6.
+                verifiedAtMs = clockMs(),
+                verifierVersion = SegmentVerifier.VERIFIER_VERSION,
+                verificationReason = verification.reason,
+                fpsMeasured = verification.checks.fpsMeasured,
             )
         }
         emitEvent(StreamContract.EVENT_RECORDING_SEGMENT, result.toMap())
@@ -2660,52 +2864,653 @@ open class RecordingSession(
     }
 
     /**
-     * Recupera segmentos interrumpidos (plan §7.3, alcance mínimo):
-     * lista los `.tmp.mp4` que quedaron, los agrupa por grabación y
-     * clasifica cada uno con el verificador (sin modificar el
-     * original). La configuración esperada es `null` salvo que el
-     * sidecar la dé (en 3.1.2 no se lee el sidecar: la clasificación
-     * es por legibilidad). No borra nada; no fusiona (la fusión no se
-     * demostró en el spike).
+     * Reconciliación de grabaciones interrumpidas (subetapa 0, grupo
+     * 0-d1; plan §2.5–§2.6): inventario (sin lock) → agrupar por
+     * `recordingId` → por grupo, `tryReserveGroup(G)` del registro
+     * 0-c (`false` → `skipped_active`) → procesar sin el
+     * `coordinationMutex` tomado (verificar bajo `verificationMutex`
+     * como `verifyAndRecord`, renombrar con guarda, sidecar E1–E6,
+     * casos C1–C6) → `releaseGroup(G)` en `finally` siempre.
+     *
+     * - Nunca se borra ni se sobrescribe nada: los duplicados van a
+     *   cuarentena con timestamp y lo no verificable queda
+     *   `PENDING_VERIFICATION` (nunca `ready`, nunca se elimina,
+     *   excluido de lo utilizable, listado para reintento).
+     * - Idempotente: una segunda pasada confía en los sidecars que la
+     *   primera persistió (E1–E6) y no re-verifica.
+     * - Nunca bloquea una grabación: el grupo activo se salta por
+     *   reserva, no por comparación de id; un grupo que falla no
+     *   tumba la pasada (queda en `groupsFailed` y se reintenta en la
+     *   siguiente).
+     * - Dos pasadas concurrentes son seguras por construcción: el
+     *   registro reserva cada grupo para una sola (la otra lo ve
+     *   `skipped_active`). La puerta de ejecución única por proceso
+     *   es trabajo de 0-d2; aquí no se añade otro mutex (el
+     *   `coordinationMutex` es hoja y no se toma teniendo otro).
+     * - El barrido V4a de `.write-test-*.tmp` > 60 s corre también en
+     *   el inventario (segunda sede, plan §6 A12).
      */
-    open suspend fun recoverInterrupted(): List<InterruptedSegmentInfo> {
-        val staging = fileStore.listStagingFiles()
-        val result = mutableListOf<InterruptedSegmentInfo>()
-        for (file in staging) {
+    open suspend fun reconcileRecordings(): ReconciliationSummary {
+        val runId = "run-${reconcileRunCounter.incrementAndGet()}"
+        val startedAtMs = clockMs()
+        // Inventario (sin lock): `.tmp.mp4` + `.mp4` + `.json`. La
+        // reconciliación ignora `.write-test-*` por prefijo (nunca lo
+        // verifica ni lo renombra).
+        val finals = withContext(Dispatchers.IO) {
+            fileStore.listFinalSegmentFiles()
+        }
+        val stagings = withContext(Dispatchers.IO) {
+            fileStore.listStagingFiles()
+        }
+        val orphanWriteTestFilesSwept = withContext(Dispatchers.IO) {
+            fileStore.sweepWriteTestOrphans(clockMs())
+        }
+        val groups = mutableMapOf<String, MutableList<InventoryEntry>>()
+        val unknownFiles = mutableListOf<String>()
+        for (file in finals + stagings) {
             val parsed = RecordingFileStore.parseSegmentFileName(file.name)
-                ?: continue
+            if (parsed == null) {
+                // Los archivos de cuarentena ya tienen disposición y
+                // `.write-test-*` nunca es segmento: el resto va al
+                // cubo «desconocido» (p. ej. `<id>_final.mp4`): se
+                // lista, nunca se toca.
+                if (!file.name.contains(".quarantine-") &&
+                    !file.name.startsWith(".write-test-")
+                ) {
+                    unknownFiles += file.name
+                }
+                continue
+            }
             val (id, index) = parsed
-            val verification = try {
-                segmentVerifier.verify(
-                    file,
-                    closedCleanly = false,
-                    expectedWidth = null,
-                    expectedHeight = null,
-                    expectedFps = null,
-                )
-            } catch (e: Exception) {
-                Transmiti2Logger.e(
-                    "recording: no se pudo verificar ${file.name}: " +
-                        "${e.javaClass.simpleName}",
+            groups.getOrPut(id) { mutableListOf() } += InventoryEntry(
+                file = file,
+                index = index,
+                isStaging = file.name.endsWith(".tmp.mp4"),
+            )
+        }
+        val outcomes = mutableListOf<ReconciledSegmentOutcome>()
+        val skippedActive = mutableListOf<String>()
+        val failedGroups = mutableListOf<String>()
+        val tokens = mutableMapOf<String, OwnershipToken>()
+        val missingFiles = mutableListOf<String>()
+        var segmentsQuarantined = 0
+        var conflicts = 0
+        for ((groupId, entries) in groups.toSortedMap()) {
+            val token = registry.tryReserveGroup(
+                groupId,
+                "reconcile:$runId",
+            )
+            if (token == null) {
+                skippedActive += groupId
+                Transmiti2Logger.d(
+                    "reconciliation: grupo $groupId saltado " +
+                        "(grabación activa o reservada)",
                 )
                 continue
             }
-            result.add(
-                InterruptedSegmentInfo(
-                    recordingId = id,
+            tokens[groupId] = token
+            try {
+                val group = reconcileGroup(groupId, entries)
+                outcomes += group.outcomes
+                missingFiles += group.missingFiles
+                segmentsQuarantined += group.quarantined
+                conflicts += group.conflicts
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Un grupo que falla no tumba la pasada: queda
+                // registrado y se reintenta en la siguiente.
+                failedGroups += groupId
+                Transmiti2Logger.e(
+                    "reconciliation: grupo $groupId falló: " +
+                        "${e.javaClass.simpleName}",
+                )
+            } finally {
+                // Liberación en `finally` siempre, en
+                // `NonCancellable` (una cancelación no debe fugar la
+                // reserva: toda reconciliación futura de ese grupo
+                // daría `skipped_active`).
+                withContext(NonCancellable) {
+                    val released = registry.releaseGroup(groupId, token)
+                    if (released != ReleaseResult.RELEASED) {
+                        Transmiti2Logger.e(
+                            "reconciliation: liberación de $groupId " +
+                                "devolvió $released",
+                        )
+                    }
+                }
+            }
+        }
+        val finishedAtMs = clockMs()
+        return ReconciliationSummary(
+            runId = runId,
+            startedAtMs = startedAtMs,
+            finishedAtMs = finishedAtMs,
+            groupsTotal = groups.size,
+            groupsReconciled = tokens.size,
+            groupsSkippedActive = skippedActive,
+            groupsFailed = failedGroups,
+            segments = outcomes.sortedWith(
+                compareBy({ it.recordingId }, { it.index }, { it.fileName }),
+            ),
+            segmentsTrusted = outcomes.count { it.trusted },
+            segmentsVerified = outcomes.count { it.verified },
+            segmentsRenamed = outcomes.count { it.renamed },
+            segmentsPending = outcomes.filter { it.pending }.map {
+                ReconciledSegmentRef(
+                    recordingId = it.recordingId,
+                    index = it.index,
+                    fileName = it.fileName,
+                    reason = it.reason,
+                )
+            },
+            segmentsQuarantined = segmentsQuarantined,
+            unknownFiles = unknownFiles.sorted(),
+            missingFiles = missingFiles.sorted(),
+            orphanWriteTestFilesSwept = orphanWriteTestFilesSwept,
+            reservationTokens = tokens,
+            foreignReleaseRejected = registry.snapshot()
+                .foreignReleaseRejected,
+            conflicts = conflicts,
+        )
+    }
+
+    /**
+     * Reconcilia un grupo ya reservado (sin el `coordinationMutex`
+     * tomado). Finales primero: la disposición del `.mp4` decide el
+     * duplicado cuando el `.tmp` del mismo índice se renombra. Las
+     * entradas del sidecar sin archivo en disco no se borran: se
+     * listan en `missingFiles`.
+     */
+    private suspend fun reconcileGroup(
+        groupId: String,
+        entries: List<InventoryEntry>,
+    ): GroupReconciliation {
+        val baseSidecar = withContext(Dispatchers.IO) {
+            fileStore.readSidecar(groupId)
+        }
+        val sidecarEntries = mutableMapOf<Int, SegmentMetadata>()
+        baseSidecar?.segments?.forEach { sidecarEntries[it.index] = it }
+        val ordered = entries.sortedWith(
+            compareBy({ it.isStaging }, { it.index }),
+        )
+        val outcomes = mutableListOf<ReconciledSegmentOutcome>()
+        val counters = GroupCounters()
+        val finalOutcomeByIndex =
+            mutableMapOf<Int, ReconciledSegmentOutcome>()
+        val seenIndices = mutableSetOf<Int>()
+        for (entry in ordered) {
+            seenIndices += entry.index
+            val outcome = reconcileSegment(
+                groupId = groupId,
+                entry = entry,
+                baseSidecar = baseSidecar,
+                sidecarEntries = sidecarEntries,
+                finalOutcomeByIndex = finalOutcomeByIndex,
+                counters = counters,
+            ) ?: continue
+            // Si un staging renombrado desplazó al final del mismo
+            // índice (duplicado resuelto a su favor), el `outcome`
+            // del final queda obsoleto: su archivo está en
+            // cuarentena, no es un segmento.
+            if (outcome.wasStaging && outcome.renamed) {
+                outcomes.removeAll {
+                    it.index == outcome.index && !it.wasStaging
+                }
+            }
+            outcomes += outcome
+            if (!outcome.wasStaging) {
+                finalOutcomeByIndex[outcome.index] = outcome
+            }
+        }
+        val missingFiles = sidecarEntries.values
+            .filter { it.index !in seenIndices }
+            .map {
+                it.fileName.ifEmpty {
+                    fileStore.segmentFileName(groupId, it.index)
+                }
+            }
+        return GroupReconciliation(
+            outcomes = outcomes,
+            missingFiles = missingFiles,
+            quarantined = counters.quarantined,
+            conflicts = counters.conflicts,
+        )
+    }
+
+    /**
+     * Reconcilia un archivo del inventario (casos C1–C6, plan §2.5).
+     * Devuelve `null` solo cuando el archivo quedó en cuarentena (el
+     * final del mismo índice ganó el duplicado): su `outcome` ya
+     * existe y el archivo ya no es un segmento.
+     */
+    private suspend fun reconcileSegment(
+        groupId: String,
+        entry: InventoryEntry,
+        baseSidecar: RecordingMetadata?,
+        sidecarEntries: MutableMap<Int, SegmentMetadata>,
+        finalOutcomeByIndex: Map<Int, ReconciledSegmentOutcome>,
+        counters: GroupCounters,
+    ): ReconciledSegmentOutcome? {
+        val file = entry.file
+        val index = entry.index
+        val sidecarEntry = sidecarEntries[index]
+        // C1–C2: E1–E6 completos → confiar sin verificar.
+        if (sidecarEntry != null && isTrustedSidecar(sidecarEntry, file)) {
+            val status = if (sidecarEntry.status == "ready") {
+                SegmentStatus.READY
+            } else {
+                SegmentStatus.PARTIAL
+            }
+            if (!entry.isStaging) {
+                return ReconciledSegmentOutcome(
+                    recordingId = groupId,
                     index = index,
                     fileName = file.name,
                     filePath = file.absolutePath,
-                    status = verification.status,
-                    durationMs = verification.checks.durationMs,
+                    status = status,
+                    case = ReconciliationCase.C1_TRUSTED_FINAL,
+                    durationMs = sidecarEntry.durationMs,
                     sizeBytes = file.length(),
-                    reason = verification.reason,
-                ),
+                    reason = sidecarEntry.verificationReason,
+                    verified = false,
+                    trusted = true,
+                    renamed = false,
+                    wasStaging = false,
+                )
+            }
+            val rename = renameUsableStaging(
+                groupId = groupId,
+                staging = file,
+                index = index,
+                finalOutcomeByIndex = finalOutcomeByIndex,
+                counters = counters,
+            )
+            if (rename.quarantined) return null
+            val finalStatus = if (rename.renamed) {
+                status
+            } else {
+                SegmentStatus.PARTIAL
+            }
+            sidecarEntries[index] = sidecarEntry.copy(
+                fileName = rename.fileName,
+                status = finalStatus.name.lowercase(),
+            )
+            persistGroupSidecar(groupId, baseSidecar, sidecarEntries)
+            return ReconciledSegmentOutcome(
+                recordingId = groupId,
+                index = index,
+                fileName = rename.fileName,
+                filePath = rename.file.absolutePath,
+                status = finalStatus,
+                case = ReconciliationCase.C2_TRUSTED_STAGING,
+                durationMs = sidecarEntry.durationMs,
+                sizeBytes = rename.file.length(),
+                reason = rename.reason
+                    ?: sidecarEntry.verificationReason,
+                verified = false,
+                trusted = true,
+                renamed = rename.renamed,
+                wasStaging = true,
             )
         }
-        return result.sortedWith(
-            compareBy({ it.recordingId }, { it.index }),
+        // C3/C4/C5: verificar (C4 sin sidecar; C5 contradictorio;
+        // C3 incompleto). `closedCleanly` por extensión (`.mp4` →
+        // `true`, `.tmp` → `false`); esperados del sidecar si
+        // existen, si no `null`.
+        val case = when {
+            sidecarEntry == null -> ReconciliationCase.C4_NO_SIDECAR
+            isContradictorySidecar(sidecarEntry, file) ->
+                ReconciliationCase.C5_CONTRADICTORY
+            else -> ReconciliationCase.C3_INCOMPLETE
+        }
+        val verification = try {
+            verificationMutex.withLock {
+                segmentVerifier.verify(
+                    file,
+                    closedCleanly = !entry.isStaging,
+                    expectedWidth = baseSidecar?.width?.takeIf { it > 0 },
+                    expectedHeight = baseSidecar?.height?.takeIf { it > 0 },
+                    expectedFps = baseSidecar?.fps?.takeIf { it > 0 },
+                    expectedAudio = sidecarEntry?.audioExpected
+                        ?: baseSidecar?.audioEnabled?.takeIf { it },
+                    expectedSampleRate = baseSidecar?.audioSampleRate,
+                    expectedChannels = baseSidecar?.audioChannels,
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // C6: no verificable → PENDING_VERIFICATION. Nunca
+            // `ready`, nunca se elimina, excluido de lo utilizable,
+            // listado para reintento. No es un fallo del grupo.
+            Transmiti2Logger.e(
+                "reconciliation: no se pudo verificar ${file.name}: " +
+                    "${e.javaClass.simpleName}",
+            )
+            return ReconciledSegmentOutcome(
+                recordingId = groupId,
+                index = index,
+                fileName = file.name,
+                filePath = file.absolutePath,
+                status = null,
+                case = ReconciliationCase.C6_PENDING,
+                durationMs = sidecarEntry?.durationMs,
+                sizeBytes = file.length(),
+                reason = e.javaClass.simpleName,
+                verified = false,
+                trusted = false,
+                renamed = false,
+                wasStaging = entry.isStaging,
+            )
+        }
+        // Invariante 3 (igual que en `verifyAndRecord`): un `.tmp`
+        // nunca es `ready`.
+        val status = if (
+            entry.isStaging &&
+            verification.status == SegmentStatus.READY
+        ) {
+            SegmentStatus.PARTIAL
+        } else {
+            verification.status
+        }
+        val usable = status == SegmentStatus.READY ||
+            status == SegmentStatus.PARTIAL
+        val measured = SegmentMetadata(
+            index = index,
+            fileName = file.name,
+            firstEncoderPtsUs = sidecarEntry?.firstEncoderPtsUs,
+            startWallMs = sidecarEntry?.startWallMs ?: file.lastModified(),
+            status = status.name.lowercase(),
+            durationMs = verification.checks.durationMs,
+            sizeBytes = file.length(),
+            audioExpected = sidecarEntry?.audioExpected
+                ?: verification.checks.hasAudioTrack,
+            hasAudio = verification.checks.hasAudioTrack,
+            audioDurationMs = verification.checks.audioDurationMs,
+            audioSampleCount = verification.checks.audioSampleCount,
+            audioStartOffsetMs = sidecarEntry?.audioStartOffsetMs,
+            audioReason = sidecarEntry?.audioReason,
+            verifiedAtMs = clockMs(),
+            verifierVersion = SegmentVerifier.VERIFIER_VERSION,
+            verificationReason = verification.reason,
+            fpsMeasured = verification.checks.fpsMeasured,
         )
+        sidecarEntries[index] = measured
+        persistGroupSidecar(groupId, baseSidecar, sidecarEntries)
+        var currentFile = file
+        var currentFileName = file.name
+        var renamed = false
+        var renameReason: String? = null
+        if (usable && entry.isStaging) {
+            val rename = renameUsableStaging(
+                groupId = groupId,
+                staging = file,
+                index = index,
+                finalOutcomeByIndex = finalOutcomeByIndex,
+                counters = counters,
+            )
+            if (rename.quarantined) return null
+            currentFile = rename.file
+            currentFileName = rename.fileName
+            renamed = rename.renamed
+            renameReason = rename.reason
+            if (renamed || renameReason != null) {
+                // El renombre (o su fallo) cambia el nombre o el
+                // estado del sidecar: persistir de nuevo.
+                sidecarEntries[index] = measured.copy(
+                    fileName = currentFileName,
+                    status = if (renamed) {
+                        status.name.lowercase()
+                    } else {
+                        SegmentStatus.PARTIAL.name.lowercase()
+                    },
+                    sizeBytes = currentFile.length(),
+                )
+                persistGroupSidecar(groupId, baseSidecar, sidecarEntries)
+            }
+        }
+        val finalStatus = if (!renamed && entry.isStaging && usable) {
+            // El renombre falló: queda `.tmp`, parcial (nunca ready).
+            SegmentStatus.PARTIAL
+        } else {
+            status
+        }
+        return ReconciledSegmentOutcome(
+            recordingId = groupId,
+            index = index,
+            fileName = currentFileName,
+            filePath = currentFile.absolutePath,
+            status = finalStatus,
+            case = case,
+            durationMs = verification.checks.durationMs,
+            sizeBytes = currentFile.length(),
+            reason = renameReason ?: verification.reason,
+            verified = true,
+            trusted = false,
+            renamed = renamed,
+            wasStaging = entry.isStaging,
+        )
+    }
+
+    /**
+     * Confianza en sidecars E1–E6 (plan §2.5): un segmento es
+     * previamente verificado si y solo si el sidecar tiene TODOS
+     * E1–E6. E3 (tamaño) es consistencia, nunca suficiente por sí
+     * sola. La consistencia de audio (`ready` + audio esperado sin
+     * audio medido) es contradictoria → no confiable.
+     */
+    private fun isTrustedSidecar(
+        entry: SegmentMetadata,
+        file: File,
+    ): Boolean {
+        if (entry.status != "ready" && entry.status != "partial") {
+            return false // E1
+        }
+        val durationMs = entry.durationMs ?: return false // E2
+        if (durationMs <= 0) return false
+        if (entry.sizeBytes != file.length()) return false // E3
+        if (entry.fileName != file.name) return false // E4
+        if (entry.verifiedAtMs == null) return false // E5
+        if (entry.verifierVersion != SegmentVerifier.VERIFIER_VERSION) {
+            return false // E6
+        }
+        if (entry.status == "ready" && entry.audioExpected &&
+            (!entry.hasAudio || entry.audioSampleCount == null)
+        ) {
+            return false // audio contradictorio
+        }
+        return true
+    }
+
+    /**
+     * Sidecar contradictorio (caso C5): algún campo evaluable no
+     * cuadra con el disco o con la versión actual. Si ningún campo
+     * evaluable falla pero falta alguno (C3), devuelve `false`.
+     */
+    private fun isContradictorySidecar(
+        entry: SegmentMetadata,
+        file: File,
+    ): Boolean {
+        if (entry.sizeBytes != null && entry.sizeBytes != file.length()) {
+            return true
+        }
+        if (entry.fileName.isNotEmpty() && entry.fileName != file.name) {
+            return true
+        }
+        if (entry.verifierVersion != null &&
+            entry.verifierVersion != SegmentVerifier.VERIFIER_VERSION
+        ) {
+            return true
+        }
+        if (entry.status != null &&
+            entry.status != "ready" && entry.status != "partial"
+        ) {
+            return true
+        }
+        if (entry.status == "ready" && entry.audioExpected &&
+            (!entry.hasAudio || entry.audioSampleCount == null)
+        ) {
+            return true
+        }
+        return false
+    }
+
+    /**
+     * Renombra un staging utilizable al nombre final, con guarda de
+     * destino duplicado (plan §2.5): si el `.mp4` ya existe, se
+     * verifica ambos (el staging es utilizable; el final lo es si su
+     * `outcome` lo dice), se conserva el verificado y el otro va a
+     * cuarentena con timestamp; nunca se sobrescribe.
+     */
+    private fun renameUsableStaging(
+        groupId: String,
+        staging: File,
+        index: Int,
+        finalOutcomeByIndex: Map<Int, ReconciledSegmentOutcome>,
+        counters: GroupCounters,
+    ): StagingRename {
+        val final = fileStore.segmentFile(groupId, index)
+        if (!final.exists()) {
+            return if (fileStore.renameStagingToFinal(staging, final)) {
+                StagingRename(
+                    fileName = final.name,
+                    file = final,
+                    renamed = true,
+                    quarantined = false,
+                    reason = null,
+                )
+            } else {
+                Transmiti2Logger.e(
+                    "reconciliation: renombre de ${staging.name} " +
+                        "falló; queda .tmp como parcial, nunca ready",
+                )
+                StagingRename(
+                    fileName = staging.name,
+                    file = staging,
+                    renamed = false,
+                    quarantined = false,
+                    reason = "rename_failed",
+                )
+            }
+        }
+        counters.conflicts++
+        val finalVerified = finalOutcomeByIndex[index]?.usable == true
+        return when (
+            fileStore.resolveDuplicateDestination(
+                staging = staging,
+                final = final,
+                stagingVerified = true,
+                finalVerified = finalVerified,
+            )
+        ) {
+            DuplicateResolution.STAGING_KEPT -> {
+                counters.quarantined++
+                StagingRename(
+                    fileName = final.name,
+                    file = final,
+                    renamed = true,
+                    quarantined = false,
+                    reason = null,
+                )
+            }
+            DuplicateResolution.FINAL_KEPT -> {
+                counters.quarantined++
+                StagingRename(
+                    fileName = staging.name,
+                    file = staging,
+                    renamed = false,
+                    quarantined = true,
+                    reason = null,
+                )
+            }
+            DuplicateResolution.UNRESOLVED -> {
+                Transmiti2Logger.e(
+                    "reconciliation: duplicado de ${staging.name} sin " +
+                        "resolver; queda .tmp como parcial, nunca ready",
+                )
+                StagingRename(
+                    fileName = staging.name,
+                    file = staging,
+                    renamed = false,
+                    quarantined = false,
+                    reason = "rename_failed",
+                )
+            }
+        }
+    }
+
+    /**
+     * Persiste el sidecar del grupo con las entradas actuales. La
+     * escritura es atómica (`.tmp` + renombre, como hoy). Si falla,
+     * solo se registra: la reconciliación no falla por no poder
+     * persistir; el segmento queda clasificado en el resumen y la
+     * siguiente pasada lo reintenta (idempotente). Cuando no hay
+     * sidecar previo, los campos de grabación se reconstruyen con
+     * valores desconocidos (0/`""`): el registro que importa es el
+     * del segmento; nunca se inventan dimensiones ni códec.
+     */
+    private suspend fun persistGroupSidecar(
+        groupId: String,
+        base: RecordingMetadata?,
+        entries: Map<Int, SegmentMetadata>,
+    ) {
+        if (entries.isEmpty()) return
+        val metadata = base?.copy(
+            segments = entries.values.sortedBy { it.index },
+        ) ?: RecordingMetadata(
+            recordingId = groupId,
+            matchId = null,
+            width = 0,
+            height = 0,
+            fps = 0,
+            bitrateBps = 0,
+            rotationDegrees = 0,
+            encoderName = "",
+            profile = 0,
+            bitrateMode = 0,
+            segments = entries.values.sortedBy { it.index },
+        )
+        try {
+            withContext(Dispatchers.IO) { fileStore.writeSidecar(metadata) }
+        } catch (e: Exception) {
+            Transmiti2Logger.e(
+                "reconciliation: no se pudo escribir el sidecar de " +
+                    "$groupId: ${e.javaClass.simpleName}",
+            )
+        }
+    }
+
+    /**
+     * Envoltura fina sobre [reconcileRecordings] (subetapa 0, grupo
+     * 0-d1): el canal y Dart aún usan este nombre y formato hasta que
+     * Dart migre en 0-d2. No hay dos implementaciones: toda la lógica
+     * vive en `reconcileRecordings()`. Filtra al formato antiguo:
+     * solo los segmentos que eran `.tmp` en el inventario (los
+     * «interrumpidos» que Dart ya conoce) y solo los certificados
+     * (`status` no nulo). Los `PENDING_VERIFICATION` no se emiten: no
+     * son utilizables ni corruptos; quedan listados en el resumen
+     * para reintento y 0-d2 los expondrá por el canal nuevo.
+     */
+    open suspend fun recoverInterrupted(): List<InterruptedSegmentInfo> {
+        val summary = reconcileRecordings()
+        return summary.segments
+            .filter { it.wasStaging && it.status != null }
+            .map {
+                InterruptedSegmentInfo(
+                    recordingId = it.recordingId,
+                    index = it.index,
+                    fileName = it.fileName,
+                    filePath = it.filePath,
+                    status = it.status!!,
+                    durationMs = it.durationMs,
+                    sizeBytes = it.sizeBytes,
+                    reason = it.reason,
+                )
+            }
+            .sortedWith(
+                compareBy({ it.recordingId }, { it.index }),
+            )
     }
 
     /** Libera encoder y muxer (cierre del motor). Idempotente. */
@@ -2816,6 +3621,39 @@ private data class ClosedSegment(
     val audioStartOffsetMs: Long? = null,
     val audioGapSamples: Int = 0,
 )
+
+/** Archivo del inventario de reconciliación (subetapa 0, grupo 0-d1). */
+private data class InventoryEntry(
+    val file: File,
+    val index: Int,
+    val isStaging: Boolean,
+)
+
+/** Resultado de intentar el renombre de un staging utilizable. */
+private data class StagingRename(
+    /** Nombre del archivo tras el intento. */
+    val fileName: String,
+    val file: File,
+    val renamed: Boolean,
+    /** `true` si el staging quedó en cuarentena (el final ganó). */
+    val quarantined: Boolean,
+    /** Motivo cuando no se renombró (`rename_failed`). */
+    val reason: String?,
+)
+
+/** Resultado de reconciliar un grupo. */
+private data class GroupReconciliation(
+    val outcomes: List<ReconciledSegmentOutcome>,
+    val missingFiles: List<String>,
+    val quarantined: Int,
+    val conflicts: Int,
+)
+
+/** Contadores de un grupo durante su reconciliación. */
+private class GroupCounters {
+    var quarantined: Int = 0
+    var conflicts: Int = 0
+}
 
 /** Muestra copiada en heap (buffer + info) para el buffer pre-muxer
  * de video y la cola de audio. */

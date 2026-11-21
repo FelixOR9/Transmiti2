@@ -38,9 +38,10 @@ object StreamContract {
      * 3.1.2, componente 3): `getRecordingStatus` devuelve la
      * instantánea del estado (`RecordingStatusSnapshot`) para
      * re-sincronizar la UI al volver a la pantalla;
-     * `recoverInterruptedRecordings` clasifica los `.tmp.mp4` que
+     * `recoverInterruptedRecordings` reconcilia los `.tmp.mp4` que
      * quedaron de una muerte del proceso y devuelve la lista
-     * clasificada (nunca borra ni modifica nada).
+     * clasificada (renombra los utilizables a `.mp4` y persiste cada
+     * verificación en el sidecar; nunca borra ni sobrescribe nada).
      */
     const val GET_RECORDING_STATUS = "getRecordingStatus"
     const val RECOVER_INTERRUPTED_RECORDINGS = "recoverInterruptedRecordings"

@@ -655,9 +655,13 @@ class StreamEngineImpl(
     }
 
     /**
-     * Clasifica los `.tmp.mp4` que quedaron de una muerte del proceso
-     * (plan §7.3). Nunca borra ni modifica nada; devuelve la lista
-     * clasificada para que Dart actualice las filas de `recordings`.
+     * Recupera los `.tmp.mp4` que quedaron de una muerte del proceso
+     * (plan §7.3). Delega en `RecordingSession.recoverInterrupted()`,
+     * envoltura fina sobre `reconcileRecordings()` (subetapa 0, grupo
+     * 0-d1): la reconciliación renombra los utilizables a `.mp4` y
+     * persiste cada verificación en el sidecar; nunca borra ni
+     * sobrescribe nada. Devuelve la lista clasificada para que Dart
+     * actualice las filas de `recordings`.
      */
     suspend fun recoverInterruptedRecordings(): List<InterruptedSegmentInfo> {
         return recordingSession?.recoverInterrupted() ?: emptyList()

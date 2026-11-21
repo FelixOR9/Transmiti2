@@ -559,9 +559,11 @@ class StreamChannelHandler(
     }
 
     /**
-     * Clasifica los `.tmp.mp4` que quedaron de una muerte del proceso
-     * (Fase B, 3.1.2, plan §7.3). Nunca borra ni modifica nada; Dart
-     * actualiza las filas de `recordings` con la clasificación.
+     * Reconcilia los `.tmp.mp4` que quedaron de una muerte del proceso
+     * (Fase B, 3.1.2, plan §7.3; subetapa 0, grupo 0-d1): la
+     * reconciliación renombra los utilizables a `.mp4` y persiste cada
+     * verificación en el sidecar; nunca borra ni sobrescribe nada.
+     * Dart actualiza las filas de `recordings` con la clasificación.
      */
     private fun recoverInterruptedRecordings(result: MethodChannel.Result) {
         val engine = previewEngine

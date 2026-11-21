@@ -492,6 +492,20 @@ fun classifyIncomplete(
 
 /** Verifica un archivo de segmento y lo clasifica (plan §7.1). */
 interface SegmentVerifier {
+    companion object {
+        /**
+         * Versión del verificador (subetapa 0, grupo 0-d1; plan §2.5
+         * E6): la reconciliación confía en un sidecar solo si su
+         * `verifierVersion` coincide con este valor. Se incrementa
+         * con cualquier cambio de `classifySegment`,
+         * `classifyIncomplete` o sus tolerancias (un bump invalida
+         * la confianza y fuerza la re-verificación). Vive en la
+         * interfaz (y no en el companion de `DefaultSegmentVerifier`)
+         * porque la sesión y los tests usan el tipo interfaz.
+         */
+        const val VERIFIER_VERSION = 1
+    }
+
     /**
      * La configuración esperada puede ser `null` (recuperación sin
      * sidecar): entonces la resolución y el FPS no se comprueban y el

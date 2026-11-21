@@ -1,10 +1,13 @@
 package com.transmiti2.transmiti2.streaming.recording
 
+import com.transmiti2.transmiti2.streaming.StreamContract
 import java.io.File
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -45,6 +48,31 @@ class RecordingFileStoreTest {
         val second = store.newRecordingId()
         // Mismo segundo: el sufijo aleatorio los distingue.
         assertTrue(first != second)
+    }
+
+    @Test
+    fun `U2 colision de id genera un sufijo distinto`() {
+        // S3': si el sidecar del id ya existe, se regenera el sufijo.
+        val nowMs = 1_792_000_000_000L
+        val first = store.newRecordingId(nowMs) { "ab12" }
+        File(dir, "$first.json").writeText("{}")
+        val suffixes = listOf("ab12", "cd34")
+        var index = 0
+        val second = store.newRecordingId(nowMs) { suffixes[index++] }
+        assertNotEquals(first, second)
+        assertTrue(second.endsWith("_cd34"))
+    }
+
+    @Test
+    fun `U2 diez colisiones seguidas dan error visible sin grabar`() {
+        val nowMs = 1_792_000_000_000L
+        val colliding = store.newRecordingId(nowMs) { "ab12" }
+        File(dir, "$colliding.json").writeText("{}")
+        val thrown = assertThrows(RecordingException::class.java) {
+            store.newRecordingId(nowMs) { "ab12" }
+        }
+        assertEquals(StreamContract.RECORDING_STATE_ERROR, thrown.code)
+        assertEquals("id_reservation", thrown.details["stage"])
     }
 
     @Test
@@ -273,4 +301,203 @@ class RecordingFileStoreTest {
         assertTrue(metadata.toJson().contains("rec_\\\"x\\\""))
         assertTrue(metadata.toJson().contains("enc\\\"oder"))
     }
+
+    // --- Subetapa 0, grupo 0-d1: sidecar E1–E6, renombre con guarda,
+    // cuarentena, lector tolerante, barrido V4a (segunda sede). ---
+
+    private fun metadataWithVerifiedSegment(id: String): RecordingMetadata {
+        return RecordingMetadata(
+            recordingId = id,
+            matchId = "match-1",
+            width = 1280,
+            height = 720,
+            fps = 30,
+            bitrateBps = 2_500_000,
+            rotationDegrees = 0,
+            encoderName = "c2.qti.avc.encoder",
+            profile = 1,
+            bitrateMode = 2,
+            segments = listOf(
+                SegmentMetadata(
+                    index = 0,
+                    fileName = "${id}_seg000.mp4",
+                    firstEncoderPtsUs = 0L,
+                    startWallMs = 1_792_000_000_000L,
+                    status = "ready",
+                    durationMs = 3000L,
+                    sizeBytes = 11L,
+                    verifiedAtMs = 1_792_000_001_000L,
+                    verifierVersion = 1,
+                    verificationReason = null,
+                    fpsMeasured = 30.0,
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `U5a renombre con destino existente no sobrescribe nada`() {
+        val staging = store.segmentStagingFile("rec_1", 0)
+        val final = store.segmentFile("rec_1", 0)
+        staging.writeText("nuevo")
+        final.writeText("existente")
+        assertFalse(store.renameStagingToFinal(staging, final))
+        assertEquals("nuevo", staging.readText())
+        assertEquals("existente", final.readText())
+    }
+
+    @Test
+    fun `U5b duplicado staging verificado desplaza al final a cuarentena`() {
+        val staging = store.segmentStagingFile("rec_1", 0)
+        val final = store.segmentFile("rec_1", 0)
+        staging.writeText("nuevo")
+        final.writeText("viejo")
+        val resolution = store.resolveDuplicateDestination(
+            staging = staging,
+            final = final,
+            stagingVerified = true,
+            finalVerified = false,
+            nowMs = 1_792_000_000_000L,
+        )
+        assertEquals(DuplicateResolution.STAGING_KEPT, resolution)
+        assertEquals("nuevo", final.readText())
+        assertFalse(staging.exists())
+        val quarantined = dir.listFiles()!!
+            .filter { it.name.contains(".quarantine-") }
+        assertEquals(1, quarantined.size)
+        assertTrue(quarantined[0].name.contains("1792000000000"))
+        assertEquals("viejo", quarantined[0].readText())
+    }
+
+    @Test
+    fun `U5c duplicado final verificado manda el staging a cuarentena`() {
+        val staging = store.segmentStagingFile("rec_1", 0)
+        val final = store.segmentFile("rec_1", 0)
+        staging.writeText("nuevo")
+        final.writeText("existente")
+        val resolution = store.resolveDuplicateDestination(
+            staging = staging,
+            final = final,
+            stagingVerified = true,
+            finalVerified = true,
+            nowMs = 1_792_000_000_000L,
+        )
+        assertEquals(DuplicateResolution.FINAL_KEPT, resolution)
+        assertEquals("existente", final.readText())
+        assertFalse(staging.exists())
+        assertEquals(1, dir.listFiles()!!.count {
+            it.name.contains(".quarantine-")
+        })
+    }
+
+    @Test
+    fun `U5d duplicado sin ningun verificado no mueve nada`() {
+        val staging = store.segmentStagingFile("rec_1", 0)
+        val final = store.segmentFile("rec_1", 0)
+        staging.writeText("nuevo")
+        final.writeText("existente")
+        val resolution = store.resolveDuplicateDestination(
+            staging = staging,
+            final = final,
+            stagingVerified = false,
+            finalVerified = false,
+            nowMs = 1_792_000_000_000L,
+        )
+        assertEquals(DuplicateResolution.UNRESOLVED, resolution)
+        assertEquals("nuevo", staging.readText())
+        assertEquals("existente", final.readText())
+        assertEquals(0, dir.listFiles()!!.count {
+            it.name.contains(".quarantine-")
+        })
+    }
+
+    @Test
+    fun `lector del sidecar round-trip con los campos E5-E6 y fps`() {
+        val id = "rec_20261119_134500_cd34"
+        File(dir, "${id}_seg000.mp4").writeText("01234567890")
+        store.writeSidecar(metadataWithVerifiedSegment(id))
+        val read = store.readSidecar(id)
+        assertTrue(read != null)
+        assertEquals(id, read!!.recordingId)
+        assertEquals(1, read.segments.size)
+        val segment = read.segments[0]
+        assertEquals("${id}_seg000.mp4", segment.fileName)
+        assertEquals("ready", segment.status)
+        assertEquals(3000L, segment.durationMs)
+        assertEquals(11L, segment.sizeBytes)
+        assertEquals(1_792_000_001_000L, segment.verifiedAtMs)
+        assertEquals(1, segment.verifierVersion)
+        assertEquals(30.0, segment.fpsMeasured)
+        assertNull(segment.verificationReason)
+    }
+
+    @Test
+    fun `lector del sidecar JSON corrupto se trata como sin sidecar`() {
+        val id = "rec_20261119_134500_cd34"
+        store.sidecarFile(id).writeText("{esto no es json")
+        assertNull(store.readSidecar(id))
+        store.sidecarFile(id).writeText("{\"recordingId\":")
+        assertNull(store.readSidecar(id))
+        store.sidecarFile(id).writeText("")
+        assertNull(store.readSidecar(id))
+        assertNull(store.readSidecar("rec_inexistente"))
+    }
+
+    @Test
+    fun `lector del sidecar tolera campos desconocidos y ausentes`() {
+        val id = "rec_20261119_134500_cd34"
+        store.sidecarFile(id).writeText(
+            """{"recordingId":"$id","campoNuevo":true,"width":1280,"segments":[{"index":0,"fileName":"${id}_seg000.mp4","startWallMs":5,"campoRaro":[1,2]}]}""",
+        )
+        val read = store.readSidecar(id)
+        assertTrue(read != null)
+        assertEquals(1280, read!!.width)
+        assertEquals(0, read.height)
+        assertEquals(1, read.segments.size)
+        assertEquals(0, read.segments[0].index)
+        assertEquals(5L, read.segments[0].startWallMs)
+        assertNull(read.segments[0].status)
+    }
+
+    @Test
+    fun `barrido V4a segunda sede solo elimina write-test antiguos`() {
+        val old = File(dir, ".write-test-aaa.tmp")
+        val recent = File(dir, ".write-test-bbb.tmp")
+        val video = File(dir, "rec_1_seg000.mp4")
+        val sidecar = File(dir, "rec_1.json")
+        old.writeText("")
+        recent.writeText("")
+        video.writeText("v")
+        sidecar.writeText("{}")
+        old.setLastModified(1_792_000_000_000L - 61_000L)
+        recent.setLastModified(1_792_000_000_000L - 10_000L)
+        val removed = store.sweepWriteTestOrphans(1_792_000_000_000L)
+        assertEquals(1, removed)
+        assertFalse(old.exists())
+        assertTrue(recent.exists())
+        assertTrue(video.exists())
+        assertTrue(sidecar.exists())
+    }
+
+    @Test
+    fun `listados de inventario separan finales staging y sidecars`() {
+        File(dir, "rec_1_seg000.mp4").writeText("a")
+        File(dir, "rec_1_seg001.tmp.mp4").writeText("b")
+        File(dir, "rec_2_seg000.mp4").writeText("c")
+        File(dir, "rec_1.json").writeText("{}")
+        File(dir, "rec_1.json.tmp").writeText("{}")
+        assertEquals(
+            listOf("rec_1_seg000.mp4", "rec_2_seg000.mp4"),
+            store.listFinalSegmentFiles().map { it.name },
+        )
+        assertEquals(
+            listOf("rec_1_seg001.tmp.mp4"),
+            store.listStagingFiles().map { it.name },
+        )
+        assertEquals(
+            listOf("rec_1.json"),
+            store.listSidecarFiles().map { it.name },
+        )
+    }
+
 }
