@@ -226,6 +226,21 @@ class RecordingController extends ChangeNotifier {
   String? _audioLostMessage;
   String? get audioLostMessage => _audioLostMessage;
 
+  /// Grupo S, S1: claves opcionales del evento `recording_audio_lost`
+  /// con motivo `audio_silence_samples` (duración del silencio
+  /// detectado, offset desde el ancla hasta la primera muestra
+  /// silenciosa y pico medido en la ventana silenciosa). `null` sin
+  /// disparo por silencio o sin las claves en el evento: nunca se
+  /// inventan valores.
+  int? _audioLostSilenceMs;
+  int? get audioLostSilenceMs => _audioLostSilenceMs;
+
+  int? _audioLostSilenceStartMs;
+  int? get audioLostSilenceStartMs => _audioLostSilenceStartMs;
+
+  int? _audioLostSilencePeak;
+  int? get audioLostSilencePeak => _audioLostSilencePeak;
+
   RecordingDiagnostics? _diagnostics;
   RecordingDiagnostics? get diagnostics => _diagnostics;
 
@@ -330,11 +345,7 @@ class RecordingController extends ChangeNotifier {
       'Origen timestamps: ${_startedInfo?.timestampSource ?? '—'}',
     );
     if (_audioLostReason != null) {
-      text.writeln(
-        'Audio perdido en seg ${_audioLostSegmentIndex?.toString() ?? '—'}: '
-        '$_audioLostReason'
-        '${_audioLostMessage == null || _audioLostMessage!.isEmpty ? '' : ' — $_audioLostMessage'}',
-      );
+      text.writeln(_audioLostLine());
     }
     text.writeln(
       'Clase de excepción: ${diag.exceptionClass ?? '—'}',
@@ -384,7 +395,9 @@ class RecordingController extends ChangeNotifier {
       // `eosTimeout` si la espera de EOS agotó los 5 s (V4).
       // Grupo S (S0): `picoMin1s`/`noCeroMin1s` es el segundo más
       // silencioso de la grabación (`—` si aún no se completó
-      // ningún segundo).
+      // ningún segundo). Grupo S (S1): `silencioPico` es el pico
+      // medido en la ventana silenciosa que disparó el detector
+      // (`—` si no hubo disparo).
       tail.add(
         'Última parada: estado=${_lastStopped!.status} '
         'duración total=${_lastStopped!.totalDurationMs}ms '
@@ -401,7 +414,8 @@ class RecordingController extends ChangeNotifier {
         'lectorSinDatos2s=${_lastStopped!.audioReaderNoData2s ? 'sí' : 'no'} '
         'eosTimeout=${_lastStopped!.eosTimedOut ? 'sí' : 'no'} '
         'picoMin1s=${_lastStopped!.quietestSecondPeak?.toString() ?? '—'} '
-        'noCeroMin1s=${_lastStopped!.quietestSecondNonZero?.toString() ?? '—'}',
+        'noCeroMin1s=${_lastStopped!.quietestSecondNonZero?.toString() ?? '—'} '
+        'silencioPico=${_lastStopped!.silencePeak?.toString() ?? '—'}',
       );
     }
     for (int i = 0; i < tail.length; i++) {
@@ -431,6 +445,27 @@ class RecordingController extends ChangeNotifier {
       1 => 'STOPPED',
       _ => '—',
     };
+  }
+
+  /// Línea de pérdida de audio en caliente (Grupo S, S1): con motivo
+  /// `audio_silence_samples` y offset conocido, dice desde cuándo
+  /// (offset desde el ancla), cuánto duró y con qué pico; sin esas
+  /// claves, la línea queda como antes (motivo + mensaje si lo hay).
+  /// Los demás motivos no cambian de formato.
+  String _audioLostLine() {
+    final String segment = _audioLostSegmentIndex?.toString() ?? '—';
+    if (_audioLostReason == 'audio_silence_samples' &&
+        _audioLostSilenceStartMs != null) {
+      final String seconds = _audioLostSilenceMs == null
+          ? '—'
+          : '${_audioLostSilenceMs! ~/ 1000}';
+      final String peak = _audioLostSilencePeak?.toString() ?? '—';
+      return 'Audio perdido en seg $segment: audio_silence_samples '
+          '— silencio desde ${_audioLostSilenceStartMs}ms '
+          '($seconds s, pico=$peak)';
+    }
+    return 'Audio perdido en seg $segment: $_audioLostReason'
+        '${_audioLostMessage == null || _audioLostMessage!.isEmpty ? '' : ' — $_audioLostMessage'}';
   }
 
   /// Cabecera de audio del diagnóstico (3.1.3, plan §8.2):
@@ -472,14 +507,20 @@ class RecordingController extends ChangeNotifier {
     // motor no las envía, como en los segmentos de 3.1.2).
     final String muestrasAudio =
         segment.audioSampleCount?.toString() ?? '—';
+    // Grupo S (S1): motivo de audio del segmento, cuando lo hay
+    // (p. ej. `audio_silence_samples`); sin él, el sufijo es
+    // idéntico a antes.
+    final String motivoAudio = segment.audioReason == null
+        ? ''
+        : ' motivoAudio=${segment.audioReason}';
     if (!segment.hasAudio) {
       return ' audio=no inicioAudio=$inicioAudio huecosAudio=$huecosAudio '
-          'muestrasAudio=$muestrasAudio';
+          'muestrasAudio=$muestrasAudio$motivoAudio';
     }
     return ' audio=${segment.audioDurationMs?.toString() ?? '—'}ms '
         'av=${segment.avOffsetMs?.toString() ?? '—'}ms '
         'inicioAudio=$inicioAudio huecosAudio=$huecosAudio '
-        'muestrasAudio=$muestrasAudio';
+        'muestrasAudio=$muestrasAudio$motivoAudio';
   }
 
   StreamSubscription<Map<String, Object?>>? _eventsSubscription;
@@ -659,6 +700,9 @@ class RecordingController extends ChangeNotifier {
     _audioLostReason = null;
     _audioLostSegmentIndex = null;
     _audioLostMessage = null;
+    _audioLostSilenceMs = null;
+    _audioLostSilenceStartMs = null;
+    _audioLostSilencePeak = null;
     // Relojes a cero: una segunda grabación en la misma sesión no debe
     // heredar el tiempo de la anterior (fix duraciones 3.1.2, paso 2:
     // la base nunca se limpiaba y el contador corría en vista previa y
@@ -783,6 +827,7 @@ class RecordingController extends ChangeNotifier {
         eosTimedOut: info.eosTimedOut,
         quietestSecondPeak: info.quietestSecondPeak,
         quietestSecondNonZero: info.quietestSecondNonZero,
+        silencePeak: info.silencePeak,
       );
       _applyStoppedSegments(_lastStopped!);
       _state = RecordingState.idle;
@@ -972,12 +1017,19 @@ class RecordingController extends ChangeNotifier {
       case StreamContract.eventRecordingAudioLost:
         // Pérdida de audio en caliente (3.1.3, D7): el video
         // continúa y el estado de grabación NO cambia a error. Solo
-        // se actualiza el estado de audio y el diagnóstico.
+        // se actualiza el estado de audio y el diagnóstico. Grupo S
+        // (S1): con motivo `audio_silence_samples` el evento lleva
+        // las claves opcionales del silencio detectado (lecturas
+        // nulas-seguras: sin ellas, `null`).
         _audioActive = false;
         _audioLostReason = event['reason'] as String?;
         _audioLostSegmentIndex =
             (event['segmentIndex'] as num?)?.toInt();
         _audioLostMessage = event['message'] as String?;
+        _audioLostSilenceMs = (event['silenceMs'] as num?)?.toInt();
+        _audioLostSilenceStartMs =
+            (event['silenceStartOffsetMs'] as num?)?.toInt();
+        _audioLostSilencePeak = (event['silencePeak'] as num?)?.toInt();
         notifyListeners();
       case StreamContract.eventRecordingError:
         _errorCode =

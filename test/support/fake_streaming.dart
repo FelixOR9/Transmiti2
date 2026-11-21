@@ -88,6 +88,10 @@ class FakeStreamingService implements StreamingService {
   // sin un segundo completo).
   int? stopQuietestSecondPeak;
   int? stopQuietestSecondNonZero;
+  // Grupo S (S1): pico medido en la ventana silenciosa que disparó
+  // el detector que devuelve el método `stopRecording` (`null` por
+  // defecto: no hubo disparo).
+  int? stopSilencePeak;
   RecordingOptions? lastRecordingOptions;
   RecordingStatusSnapshot recordingStatus =
       RecordingStatusSnapshot.idle();
@@ -231,6 +235,7 @@ class FakeStreamingService implements StreamingService {
       eosTimedOut: stopEosTimedOut,
       quietestSecondPeak: stopQuietestSecondPeak,
       quietestSecondNonZero: stopQuietestSecondNonZero,
+      silencePeak: stopSilencePeak,
       segments: <RecordingSegmentInfo>[
         RecordingSegmentInfo(
           recordingId: recordingId,

@@ -185,6 +185,21 @@ void main() {
       };
     }
 
+    /// Pérdida por silencio digital (Grupo S, S1, T = 5 s, pico 4):
+    /// 5 s de ceros exactos desde el offset 12345 ms, pico 0.
+    Map<String, Object?> audioLostSilenceEvent() {
+      return <String, Object?>{
+        'type': StreamContract.eventRecordingAudioLost,
+        'recordingId': 'rec_20261118_120000_ab12',
+        'reason': 'audio_silence_samples',
+        'segmentIndex': 0,
+        'message': null,
+        'silenceMs': 5000,
+        'silenceStartOffsetMs': 12345,
+        'silencePeak': 0,
+      };
+    }
+
     testWidgets('inicia la grabación con la vista previa activa', (
       WidgetTester tester,
     ) async {
@@ -886,6 +901,165 @@ void main() {
         );
         // La grabación sigue: el temporizador no se paró.
         expect(timers.first.isActive, isTrue);
+      },
+    );
+
+    testWidgets(
+      'T-S13: la pérdida por silencio muestra desde cuándo y con qué pico',
+      (WidgetTester tester) async {
+        await pumpController(tester);
+        service.requestOutcomes[PermissionKind.microphone] =
+            PermissionStatus.granted;
+        await recording.start();
+        await tester.pump();
+        service.emitEvent(startedEventWithAudio());
+        await tester.pump();
+
+        service.emitEvent(audioLostSilenceEvent());
+        await tester.pump();
+
+        // No es un error de grabación: el estado sigue siendo
+        // `recording` y no hay código de error.
+        expect(recording.state, RecordingState.recording);
+        expect(recording.audioActive, isFalse);
+        expect(recording.audioLostReason, 'audio_silence_samples');
+        expect(recording.audioLostSegmentIndex, 0);
+        expect(recording.audioLostSilenceMs, 5000);
+        expect(recording.audioLostSilenceStartMs, 12345);
+        expect(recording.audioLostSilencePeak, 0);
+        expect(
+          recording.diagnosticText,
+          contains(
+            'Audio perdido en seg 0: audio_silence_samples — '
+            'silencio desde 12345ms (5 s, pico=0)',
+          ),
+        );
+      },
+    );
+
+    testWidgets(
+      'T-S13 (respaldo): sin las claves de silencio la línea queda como antes',
+      (WidgetTester tester) async {
+        await pumpController(tester);
+        service.requestOutcomes[PermissionKind.microphone] =
+            PermissionStatus.granted;
+        await recording.start();
+        await tester.pump();
+        service.emitEvent(startedEventWithAudio());
+        await tester.pump();
+
+        // Motivo nuevo sin las claves opcionales: motivo + mensaje,
+        // como cualquier otra pérdida.
+        service.emitEvent(<String, Object?>{
+          'type': StreamContract.eventRecordingAudioLost,
+          'recordingId': 'rec_20261118_120000_ab12',
+          'reason': 'audio_silence_samples',
+          'segmentIndex': 1,
+          'message': 'Silencio detectado.',
+        });
+        await tester.pump();
+
+        expect(recording.audioLostReason, 'audio_silence_samples');
+        expect(recording.audioLostSilenceMs, isNull);
+        expect(recording.audioLostSilenceStartMs, isNull);
+        expect(recording.audioLostSilencePeak, isNull);
+        expect(
+          recording.diagnosticText,
+          contains(
+            'Audio perdido en seg 1: audio_silence_samples — '
+            'Silencio detectado.',
+          ),
+        );
+      },
+    );
+
+    testWidgets(
+      'T-S14: la línea de segmento muestra motivoAudio solo con audioReason',
+      (WidgetTester tester) async {
+        await pumpController(tester);
+        service.requestOutcomes[PermissionKind.microphone] =
+            PermissionStatus.granted;
+        await recording.start();
+        await tester.pump();
+        service.emitEvent(startedEventWithAudio());
+        await tester.pump();
+
+        final Map<String, Object?> withSilence =
+            segmentEventWithAudio(0)
+              ..['audioReason'] = 'audio_silence_samples';
+        service.emitEvent(withSilence);
+        await tester.pump();
+        service.emitEvent(segmentEvent(1));
+        await tester.pump();
+
+        final String? text = recording.diagnosticText;
+        expect(text, isNotNull);
+        expect(
+          text,
+          contains(
+            'seg0: ready 60000ms motivo=— cerradoLimpio=sí fps=29.9 '
+            'muestras=1800 verif=1798 fase=61.2s audio=59800ms av=120ms '
+            'inicioAudio=— huecosAudio=0 muestrasAudio=2800 '
+            'motivoAudio=audio_silence_samples',
+          ),
+        );
+        // Sin `audioReason`, la línea es idéntica a antes.
+        expect(
+          text,
+          contains(
+            'seg1: ready 60000ms motivo=— cerradoLimpio=sí fps=29.9 '
+            'muestras=1800 verif=1798 fase=61.2s audio=no '
+            'inicioAudio=— huecosAudio=0 muestrasAudio=—',
+          ),
+        );
+        expect(
+          'motivoAudio=audio_silence_samples'.allMatches(text!).length,
+          1,
+        );
+      },
+    );
+
+    testWidgets(
+      'T-S15: Última parada muestra silencioPico tras un disparo',
+      (WidgetTester tester) async {
+        await pumpController(tester);
+        await recording.start();
+        await tester.pump();
+
+        // El método devuelve el pico del disparo junto con el
+        // segundo más silencioso (Grupo S, S1): la parada por
+        // método no lo pierde.
+        service.stopSilencePeak = 0;
+        service.stopQuietestSecondPeak = 12;
+        service.stopQuietestSecondNonZero = 3;
+        await recording.stop();
+        await tester.pump();
+
+        expect(recording.lastStopped!.silencePeak, 0);
+        expect(
+          recording.diagnosticText,
+          contains('picoMin1s=12 noCeroMin1s=3 silencioPico=0'),
+        );
+      },
+    );
+
+    testWidgets(
+      'T-S15 (respaldo): sin disparo Última parada muestra silencioPico=—',
+      (WidgetTester tester) async {
+        await pumpController(tester);
+        await recording.start();
+        await tester.pump();
+
+        // El falso devuelve `null` por defecto (sin disparo): la
+        // línea muestra `—`, nunca inventa un 0.
+        await recording.stop();
+        await tester.pump();
+
+        expect(recording.lastStopped!.silencePeak, isNull);
+        expect(
+          recording.diagnosticText,
+          contains('silencioPico=—'),
+        );
       },
     );
 

@@ -121,9 +121,15 @@ abstract final class StreamContract {
   /// Pérdida de audio en caliente (3.1.3, plan §8.1):
   /// `{recordingId, reason, segmentIndex, message}`. `reason` es uno
   /// de `audio_dead_object`, `audio_invalid_operation`,
-  /// `audio_encoder_error`, `audio_silence` o `audio_format_timeout`.
-  /// No es un error de grabación: el estado sigue siendo `recording`
-  /// y el video continúa.
+  /// `audio_encoder_error`, `audio_silence`, `audio_format_timeout`
+  /// o `audio_silence_samples` (Grupo S, S1: silencio digital en las
+  /// muestras PCM, distinto de `audio_silence` = lecturas vacías).
+  /// Con `audio_silence_samples` el evento lleva además las claves
+  /// opcionales `silenceMs` (duración del silencio detectado),
+  /// `silenceStartOffsetMs` (offset desde el ancla hasta la primera
+  /// muestra silenciosa) y `silencePeak` (pico medido en la ventana
+  /// silenciosa, esperado 0). No es un error de grabación: el estado
+  /// sigue siendo `recording` y el video continúa.
   static const String eventRecordingAudioLost = 'recording_audio_lost';
 
   // Códigos de error (nunca llevan la clave ni la URL dentro).
@@ -310,6 +316,7 @@ class RecordingInfo {
     this.eosTimedOut = false,
     this.quietestSecondPeak,
     this.quietestSecondNonZero,
+    this.silencePeak,
   });
 
   final String recordingId;
@@ -374,6 +381,10 @@ class RecordingInfo {
   final int? quietestSecondPeak;
   final int? quietestSecondNonZero;
 
+  /// Grupo S, S1: pico medido en la ventana silenciosa que disparó
+  /// el detector, esperado 0; `null` si no hubo disparo.
+  final int? silencePeak;
+
   factory RecordingInfo.fromMap(Map<Object?, Object?> map) {
     final List<Object?> rawSegments =
         (map['segments'] as List?)?.cast<Object?>() ?? <Object?>[];
@@ -405,6 +416,7 @@ class RecordingInfo {
       quietestSecondPeak: (map['quietestSecondPeak'] as num?)?.toInt(),
       quietestSecondNonZero:
           (map['quietestSecondNonZero'] as num?)?.toInt(),
+      silencePeak: (map['silencePeak'] as num?)?.toInt(),
     );
   }
 }
@@ -643,6 +655,7 @@ class RecordingStoppedInfo {
     this.eosTimedOut = false,
     this.quietestSecondPeak,
     this.quietestSecondNonZero,
+    this.silencePeak,
   });
 
   final String recordingId;
@@ -694,6 +707,10 @@ class RecordingStoppedInfo {
   final int? quietestSecondPeak;
   final int? quietestSecondNonZero;
 
+  /// Grupo S, S1: pico medido en la ventana silenciosa que disparó
+  /// el detector, esperado 0; `null` si no hubo disparo.
+  final int? silencePeak;
+
   int get segmentCount => segments.length;
 
   /// Ruta del primer segmento (la ruta final fusionada llega en 3.1.4).
@@ -730,6 +747,7 @@ class RecordingStoppedInfo {
       quietestSecondPeak: (map['quietestSecondPeak'] as num?)?.toInt(),
       quietestSecondNonZero:
           (map['quietestSecondNonZero'] as num?)?.toInt(),
+      silencePeak: (map['silencePeak'] as num?)?.toInt(),
     );
   }
 }

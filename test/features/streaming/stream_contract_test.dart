@@ -503,9 +503,12 @@ void main() {
             'audioEnabled': true,
             'quietestSecondPeak': 12,
             'quietestSecondNonZero': 3,
+            'silencePeak': 0,
           });
       expect(stopped.quietestSecondPeak, 12);
       expect(stopped.quietestSecondNonZero, 3);
+      // Grupo S (S1): el pico del disparo viaja en el mismo mapa.
+      expect(stopped.silencePeak, 0);
       final RecordingStoppedInfo sinSegundo =
           RecordingStoppedInfo.fromMap(<Object?, Object?>{
             'recordingId': 'rec-1',
@@ -516,6 +519,8 @@ void main() {
           });
       expect(sinSegundo.quietestSecondPeak, isNull);
       expect(sinSegundo.quietestSecondNonZero, isNull);
+      // Sin disparo, `null` (nunca se inventa un 0).
+      expect(sinSegundo.silencePeak, isNull);
     });
 
     test('RecordingInfo lee el segundo más silencioso', () {
@@ -529,9 +534,22 @@ void main() {
             'audioEnabled': true,
             'quietestSecondPeak': 12,
             'quietestSecondNonZero': 3,
+            'silencePeak': 0,
           });
       expect(info.quietestSecondPeak, 12);
       expect(info.quietestSecondNonZero, 3);
+      // Grupo S (S1): el pico del disparo viaja en el mismo mapa;
+      // sin él, `null`.
+      expect(info.silencePeak, 0);
+      final RecordingInfo sinDisparo =
+          RecordingInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'filePath': '/docs/recordings/rec-1_seg000.mp4',
+            'durationMs': 60000,
+            'sizeBytes': 18750000,
+            'status': 'ready',
+          });
+      expect(sinDisparo.silencePeak, isNull);
     });
 
     test('RecordingInfo lee droppedInputBuffers cuando lo hay', () {
