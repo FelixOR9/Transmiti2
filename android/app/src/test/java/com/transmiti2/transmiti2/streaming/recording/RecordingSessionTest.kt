@@ -191,6 +191,11 @@ class RecordingSessionTest {
         /** Flag del watchdog (Grupo V, V3): el test lo fija para
          * comprobar que `stop()` lo propaga al `RecordingResult`. */
         override var readerNoData2s: Boolean = false
+        /** Grupo S (S0): segundo más silencioso; el test los fija
+         * para comprobar que `stop()` los propaga al
+         * `RecordingResult`. */
+        override var quietestSecondPeak: Int? = null
+        override var quietestSecondNonZero: Int? = null
         override var listener: AudioEncoderListener? = null
         var configureCalls = 0
         var releaseCalls = 0
@@ -1310,6 +1315,25 @@ class RecordingSessionTest {
             val result = session.stop()
             assertEquals(2048, result.inputBufferCapacityBytes)
             assertEquals(2048, result.toMap()["inputBufferCapacityBytes"])
+        }
+
+    @Test
+    fun `stop propaga el segundo mas silencioso de la grabacion`() =
+        runBlocking {
+            // Grupo S (S0): el mínimo por segundo se captura al
+            // parar, antes de liberar el encoder (como la capacidad
+            // del buffer). Valores distintivos a propósito (ningún
+            // defecto coincide con ellos).
+            fakeAudioEncoder.quietestSecondPeak = 12
+            fakeAudioEncoder.quietestSecondNonZero = 3
+            val session = buildSession()
+            startRecording(session, audioEnabled = true)
+            fakeEncoder.deliverSample(0L, true)
+            val result = session.stop()
+            assertEquals(12, result.quietestSecondPeak)
+            assertEquals(3, result.quietestSecondNonZero)
+            assertEquals(12, result.toMap()["quietestSecondPeak"])
+            assertEquals(3, result.toMap()["quietestSecondNonZero"])
         }
 
     @Test

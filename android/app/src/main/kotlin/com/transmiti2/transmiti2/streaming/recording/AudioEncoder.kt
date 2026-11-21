@@ -15,6 +15,8 @@ import android.os.SystemClock
 import com.transmiti2.transmiti2.streaming.StreamContract
 import com.transmiti2.transmiti2.streaming.Transmiti2Logger
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.ShortBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -239,6 +241,17 @@ interface AudioEncoderPort {
      * parar (diagnóstico visible, `lectorSinDatos2s`).
      */
     val readerNoData2s: Boolean
+    /**
+     * Grupo S (S0, solo lectura): el segundo más silencioso de la
+     * grabación — pico y muestras no cero de la ventana completa
+     * de `sampleRate` muestras con menos muestras no cero (a
+     * igualdad, menor pico). `null` si aún no se completó ningún
+     * segundo: nunca `0`, porque `0` significaría silencio digital.
+     * Lo lee la sesión al parar (diagnóstico visible, `picoMin1s` /
+     * `noCeroMin1s`).
+     */
+    val quietestSecondPeak: Int?
+    val quietestSecondNonZero: Int?
     var listener: AudioEncoderListener?
     fun configureAndStart()
     fun signalEndOfInputStream()
@@ -386,6 +399,29 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
     override var readerNoData2s: Boolean = false
         private set
 
+    /**
+     * Grupo S (S0, solo lectura): medición por segundo del nivel
+     * PCM (pico y muestras no cero). La posee el tracker; lo lee
+     * la sesión al parar. Se resetea por arranque.
+     */
+    private val levelTracker = AudioLevelTracker()
+
+    /**
+     * Grupo S (S0): la medición se desactiva para este arranque si
+     * falla una vez: el audio sigue exactamente como antes de S
+     * (sin medición), nunca rompe la grabación. Se resetea por
+     * arranque. Solo lo escribe el hilo lector.
+     */
+    private var levelMeterDisabled = false
+
+    /** Pico del segundo más silencioso (`null` sin ventana completa). */
+    override val quietestSecondPeak: Int?
+        get() = levelTracker.quietestSecondPeak
+
+    /** Muestras no cero del segundo más silencioso (`null` sin ventana). */
+    override val quietestSecondNonZero: Int?
+        get() = levelTracker.quietestSecondNonZero
+
     /** Primera muestra AAC ya registrada en log (se resetea por arranque). */
     @Volatile
     private var firstAudioSampleLogged = false
@@ -442,6 +478,10 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
         recordingStateAtStart = null
         // Grupo V (V3): el flag del watchdog se resetea por arranque.
         readerNoData2s = false
+        // Grupo S (S0): la medición por segundo se resetea por
+        // arranque (y se reactiva si se había desactivado por fallo).
+        levelTracker.reset()
+        levelMeterDisabled = false
         val minBuffer = AudioRecord.getMinBufferSize(
             config.sampleRate,
             AudioFormat.CHANNEL_IN_MONO,
@@ -759,6 +799,12 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
         Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
         val record = audioRecord ?: return
         val pcm = ByteArray(AUDIO_READ_BYTES)
+        // Grupo S (S0): vista reutilizable sobre el buffer de lectura
+        // (sin asignar por lectura) para medir pico/no-cero por
+        // segundo; refleja el contenido actual de `pcm` en cada
+        // lectura. PCM 16 bits little-endian.
+        val pcmShorts = ByteBuffer.wrap(pcm)
+            .order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
         var zeroReads = 0
         while (!stopRequested && !released.get()) {
             val read = try {
@@ -788,6 +834,27 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
                     zeroReads = 0
                     lastSuccessfulReadElapsedMs =
                         SystemClock.elapsedRealtime()
+                    // Grupo S (S0, solo lectura): medir pico y
+                    // muestras no cero de esta lectura, antes de
+                    // encolarla. Guardado: si la medición fallara,
+                    // se desactiva para este arranque y el audio
+                    // sigue exactamente como antes de S (sin
+                    // medición); nunca rompe el bucle lector.
+                    if (!levelMeterDisabled) {
+                        try {
+                            levelTracker.observe(
+                                pcmShorts,
+                                read / 2,
+                                config.sampleRate,
+                            )
+                        } catch (e: Exception) {
+                            levelMeterDisabled = true
+                            Transmiti2Logger.e(
+                                "audio: medición de nivel desactivada: " +
+                                    e.javaClass.simpleName,
+                            )
+                        }
+                    }
                     if (anchorNs == null) {
                         anchorFrom(record)
                     }

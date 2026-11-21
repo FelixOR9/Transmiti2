@@ -131,6 +131,8 @@ internal fun recordingInfoMap(info: RecordingInfo): Map<String, Any?> {
         "audioEos" to info.audioEos,
         "audioReaderNoData2s" to info.audioReaderNoData2s,
         "eosTimedOut" to info.eosTimedOut,
+        "quietestSecondPeak" to info.quietestSecondPeak,
+        "quietestSecondNonZero" to info.quietestSecondNonZero,
     )
 }
 

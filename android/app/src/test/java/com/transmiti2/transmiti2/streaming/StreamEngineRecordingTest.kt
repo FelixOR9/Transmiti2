@@ -623,6 +623,8 @@ class StreamEngineRecordingTest {
                     audioEos = true,
                     audioReaderNoData2s = true,
                     eosTimedOut = true,
+                    quietestSecondPeak = 12,
+                    quietestSecondNonZero = 3,
                 )
             val engine = fixture.engine()
             engine.startPreview()
@@ -641,6 +643,8 @@ class StreamEngineRecordingTest {
             assertEquals(true, info.audioEos)
             assertEquals(true, info.audioReaderNoData2s)
             assertEquals(true, info.eosTimedOut)
+            assertEquals(12, info.quietestSecondPeak)
+            assertEquals(3, info.quietestSecondNonZero)
         }
 
     @Test

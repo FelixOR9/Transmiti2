@@ -84,6 +84,16 @@ data class RecordingInfo(
     val audioEos: Boolean = false,
     val audioReaderNoData2s: Boolean = false,
     val eosTimedOut: Boolean = false,
+    /**
+     * Grupo S (S0, solo lectura): los mismos 2 campos de
+     * `RecordingResult` (el segundo más silencioso). Sin ellos, el
+     * resultado del método sobrescribiría en Dart los valores reales
+     * del evento `recording_stopped` con los defectos (diagnóstico
+     * ronda 3, §2): el método debe llevar exactamente los mismos
+     * campos que el evento.
+     */
+    val quietestSecondPeak: Int? = null,
+    val quietestSecondNonZero: Int? = null,
 )
 
 /** Estados de una sesión de transmisión (para las fases 3.1 en adelante). */

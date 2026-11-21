@@ -216,6 +216,14 @@ data class RecordingResult(
      */
     val audioReaderNoData2s: Boolean = false,
     val eosTimedOut: Boolean = false,
+    /**
+     * Grupo S (S0, solo lectura): el segundo más silencioso de la
+     * grabación (pico y muestras no cero de la ventana completa con
+     * menos muestras no cero). `null` si aún no se completó ningún
+     * segundo: nunca `0`, porque `0` significaría silencio digital.
+     */
+    val quietestSecondPeak: Int? = null,
+    val quietestSecondNonZero: Int? = null,
 ) {
     fun toMap(): Map<String, Any?> = mapOf(
         "recordingId" to recordingId,
@@ -238,6 +246,8 @@ data class RecordingResult(
         "audioEos" to audioEos,
         "audioReaderNoData2s" to audioReaderNoData2s,
         "eosTimedOut" to eosTimedOut,
+        "quietestSecondPeak" to quietestSecondPeak,
+        "quietestSecondNonZero" to quietestSecondNonZero,
     )
 
     companion object {
@@ -267,6 +277,8 @@ data class RecordingResult(
             audioEos: Boolean = false,
             audioReaderNoData2s: Boolean = false,
             eosTimedOut: Boolean = false,
+            quietestSecondPeak: Int? = null,
+            quietestSecondNonZero: Int? = null,
         ): RecordingResult {
             val status = when {
                 segments.isEmpty() -> "corrupt"
@@ -295,6 +307,8 @@ data class RecordingResult(
                 audioEos = audioEos,
                 audioReaderNoData2s = audioReaderNoData2s,
                 eosTimedOut = eosTimedOut,
+                quietestSecondPeak = quietestSecondPeak,
+                quietestSecondNonZero = quietestSecondNonZero,
             )
         }
     }
@@ -2191,6 +2205,10 @@ open class RecordingSession(
         // agotó los 5 s (V4); se capturan como los demás contadores.
         var readerNoDataAtStop = false
         var eosTimedOutAtStop = false
+        // Grupo S (S0): el segundo más silencioso, del mismo
+        // encoder y antes de liberarlo que los demás contadores.
+        var quietestPeakAtStop: Int? = null
+        var quietestNonZeroAtStop: Int? = null
         try {
             // EOS a ambos encoders (audio primero: parar la captura)
             // y drenado final (5 s en total); si no llega, se detiene
@@ -2279,6 +2297,10 @@ open class RecordingSession(
             // Grupo V (V3): el flag del watchdog, del mismo encoder
             // y antes de liberarlo que los demás contadores.
             readerNoDataAtStop = audioEncoderAtStop?.readerNoData2s ?: false
+            // Grupo S (S0): el segundo más silencioso, igual.
+            quietestPeakAtStop = audioEncoderAtStop?.quietestSecondPeak
+            quietestNonZeroAtStop =
+                audioEncoderAtStop?.quietestSecondNonZero
             try {
                 encoder?.release()
             } catch (_: Exception) {
@@ -2317,6 +2339,8 @@ open class RecordingSession(
             audioEos = audioEosAtStop,
             audioReaderNoData2s = readerNoDataAtStop,
             eosTimedOut = eosTimedOutAtStop,
+            quietestSecondPeak = quietestPeakAtStop,
+            quietestSecondNonZero = quietestNonZeroAtStop,
         )
         sessionMutex.withLock {
             lastResult = result

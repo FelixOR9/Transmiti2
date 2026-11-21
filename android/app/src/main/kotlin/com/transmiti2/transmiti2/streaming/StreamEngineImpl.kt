@@ -602,6 +602,8 @@ class StreamEngineImpl(
             audioEos = result.audioEos,
             audioReaderNoData2s = result.audioReaderNoData2s,
             eosTimedOut = result.eosTimedOut,
+            quietestSecondPeak = result.quietestSecondPeak,
+            quietestSecondNonZero = result.quietestSecondNonZero,
         )
     }
 

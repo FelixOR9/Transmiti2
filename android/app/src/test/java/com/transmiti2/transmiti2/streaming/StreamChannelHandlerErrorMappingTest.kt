@@ -241,14 +241,14 @@ class StreamChannelHandlerErrorMappingTest {
     }
 
     @Test
-    fun `recordingInfoMap lleva los 11 campos de audio al metodo`() {
-        // Grupo V (V1, camino real): el mapa del método debe llevar
-        // los mismos 11 campos de instrumentación de audio que el
-        // evento `recording_stopped`. Es la función que los soltó
-        // en las rondas 3/U (diagnóstico ronda 3, §2): si un campo
-        // vuelve a faltar aquí, este test rompe antes que el
-        // teléfono. Los valores son distintivos a propósito (ningún
-        // defecto coincide con ellos).
+    fun `recordingInfoMap lleva los 13 campos de audio al metodo`() {
+        // Grupo V (V1, camino real) + Grupo S (S0): el mapa del
+        // método debe llevar los mismos 13 campos de
+        // instrumentación de audio que el evento `recording_stopped`.
+        // Es la función que los soltó en las rondas 3/U (diagnóstico
+        // ronda 3, §2): si un campo vuelve a faltar aquí, este test
+        // rompe antes que el teléfono. Los valores son distintivos
+        // a propósito (ningún defecto coincide con ellos).
         val info = RecordingInfo(
             recordingId = "rec_20261120_135244_c8a2",
             filePath = "/docs/recordings/rec_20261120_135244_c8a2_seg000.mp4",
@@ -285,6 +285,8 @@ class StreamChannelHandlerErrorMappingTest {
             audioEos = true,
             audioReaderNoData2s = true,
             eosTimedOut = true,
+            quietestSecondPeak = 12,
+            quietestSecondNonZero = 3,
         )
         val map = recordingInfoMap(info)
         assertEquals("rec_20261120_135244_c8a2", map["recordingId"])
@@ -300,6 +302,8 @@ class StreamChannelHandlerErrorMappingTest {
         assertEquals(true, map["audioEos"])
         assertEquals(true, map["audioReaderNoData2s"])
         assertEquals(true, map["eosTimedOut"])
+        assertEquals(12, map["quietestSecondPeak"])
+        assertEquals(3, map["quietestSecondNonZero"])
     }
 
     @Test
@@ -325,5 +329,7 @@ class StreamChannelHandlerErrorMappingTest {
         assertEquals(false, map["audioEos"])
         assertEquals(false, map["audioReaderNoData2s"])
         assertEquals(false, map["eosTimedOut"])
+        assertNull(map["quietestSecondPeak"])
+        assertNull(map["quietestSecondNonZero"])
     }
 }
