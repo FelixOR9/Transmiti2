@@ -382,6 +382,9 @@ class RecordingController extends ChangeNotifier {
       // segundos con un decimal (`—` si nunca hubo). Grupo V:
       // `lectorSinDatos2s` es el flag del watchdog (V3) y
       // `eosTimeout` si la espera de EOS agotó los 5 s (V4).
+      // Grupo S (S0): `picoMin1s`/`noCeroMin1s` es el segundo más
+      // silencioso de la grabación (`—` si aún no se completó
+      // ningún segundo).
       tail.add(
         'Última parada: estado=${_lastStopped!.status} '
         'duración total=${_lastStopped!.totalDurationMs}ms '
@@ -396,7 +399,9 @@ class RecordingController extends ChangeNotifier {
         'lectorVivo=${_lastStopped!.audioReaderAlive ? 'sí' : 'no'} '
         'audioEos=${_lastStopped!.audioEos ? 'sí' : 'no'} '
         'lectorSinDatos2s=${_lastStopped!.audioReaderNoData2s ? 'sí' : 'no'} '
-        'eosTimeout=${_lastStopped!.eosTimedOut ? 'sí' : 'no'}',
+        'eosTimeout=${_lastStopped!.eosTimedOut ? 'sí' : 'no'} '
+        'picoMin1s=${_lastStopped!.quietestSecondPeak?.toString() ?? '—'} '
+        'noCeroMin1s=${_lastStopped!.quietestSecondNonZero?.toString() ?? '—'}',
       );
     }
     for (int i = 0; i < tail.length; i++) {
@@ -776,6 +781,8 @@ class RecordingController extends ChangeNotifier {
         audioEos: info.audioEos,
         audioReaderNoData2s: info.audioReaderNoData2s,
         eosTimedOut: info.eosTimedOut,
+        quietestSecondPeak: info.quietestSecondPeak,
+        quietestSecondNonZero: info.quietestSecondNonZero,
       );
       _applyStoppedSegments(_lastStopped!);
       _state = RecordingState.idle;

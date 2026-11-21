@@ -490,6 +490,50 @@ void main() {
       expect(stopped.droppedInputBuffers, 7);
     });
 
+    test('RecordingStoppedInfo lee el segundo más silencioso', () {
+      // Grupo S (S0): las claves nuevas llegan por el mismo mapa;
+      // sin ellas, `null` (nunca se inventa un 0).
+      final RecordingStoppedInfo stopped =
+          RecordingStoppedInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'segments': <Map<Object?, Object?>>[],
+            'totalDurationMs': 60000,
+            'totalSizeBytes': 18750000,
+            'status': 'ready',
+            'audioEnabled': true,
+            'quietestSecondPeak': 12,
+            'quietestSecondNonZero': 3,
+          });
+      expect(stopped.quietestSecondPeak, 12);
+      expect(stopped.quietestSecondNonZero, 3);
+      final RecordingStoppedInfo sinSegundo =
+          RecordingStoppedInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'segments': <Map<Object?, Object?>>[],
+            'totalDurationMs': 60000,
+            'totalSizeBytes': 18750000,
+            'status': 'ready',
+          });
+      expect(sinSegundo.quietestSecondPeak, isNull);
+      expect(sinSegundo.quietestSecondNonZero, isNull);
+    });
+
+    test('RecordingInfo lee el segundo más silencioso', () {
+      final RecordingInfo info =
+          RecordingInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'filePath': '/docs/recordings/rec-1_seg000.mp4',
+            'durationMs': 60000,
+            'sizeBytes': 18750000,
+            'status': 'ready',
+            'audioEnabled': true,
+            'quietestSecondPeak': 12,
+            'quietestSecondNonZero': 3,
+          });
+      expect(info.quietestSecondPeak, 12);
+      expect(info.quietestSecondNonZero, 3);
+    });
+
     test('RecordingInfo lee droppedInputBuffers cuando lo hay', () {
       final RecordingInfo info =
           RecordingInfo.fromMap(<Object?, Object?>{

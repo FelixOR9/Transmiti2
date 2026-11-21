@@ -476,6 +476,47 @@ void main() {
       );
     });
 
+    testWidgets('stop por método trae el segundo más silencioso', (
+      WidgetTester tester,
+    ) async {
+      await pumpController(tester);
+      await recording.start();
+      await tester.pump();
+
+      // El método devuelve el segundo más silencioso del motor (el
+      // mismo valor que el evento `recording_stopped`): la parada
+      // por método no lo pierde (Grupo S, S0). Valores distintivos
+      // a propósito (ningún defecto coincide con ellos).
+      service.stopQuietestSecondPeak = 12;
+      service.stopQuietestSecondNonZero = 3;
+      await recording.stop();
+      await tester.pump();
+
+      expect(
+        recording.diagnosticText,
+        contains('picoMin1s=12 noCeroMin1s=3'),
+      );
+    });
+
+    testWidgets('sin segundo completo la línea muestra guiones', (
+      WidgetTester tester,
+    ) async {
+      await pumpController(tester);
+      await recording.start();
+      await tester.pump();
+
+      // El falso devuelve `null` por defecto (aún sin un segundo
+      // completo): la línea muestra `—`, nunca inventa un 0 que
+      // significaría silencio digital (Grupo S, S0).
+      await recording.stop();
+      await tester.pump();
+
+      expect(
+        recording.diagnosticText,
+        contains('picoMin1s=— noCeroMin1s=—'),
+      );
+    });
+
     testWidgets('stop usa los segmentos del método aunque falte un evento', (
       WidgetTester tester,
     ) async {

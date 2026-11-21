@@ -308,6 +308,8 @@ class RecordingInfo {
     this.audioEos = false,
     this.audioReaderNoData2s = false,
     this.eosTimedOut = false,
+    this.quietestSecondPeak,
+    this.quietestSecondNonZero,
   });
 
   final String recordingId;
@@ -364,6 +366,14 @@ class RecordingInfo {
   final bool audioReaderNoData2s;
   final bool eosTimedOut;
 
+  /// Grupo S (S0, solo lectura): el segundo más silencioso de la
+  /// grabación (pico y muestras no cero de la ventana completa con
+  /// menos muestras no cero). Ausentes → `null`: nunca se inventa
+  /// un valor (y nunca `0`, porque `0` significaría silencio
+  /// digital).
+  final int? quietestSecondPeak;
+  final int? quietestSecondNonZero;
+
   factory RecordingInfo.fromMap(Map<Object?, Object?> map) {
     final List<Object?> rawSegments =
         (map['segments'] as List?)?.cast<Object?>() ?? <Object?>[];
@@ -392,6 +402,9 @@ class RecordingInfo {
       audioEos: map['audioEos'] as bool? ?? false,
       audioReaderNoData2s: map['audioReaderNoData2s'] as bool? ?? false,
       eosTimedOut: map['eosTimedOut'] as bool? ?? false,
+      quietestSecondPeak: (map['quietestSecondPeak'] as num?)?.toInt(),
+      quietestSecondNonZero:
+          (map['quietestSecondNonZero'] as num?)?.toInt(),
     );
   }
 }
@@ -628,6 +641,8 @@ class RecordingStoppedInfo {
     this.audioEos = false,
     this.audioReaderNoData2s = false,
     this.eosTimedOut = false,
+    this.quietestSecondPeak,
+    this.quietestSecondNonZero,
   });
 
   final String recordingId;
@@ -673,6 +688,12 @@ class RecordingStoppedInfo {
   final bool audioReaderNoData2s;
   final bool eosTimedOut;
 
+  /// Grupo S (S0, solo lectura): mismo significado que en
+  /// `RecordingInfo` (el segundo más silencioso). Ausentes →
+  /// `null`: nunca se inventa un valor.
+  final int? quietestSecondPeak;
+  final int? quietestSecondNonZero;
+
   int get segmentCount => segments.length;
 
   /// Ruta del primer segmento (la ruta final fusionada llega en 3.1.4).
@@ -706,6 +727,9 @@ class RecordingStoppedInfo {
       audioEos: map['audioEos'] as bool? ?? false,
       audioReaderNoData2s: map['audioReaderNoData2s'] as bool? ?? false,
       eosTimedOut: map['eosTimedOut'] as bool? ?? false,
+      quietestSecondPeak: (map['quietestSecondPeak'] as num?)?.toInt(),
+      quietestSecondNonZero:
+          (map['quietestSecondNonZero'] as num?)?.toInt(),
     );
   }
 }

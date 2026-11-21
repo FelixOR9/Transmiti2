@@ -83,6 +83,11 @@ class FakeStreamingService implements StreamingService {
   // (`false` por defecto).
   bool stopAudioReaderNoData2s = false;
   bool stopEosTimedOut = false;
+  // Grupo S (S0): segundo más silencioso de la grabación que
+  // devuelve el método `stopRecording` (`null` por defecto: aún
+  // sin un segundo completo).
+  int? stopQuietestSecondPeak;
+  int? stopQuietestSecondNonZero;
   RecordingOptions? lastRecordingOptions;
   RecordingStatusSnapshot recordingStatus =
       RecordingStatusSnapshot.idle();
@@ -224,6 +229,8 @@ class FakeStreamingService implements StreamingService {
       audioEos: stopAudioEos,
       audioReaderNoData2s: stopAudioReaderNoData2s,
       eosTimedOut: stopEosTimedOut,
+      quietestSecondPeak: stopQuietestSecondPeak,
+      quietestSecondNonZero: stopQuietestSecondNonZero,
       segments: <RecordingSegmentInfo>[
         RecordingSegmentInfo(
           recordingId: recordingId,
