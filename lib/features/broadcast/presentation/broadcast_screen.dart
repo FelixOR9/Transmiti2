@@ -285,6 +285,10 @@ class _BroadcastScreenState extends State<BroadcastScreen> {
     final String code = _recording.errorCode ?? 'error';
     final String plain = switch (code) {
       StreamContract.storageFull => 'Sin espacio para grabar.',
+      StreamContract.storageCheckUnavailable =>
+        'No se pudo comprobar el espacio disponible para grabar.',
+      StreamContract.recordingsDirUnavailable =>
+        'No se pudo preparar la carpeta de grabaciones.',
       StreamContract.encoderError =>
         'El codificador no aceptó la configuración.',
       StreamContract.muxerError =>

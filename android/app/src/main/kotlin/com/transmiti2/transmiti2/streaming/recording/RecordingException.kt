@@ -39,6 +39,60 @@ class RecordingException(
         ): RecordingException =
             RecordingException(StreamContract.STORAGE_FULL, message, details)
 
+        /**
+         * Fallo de directorio (subetapa 0, 3.1.4): V1–V4 al resolver
+         * la ruta canónica o al re-validarla en `start()` antes de
+         * `ensureDir()`. `stage` es la verificación que falló
+         * (`context_null` | `mkdirs_failed` | `not_a_directory` |
+         * `not_writable`); con `not_writable`, `reason` es
+         * `create_failed` o `write_test_collision` y `exceptionClass`
+         * el nombre simple de la excepción, cuando lo hay. Espejo de
+         * `storageFull`: mismo patrón `(code, message, details)`.
+         */
+        fun recordingsDirUnavailable(
+            stage: String,
+            reason: String? = null,
+            exceptionClass: String? = null,
+        ): RecordingException {
+            val details = mutableMapOf<String, Any?>("stage" to stage)
+            if (reason != null) details["reason"] = reason
+            if (exceptionClass != null) details["exceptionClass"] = exceptionClass
+            return RecordingException(
+                StreamContract.RECORDINGS_DIR_UNAVAILABLE,
+                "No se pudo preparar la carpeta de grabaciones.",
+                details,
+            )
+        }
+
+        /**
+         * Espacio no medible (subetapa 0, 3.1.4): `StatFs` lanzó en el
+         * constructor o en `availableBytes`. `stage` es el punto del
+         * flujo (`start` | `rotate`), `check` es el chequeo que
+         * falló (`free_space_check`) y `freeBytes` queda en `null`
+         * (nunca se inventa un valor); en rotación se añade
+         * `segmentIndex`. Espejo de `storageFull`: mismo patrón
+         * `(code, message, details)`.
+         */
+        fun storageCheckUnavailable(
+            stage: String,
+            check: String,
+            exceptionClass: String? = null,
+            segmentIndex: Int? = null,
+        ): RecordingException {
+            val details = mutableMapOf<String, Any?>(
+                "stage" to stage,
+                "check" to check,
+                "freeBytes" to null,
+            )
+            if (exceptionClass != null) details["exceptionClass"] = exceptionClass
+            if (segmentIndex != null) details["segmentIndex"] = segmentIndex
+            return RecordingException(
+                StreamContract.STORAGE_CHECK_UNAVAILABLE,
+                "No se pudo comprobar el espacio disponible para grabar.",
+                details,
+            )
+        }
+
         fun cameraDisconnected(
             message: String,
             details: Map<String, Any?> = emptyMap(),

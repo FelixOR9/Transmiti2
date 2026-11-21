@@ -62,6 +62,12 @@ class RecordingDiagnostics {
     this.lowStorageWarning,
     this.exceptionClass,
     this.lastErrorStage,
+    /// Espacio libre medido en bytes (subetapa 0, 3.1.4), del
+    /// `freeBytes` de los detalles nativos: se conserva cuando viene
+    /// medido (p. ej. con `storage_full`); `null` cuando el espacio
+    /// no se pudo medir (`storage_check_unavailable`) o el error no
+    /// trae el dato. Nunca se inventa un valor.
+    this.freeBytes,
     /// FPS esperado de la grabación (ronda 4, fix 3): el rango
     /// seleccionado para el segmento; se muestra en el diagnóstico
     /// para comparar con el FPS medido por segmento.
@@ -84,6 +90,9 @@ class RecordingDiagnostics {
 
   /// Etapa en la que falló el intento (`null` si no hubo error).
   final String? lastErrorStage;
+
+  /// Espacio libre medido en bytes (`null` si no se midió).
+  final int? freeBytes;
 
   /// FPS esperado (del evento `recording_started`).
   final int? fps;
@@ -112,6 +121,7 @@ class RecordingDiagnostics {
       segmentIndex: (details['segmentIndex'] as num?)?.toInt(),
       exceptionClass: details['exceptionClass'] as String?,
       lastErrorStage: stage,
+      freeBytes: (details['freeBytes'] as num?)?.toInt(),
     );
   }
 }
@@ -333,6 +343,17 @@ class RecordingController extends ChangeNotifier {
     text.writeln(
       'Poco espacio: ${diag.lowStorageWarning == null ? '—' : diag.lowStorageWarning! ? 'sí' : 'no'}',
     );
+    // Espacio libre (subetapa 0, 3.1.4): el valor medido cuando el
+    // error lo trae (`storage_full`); «desconocido (no se pudo
+    // medir)» cuando el chequeo de espacio falló
+    // (`storage_check_unavailable`, `freeBytes` en `null`). Sin
+    // error de espacio ni dato medido, la línea no aparece: no se
+    // inventa un valor.
+    if (diag.freeBytes != null) {
+      text.writeln('Espacio libre: ${diag.freeBytes} bytes');
+    } else if (_errorCode == StreamContract.storageCheckUnavailable) {
+      text.writeln('Espacio libre: desconocido (no se pudo medir)');
+    }
     // Audio (3.1.3, plan §8.2): cabecera con/sin audio, frecuencia,
     // canales y motivo de video-only; y la pérdida en caliente, si la
     // hubo. Se muestra también tras la parada: describe la última

@@ -45,6 +45,18 @@ object StreamContract {
     const val GET_RECORDING_STATUS = "getRecordingStatus"
     const val RECOVER_INTERRUPTED_RECORDINGS = "recoverInterruptedRecordings"
 
+    /**
+     * Ruta canónica de grabaciones y estado de la puerta de
+     * reconciliación (subetapa 0, 3.1.4). `getRecordingsDir` devuelve
+     * la ruta absoluta `<filesDir>/recordings/` o el error
+     * `recordings_dir_unavailable`; `getReconciliationState` expone
+     * la puerta única por proceso (`NOT_STARTED` → `RUNNING` →
+     * `DONE` | `FAILED`). Espejo en
+     * `lib/features/streaming/domain/stream_contract.dart`.
+     */
+    const val GET_RECORDINGS_DIR = "getRecordingsDir"
+    const val GET_RECONCILIATION_STATE = "getReconciliationState"
+
     // Eventos del canal de eventos.
     const val EVENT_PERMISSION_RESULT = "permission_result"
     const val EVENT_PERMISSION_CHANGED = "permission_changed"
@@ -128,4 +140,28 @@ object StreamContract {
      * `lib/features/streaming/domain/stream_contract.dart`.
      */
     const val RECORDING_STATE_ERROR = "recording_state_error"
+
+    /**
+     * Errores de la ruta canónica y del espacio (subetapa 0, 3.1.4).
+     * `recordings_dir_unavailable` cubre exclusivamente fallos de
+     * directorio (V1–V4); `storage_check_unavailable`, un `StatFs`
+     * que no pudo medir el espacio. Espejo en
+     * `lib/features/streaming/domain/stream_contract.dart`.
+     */
+    const val RECORDINGS_DIR_UNAVAILABLE = "recordings_dir_unavailable"
+    const val STORAGE_CHECK_UNAVAILABLE = "storage_check_unavailable"
+
+    /**
+     * Códigos de canal (subetapa 0, 3.1.4). Regla (R-E5): existen
+     * en Kotlin solo como espejo; NINGÚN código Kotlin las emite.
+     * Las construye únicamente el wrapper Dart en
+     * `AppServices.create()`: `recordings_channel_unavailable` tras
+     * agotar los reintentos del puente, `recordings_channel_contract_error`
+     * ante una respuesta nula o vacía, y `recordings_channel_timeout`
+     * por intento nativo que supera su `withTimeout`. Espejo en
+     * `lib/features/streaming/domain/stream_contract.dart`.
+     */
+    const val RECORDINGS_CHANNEL_UNAVAILABLE = "recordings_channel_unavailable"
+    const val RECORDINGS_CHANNEL_CONTRACT_ERROR = "recordings_channel_contract_error"
+    const val RECORDINGS_CHANNEL_TIMEOUT = "recordings_channel_timeout"
 }

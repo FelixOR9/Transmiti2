@@ -67,6 +67,15 @@ abstract final class StreamContract {
   static const String recoverInterruptedRecordings =
       'recoverInterruptedRecordings';
 
+  /// Ruta canónica de grabaciones y estado de la puerta de
+  /// reconciliación (subetapa 0, 3.1.4). `getRecordingsDir` devuelve
+  /// la ruta absoluta `<filesDir>/recordings/` o el error
+  /// `recordings_dir_unavailable`; `getReconciliationState` expone
+  /// la puerta única por proceso (`NOT_STARTED` → `RUNNING` →
+  /// `DONE` | `FAILED`). Espejo en Kotlin (`StreamContract.kt`).
+  static const String getRecordingsDir = 'getRecordingsDir';
+  static const String getReconciliationState = 'getReconciliationState';
+
   // Eventos del canal de eventos.
   /// Se emite tras cada solicitud de permisos, una vez por permiso.
   static const String eventPermissionResult = 'permission_result';
@@ -172,6 +181,31 @@ abstract final class StreamContract {
   /// segundo `startRecording` con una grabación en curso), o fallo
   /// genérico de grabación sin código más específico.
   static const String recordingStateError = 'recording_state_error';
+
+  /// Errores de la ruta canónica y del espacio (subetapa 0, 3.1.4).
+  /// `recordings_dir_unavailable` cubre exclusivamente fallos de
+  /// directorio (V1–V4); `storage_check_unavailable`, un `StatFs`
+  /// que no pudo medir el espacio. Espejo en Kotlin
+  /// (`StreamContract.kt`).
+  static const String recordingsDirUnavailable =
+      'recordings_dir_unavailable';
+  static const String storageCheckUnavailable =
+      'storage_check_unavailable';
+
+  /// Códigos de canal (subetapa 0, 3.1.4). Regla (R-E5): existen en
+  /// Kotlin solo como espejo; ningún código Kotlin los emite. Los
+  /// construye únicamente el wrapper Dart en `AppServices.create()`:
+  /// `recordings_channel_unavailable` tras agotar los reintentos del
+  /// puente, `recordings_channel_contract_error` ante una respuesta
+  /// nula o vacía, y `recordings_channel_timeout` por intento nativo
+  /// que supera su `withTimeout`. Espejo en Kotlin
+  /// (`StreamContract.kt`).
+  static const String recordingsChannelUnavailable =
+      'recordings_channel_unavailable';
+  static const String recordingsChannelContractError =
+      'recordings_channel_contract_error';
+  static const String recordingsChannelTimeout =
+      'recordings_channel_timeout';
 }
 
 /// Estado del motor de transmisión que devuelve `getStatus`.
@@ -862,6 +896,136 @@ class RecoveredSegmentInfo {
       sizeBytes: (map['sizeBytes'] as num?)?.toInt() ?? 0,
       reason: map['reason'] as String?,
     );
+  }
+}
+
+/// Estado de la puerta única de reconciliación por proceso
+/// (subetapa 0, 3.1.4): `NOT_STARTED` → `RUNNING` → `DONE` | `FAILED`.
+/// La puerta garantiza una ejecución por proceso y que la biblioteca
+/// espere a `DONE`; la seguridad frente a la carrera con una
+/// grabación activa la da el registro con tokens, no la puerta.
+enum ReconciliationState {
+  notStarted,
+  running,
+  done,
+  failed;
+
+  static ReconciliationState fromWireName(String? value) {
+    return switch (value) {
+      'RUNNING' => ReconciliationState.running,
+      'DONE' => ReconciliationState.done,
+      'FAILED' => ReconciliationState.failed,
+      _ => ReconciliationState.notStarted,
+    };
+  }
+
+  String get wireName => switch (this) {
+    ReconciliationState.notStarted => 'NOT_STARTED',
+    ReconciliationState.running => 'RUNNING',
+    ReconciliationState.done => 'DONE',
+    ReconciliationState.failed => 'FAILED',
+  };
+}
+
+/// Resumen de una reconciliación (subetapa 0, 3.1.4), tal como lo
+/// devuelve `getReconciliationState` al completarse la puerta.
+///
+/// Los contadores nunca se inventan: ausentes en el mapa → 0. Los
+/// tokens (`claimToken`/`reservationToken`) son `Long` internos del
+/// registro Kotlin, seguros de registrar; `null` cuando la
+/// reconciliación no tomó ese papel. `pending` cuenta los segmentos
+/// `PENDING_VERIFICATION` (no verificables: nunca `ready`, nunca se
+/// eliminan). `skippedActive` cuenta los grupos saltados porque su
+/// grabación estaba activa o reservada.
+class ReconciliationSummary {
+  const ReconciliationSummary({
+    this.state = ReconciliationState.notStarted,
+    this.recordingsReconciled = 0,
+    this.segmentsRenamed = 0,
+    this.segmentsClassified = 0,
+    this.orphansReconstructed = 0,
+    this.duplicatesQuarantined = 0,
+    this.pending = 0,
+    this.skippedActive = 0,
+    this.claimToken,
+    this.reservationToken,
+    this.foreignReleaseRejected = 0,
+    this.orphanWriteTestFiles = 0,
+  });
+
+  final ReconciliationState state;
+
+  /// Grabaciones reconciliadas.
+  final int recordingsReconciled;
+
+  /// Segmentos renombrados (`.tmp` → `.mp4` con guarda).
+  final int segmentsRenamed;
+
+  /// Segmentos clasificados (por `status` del sidecar o verificados).
+  final int segmentsClassified;
+
+  /// Huérfanos reconstruidos (archivo sin fila: fila insertada).
+  final int orphansReconstructed;
+
+  /// Duplicados en cuarentena (destino ocupado: nunca sobrescritos).
+  final int duplicatesQuarantined;
+
+  /// Segmentos pendientes de verificación (`PENDING_VERIFICATION`).
+  final int pending;
+
+  /// Grupos saltados por grabación activa o reserva (`skipped_active`).
+  final int skippedActive;
+
+  /// Token del claim del grabador, si lo hubo.
+  final int? claimToken;
+
+  /// Token de la reserva de la reconciliación, si lo hubo.
+  final int? reservationToken;
+
+  /// Liberaciones ajenas rechazadas (`NOT_OWNER`).
+  final int foreignReleaseRejected;
+
+  /// Archivos huérfanos `.write-test-*.tmp` barridos (V4a).
+  final int orphanWriteTestFiles;
+
+  factory ReconciliationSummary.fromMap(Map<Object?, Object?> map) {
+    return ReconciliationSummary(
+      state: ReconciliationState.fromWireName(map['state'] as String?),
+      recordingsReconciled:
+          (map['recordingsReconciled'] as num?)?.toInt() ?? 0,
+      segmentsRenamed: (map['segmentsRenamed'] as num?)?.toInt() ?? 0,
+      segmentsClassified:
+          (map['segmentsClassified'] as num?)?.toInt() ?? 0,
+      orphansReconstructed:
+          (map['orphansReconstructed'] as num?)?.toInt() ?? 0,
+      duplicatesQuarantined:
+          (map['duplicatesQuarantined'] as num?)?.toInt() ?? 0,
+      pending: (map['pending'] as num?)?.toInt() ?? 0,
+      skippedActive: (map['skipped_active'] as num?)?.toInt() ?? 0,
+      claimToken: (map['claimToken'] as num?)?.toInt(),
+      reservationToken: (map['reservationToken'] as num?)?.toInt(),
+      foreignReleaseRejected:
+          (map['foreignReleaseRejected'] as num?)?.toInt() ?? 0,
+      orphanWriteTestFiles:
+          (map['orphanWriteTestFiles'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  Map<String, Object> toMap() {
+    return <String, Object>{
+      'state': state.wireName,
+      'recordingsReconciled': recordingsReconciled,
+      'segmentsRenamed': segmentsRenamed,
+      'segmentsClassified': segmentsClassified,
+      'orphansReconstructed': orphansReconstructed,
+      'duplicatesQuarantined': duplicatesQuarantined,
+      'pending': pending,
+      'skipped_active': skippedActive,
+      if (claimToken != null) 'claimToken': claimToken!,
+      if (reservationToken != null) 'reservationToken': reservationToken!,
+      'foreignReleaseRejected': foreignReleaseRejected,
+      'orphanWriteTestFiles': orphanWriteTestFiles,
+    };
   }
 }
 
