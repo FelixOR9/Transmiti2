@@ -300,4 +300,124 @@ void main() {
       },
     );
   });
+
+  // U23 (3.1.4 subetapa 0, grupo 0-f): el `switch` de
+  // `_recordingErrorText` distingue los tres mensajes de tiempo de
+  // grabación (`storage_full` / `storage_check_unavailable` /
+  // `recordings_dir_unavailable`) y un código de canal cae en la rama
+  // por defecto identificándose por el código (rev. 3 §4.3). El texto
+  // aparece como SnackBar y como texto persistente de error, por eso
+  // se exige al menos una aparición y la ausencia de los otros dos.
+  group('BroadcastScreen: U23 mensajes de error de grabación', () {
+    Future<void> startRecordingWithError(
+      WidgetTester tester,
+      String code,
+    ) async {
+      final FakeStreamingService service = grantedService();
+      service.startRecordingError = code;
+      await pumpStudio(tester, service);
+      await startPreview(tester);
+      await tapRecord(tester);
+    }
+
+    testWidgets('storage_full muestra «Sin espacio para grabar.»', (
+      WidgetTester tester,
+    ) async {
+      await startRecordingWithError(tester, StreamContract.storageFull);
+      expect(
+        find.text('Sin espacio para grabar. (storage_full)'),
+        findsWidgets,
+      );
+      expect(
+        find.text(
+          'No se pudo comprobar el espacio disponible para grabar. '
+          '(storage_check_unavailable)',
+        ),
+        findsNothing,
+      );
+      expect(
+        find.text(
+          'No se pudo preparar la carpeta de grabaciones. '
+          '(recordings_dir_unavailable)',
+        ),
+        findsNothing,
+      );
+    });
+
+    testWidgets(
+      'storage_check_unavailable muestra su mensaje propio',
+      (WidgetTester tester) async {
+        await startRecordingWithError(
+          tester,
+          StreamContract.storageCheckUnavailable,
+        );
+        expect(
+          find.text(
+            'No se pudo comprobar el espacio disponible para grabar. '
+            '(storage_check_unavailable)',
+          ),
+          findsWidgets,
+        );
+        expect(
+          find.text('Sin espacio para grabar. (storage_full)'),
+          findsNothing,
+        );
+        expect(
+          find.text(
+            'No se pudo preparar la carpeta de grabaciones. '
+            '(recordings_dir_unavailable)',
+          ),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets(
+      'recordings_dir_unavailable muestra su mensaje propio',
+      (WidgetTester tester) async {
+        await startRecordingWithError(
+          tester,
+          StreamContract.recordingsDirUnavailable,
+        );
+        expect(
+          find.text(
+            'No se pudo preparar la carpeta de grabaciones. '
+            '(recordings_dir_unavailable)',
+          ),
+          findsWidgets,
+        );
+        expect(
+          find.text('Sin espacio para grabar. (storage_full)'),
+          findsNothing,
+        );
+        expect(
+          find.text(
+            'No se pudo comprobar el espacio disponible para grabar. '
+            '(storage_check_unavailable)',
+          ),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets(
+      'un código de canal cae en la rama por defecto con su código',
+      (WidgetTester tester) async {
+        await startRecordingWithError(
+          tester,
+          StreamContract.recordingsChannelUnavailable,
+        );
+        expect(
+          find.text(
+            'No se pudo grabar. (recordings_channel_unavailable)',
+          ),
+          findsWidgets,
+        );
+        expect(
+          find.text('Sin espacio para grabar. (storage_full)'),
+          findsNothing,
+        );
+      },
+    );
+  });
 }
