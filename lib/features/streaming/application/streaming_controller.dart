@@ -26,6 +26,12 @@ class StreamingController {
     required RecordingRepository recordings,
     required StreamingService service,
     NowMs? nowMs,
+    // Ruta canónica y cómo se resolvió (subetapa 0, grupo 0-f):
+    // se reenvían al `RecordingController` para el diagnóstico
+    // (F1/F8). `null` = no medido (pruebas sin arranque real).
+    this.recordingsDirPath,
+    this.recordingsDirAttempts,
+    this.recordingsDirResolutionMs,
   }) : _destinations = destinations,
        _recordings = recordings,
        _service = service,
@@ -35,6 +41,15 @@ class StreamingController {
   final RecordingRepository _recordings;
   final StreamingService _service;
   final NowMs _nowMs;
+
+  /// Ruta canónica de grabaciones (`<filesDir>/recordings/`).
+  final String? recordingsDirPath;
+
+  /// Intento en el que se resolvió la ruta (1 en el caso normal).
+  final int? recordingsDirAttempts;
+
+  /// Duración medida de la resolución de ruta, en milisegundos.
+  final int? recordingsDirResolutionMs;
 
   /// Flujo de permisos en la UI (subetapa 3.1.0): estados, solicitud y
   /// re-consulta al regresar a la app. Se crea perezosamente sobre el
@@ -53,6 +68,9 @@ class StreamingController {
     recordings: _recordings,
     isPreviewActive: () => preview.state == PreviewState.active,
     nowMs: _nowMs,
+    recordingsDirPath: recordingsDirPath,
+    recordingsDirAttempts: recordingsDirAttempts,
+    recordingsDirResolutionMs: recordingsDirResolutionMs,
   );
 
   /// Vista previa real de cámara (subetapa 3.1.1): estados, inicio y

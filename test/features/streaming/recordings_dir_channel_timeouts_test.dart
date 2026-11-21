@@ -42,7 +42,7 @@ class _ScriptedRecordingsDirService extends FakeStreamingService {
 }
 
 Future<StreamingException> captureThrow(
-  Future<String> Function() run,
+  Future<RecordingsDirResolution> Function() run,
 ) async {
   try {
     await run();
@@ -148,13 +148,17 @@ void main() {
     // La segunda llamada (FS normal) completa con éxito y
     // devuelve la ruta: el wrapper no quedó envenenado por el
     // intento caducado (la liberación del hilo IO nativo la
-    // prueba U58b en Kotlin).
-    final String path = await AppServices.resolveRecordingsDir(
+    // prueba U58b en Kotlin). Grupo 0-f: la resolución dice que
+    // fue en el intento 1 y cuánto tardó.
+    final RecordingsDirResolution ok =
+        await AppServices.resolveRecordingsDir(
       FakeStreamingService(),
       attemptTimeout: const Duration(seconds: 3),
       retryDelays: const <Duration>[],
     );
-    expect(path, '/fake/recordings');
+    expect(ok.path, '/fake/recordings');
+    expect(ok.attempts, 1);
+    expect(ok.durationMs, greaterThanOrEqualTo(0));
   });
 
   test('U63 canal, disco y contrato: tres codigos y tres mensajes distintos',
@@ -165,7 +169,7 @@ void main() {
       Duration(milliseconds: 1),
     ];
 
-    Future<String> resolve(FakeStreamingService service) {
+    Future<RecordingsDirResolution> resolve(FakeStreamingService service) {
       return AppServices.resolveRecordingsDir(
         service,
         attemptTimeout: fastTimeout,

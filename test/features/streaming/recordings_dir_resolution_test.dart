@@ -20,7 +20,7 @@ void main() {
 
 
   Future<StreamingException> captureThrow(
-    Future<String> Function() run,
+    Future<RecordingsDirResolution> Function() run,
   ) async {
     try {
       await run();
@@ -30,7 +30,7 @@ void main() {
     fail('Se esperaba StreamingException');
   }
 
-  Future<String> resolve(
+  Future<RecordingsDirResolution> resolve(
     FakeStreamingService service, {
     Duration attemptTimeout = fastTimeout,
     List<Duration> retryDelays = fastDelays,
@@ -71,8 +71,12 @@ void main() {
         PlatformException(code: 'camera_unavailable'),
         '/fake/recordings',
       ];
-    final String path = await resolve(service);
-    expect(path, '/fake/recordings');
+    final RecordingsDirResolution resolution = await resolve(service);
+    expect(resolution.path, '/fake/recordings');
+    // Grupo 0-f: la resolución dice en qué intento se resolvió y
+    // cuánto tardó (lo que F1/F8 leen en el diagnóstico).
+    expect(resolution.attempts, 3);
+    expect(resolution.durationMs, greaterThanOrEqualTo(0));
     expect(service.getRecordingsDirCalls, 3);
     expect(service.getRecordingsDirAttempts, <int>[1, 2, 3]);
   });

@@ -160,6 +160,13 @@ class RecordingController extends ChangeNotifier {
     required bool Function() isPreviewActive,
     NowMs? nowMs,
     RecordingTimerFactory? createTimer,
+    // Ruta canónica y cómo se resolvió (subetapa 0, grupo 0-f):
+    // las mide `AppServices` al arrancar y llegan por
+    // `StreamingController`. `null` = no medido (pruebas sin
+    // arranque real): el diagnóstico no inventa la línea.
+    this.recordingsDirPath,
+    this.recordingsDirAttempts,
+    this.recordingsDirResolutionMs,
   }) : _service = service,
        _permissions = permissions,
        _recordings = recordings,
@@ -173,6 +180,15 @@ class RecordingController extends ChangeNotifier {
   final bool Function() _isPreviewActive;
   final NowMs _nowMs;
   final RecordingTimerFactory _createTimer;
+
+  /// Ruta canónica de grabaciones (`<filesDir>/recordings/`).
+  final String? recordingsDirPath;
+
+  /// Intento en el que se resolvió la ruta (1 en el caso normal).
+  final int? recordingsDirAttempts;
+
+  /// Duración medida de la resolución de ruta, en milisegundos.
+  final int? recordingsDirResolutionMs;
 
   RecordingState _state = RecordingState.idle;
   RecordingState get state => _state;
@@ -348,6 +364,20 @@ class RecordingController extends ChangeNotifier {
     text.writeln();
     text.writeln('Estado: ${_state.name}');
     text.writeln('Grabación: ${_recordingId ?? diag.recordingId ?? '—'}');
+    // Ruta canónica (subetapa 0, grupo 0-f): la decide el nativo y
+    // la mide `AppServices` al arrancar. Es la línea que F1/F8 leen
+    // en el teléfono: la ruta de la fila SQLite y la de los
+    // segmentos salen de esta misma ruta, y `attempt`/`resolucionMs`
+    // confirman que se resolvió en el primer intento y cuánto tardó.
+    // Sin valores medidos no aparece: no se inventa una ruta.
+    if (recordingsDirPath != null) {
+      text.writeln('Carpeta de grabaciones: $recordingsDirPath');
+      text.writeln(
+        'recordingsDirState=ready '
+        'attempt=${recordingsDirAttempts ?? '—'} '
+        'resolucionMs=${recordingsDirResolutionMs ?? '—'}ms',
+      );
+    }
     text.writeln(
       'Segmento actual: ${currentSegmentDisplay?.toString() ?? '—'}',
     );
@@ -415,10 +445,14 @@ class RecordingController extends ChangeNotifier {
     // pendientes (U11/U14). Mientras la puerta corre, la línea dice
     // «preparando…»: la biblioteca no presenta datos hasta `DONE`
     // (I6). Sin pasada todavía, no aparece ninguna línea: no se
-    // inventa un resumen. `recordingsDirState`/`attempt`/
-    // `writeTestDeleteFailed` y la duración medida de la resolución
-    // de ruta no viven aquí: son del arranque (`AppServices`, 0-b/
-    // 0-e); el controlador expone lo que recibe por el canal.
+    // inventa un resumen. `recordingsDirState`/`attempt` y la
+    // duración medida de la resolución de ruta SÍ viven aquí desde
+    // el grupo 0-f (llegan por constructor desde `AppServices` y se
+    // muestran arriba, junto a la ruta). Lo que sigue sin vivir
+    // aquí es `writeTestDeleteFailed`: la respuesta nativa de éxito
+    // es solo la ruta (`GetRecordingsDirReply.Success` lleva solo
+    // el `absolutePath`), así que ese aviso solo queda en el log
+    // nativo; exponerlo exigiría cambiar el contrato del canal.
     if (_reconciliationState == ReconciliationState.running &&
         _lastReconciliation == null) {
       text.writeln('Reconciliación: preparando…');

@@ -19,6 +19,31 @@ import 'package:transmiti2/features/streaming/data/recording_repository.dart';
 import 'package:transmiti2/features/streaming/data/stream_destination_repository.dart';
 import 'package:transmiti2/features/streaming/domain/stream_contract.dart';
 
+/// Resultado de `AppServices.resolveRecordingsDir` (subetapa 0,
+/// 3.1.4, grupo 0-f): la ruta canónica más cómo se llegó a ella.
+/// `attempts` es el intento en el que se resolvió (1 en el caso
+/// normal; 3 si hubo dos fallos temporales antes); `durationMs` es
+/// la duración medida de la resolución completa, en milisegundos.
+/// Ambos existen para que el diagnóstico del teléfono los muestre
+/// (F1/F8): sin ellos no hay forma de confirmar en el S24 Ultra que
+/// la ruta se resolvió en el primer intento ni cuánto tardó.
+class RecordingsDirResolution {
+  const RecordingsDirResolution({
+    required this.path,
+    required this.attempts,
+    required this.durationMs,
+  });
+
+  /// Ruta canónica (`<filesDir>/recordings/`).
+  final String path;
+
+  /// Intento en el que se resolvió (1..3).
+  final int attempts;
+
+  /// Duración medida de la resolución completa, en milisegundos.
+  final int durationMs;
+}
+
 /// Servicios compartidos de la app: almacenamiento y partido actual.
 class AppServices {
   AppServices({
@@ -105,7 +130,7 @@ class AppServices {
   ///
   /// `attemptTimeout` y `retryDelays` existen para las pruebas (los
   /// valores de producción son los de arriba).
-  static Future<String> resolveRecordingsDir(
+  static Future<RecordingsDirResolution> resolveRecordingsDir(
     StreamingService service, {
     Duration attemptTimeout = const Duration(seconds: 3),
     List<Duration> retryDelays = const <Duration>[
@@ -113,6 +138,7 @@ class AppServices {
       Duration(milliseconds: 500),
     ],
   }) async {
+    final Stopwatch stopwatch = Stopwatch()..start();
     final int maxAttempts = 1 + retryDelays.length;
     String? lastStage;
     String? lastErrorCode;
@@ -133,7 +159,11 @@ class AppServices {
             },
           );
         }
-        return path;
+        return RecordingsDirResolution(
+          path: path,
+          attempts: attempt,
+          durationMs: stopwatch.elapsedMilliseconds,
+        );
       } on StreamingException catch (e) {
         // Duro inmediato: fallo de directorio o error de contrato.
         // El de contrato se lanza arriba, dentro de este mismo `try`:
@@ -206,17 +236,28 @@ class AppServices {
   }) async {
     final StreamingService service =
         streamingService ?? MethodChannelStreamingService();
-    final String recordingsDirPath = recordingsDirPathOverride ??
-        await resolveRecordingsDir(
-          service,
-          attemptTimeout:
-              recordingsDirAttemptTimeout ?? const Duration(seconds: 3),
-          retryDelays: recordingsDirRetryDelays ??
-              const <Duration>[
-                Duration(milliseconds: 250),
-                Duration(milliseconds: 500),
-              ],
-        );
+    // Ruta canónica + cómo se resolvió (intento y duración medida,
+    // grupo 0-f): el diagnóstico del teléfono (F1/F8) los muestra.
+    // Con `recordingsDirPathOverride` (solo pruebas) no hay
+    // resolución real: intento 1 y duración 0.
+    final RecordingsDirResolution recordingsDir =
+        recordingsDirPathOverride != null
+            ? RecordingsDirResolution(
+                path: recordingsDirPathOverride,
+                attempts: 1,
+                durationMs: 0,
+              )
+            : await resolveRecordingsDir(
+                service,
+                attemptTimeout:
+                    recordingsDirAttemptTimeout ?? const Duration(seconds: 3),
+                retryDelays: recordingsDirRetryDelays ??
+                    const <Duration>[
+                      Duration(milliseconds: 250),
+                      Duration(milliseconds: 500),
+                    ],
+              );
+    final String recordingsDirPath = recordingsDir.path;
     final String dbFolder = await getDatabasesPath();
     final Database db = await AppDatabase.open(
       path: p.join(dbFolder, 'transmiti2.db'),
@@ -248,6 +289,9 @@ class AppServices {
         recordingsDirPath: recordingsDirPath,
       ),
       service: service,
+      recordingsDirPath: recordingsDir.path,
+      recordingsDirAttempts: recordingsDir.attempts,
+      recordingsDirResolutionMs: recordingsDir.durationMs,
     );
     return AppServices(
       teams: teams,

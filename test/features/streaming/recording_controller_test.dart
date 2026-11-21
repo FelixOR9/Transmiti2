@@ -1363,5 +1363,79 @@ void main() {
         );
       },
     );
+
+    // Ruta canónica en el diagnóstico (subetapa 0, grupo 0-f): lo que
+    // F1/F8 leen en el teléfono. El controlador recibe la ruta, el
+    // intento y la duración medida por constructor (desde `AppServices`
+    // vía `StreamingController`); sin ellos, no se inventa la línea.
+    group('RecordingController: ruta canónica en el diagnóstico', () {
+      RecordingController makeController({
+        String? recordingsDirPath,
+        int? recordingsDirAttempts,
+        int? recordingsDirResolutionMs,
+      }) {
+        final RecordingController controller = RecordingController(
+          service: service,
+          permissions: permissions,
+          recordings: recordings,
+          isPreviewActive: () => previewActive,
+          nowMs: () => now,
+          createTimer: (Duration duration, void Function(Timer) callback) {
+            final FakeTimer timer = FakeTimer(callback);
+            timers.add(timer);
+            return timer;
+          },
+          recordingsDirPath: recordingsDirPath,
+          recordingsDirAttempts: recordingsDirAttempts,
+          recordingsDirResolutionMs: recordingsDirResolutionMs,
+        );
+        controller.attach();
+        addTearDown(controller.detach);
+        return controller;
+      }
+
+      testWidgets('con valores medidos muestra ruta, intento y duración',
+          (WidgetTester tester) async {
+        await pumpController(tester);
+        final RecordingController withPath = makeController(
+          recordingsDirPath: '/fake/recordings',
+          recordingsDirAttempts: 1,
+          recordingsDirResolutionMs: 12,
+        );
+        service.startRecordingError = StreamContract.storageFull;
+        await withPath.start();
+        await tester.pump();
+
+        expect(withPath.state, RecordingState.error);
+        expect(
+          withPath.diagnosticText,
+          contains('Carpeta de grabaciones: /fake/recordings'),
+        );
+        expect(
+          withPath.diagnosticText,
+          contains('recordingsDirState=ready attempt=1 resolucionMs=12ms'),
+        );
+      });
+
+      testWidgets('sin valores medidos no inventa la línea de ruta',
+          (WidgetTester tester) async {
+        await pumpController(tester);
+        final RecordingController withoutPath = makeController();
+        service.startRecordingError = StreamContract.storageFull;
+        await withoutPath.start();
+        await tester.pump();
+
+        expect(withoutPath.state, RecordingState.error);
+        expect(withoutPath.diagnosticText, isNotNull);
+        expect(
+          withoutPath.diagnosticText,
+          isNot(contains('Carpeta de grabaciones:')),
+        );
+        expect(
+          withoutPath.diagnosticText,
+          isNot(contains('recordingsDirState=')),
+        );
+      });
+    });
   });
 }
