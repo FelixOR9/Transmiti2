@@ -13,6 +13,16 @@ name: TRANSMITI2 - Compilar APK de depuración
 # ningún lado: el APK compilaba, pero los tests Kotlin no corrían.
 # Si fallan, el CI falla antes de subir el artefacto.
 #
+# CAMBIO v3 (firma estable, 3.1.3): antes del build se restaura el
+# keystore debug dedicado desde el secreto
+# TRANSMITI2_DEBUG_KEYSTORE_BASE64 y se exportan sus credenciales
+# (TRANSMITI2_DEBUG_KEYSTORE_PASSWORD, TRANSMITI2_DEBUG_KEY_ALIAS,
+# TRANSMITI2_DEBUG_KEY_PASSWORD) para que Gradle firme con esa clave
+# en lugar de generar una nueva en cada run. Si un secreto falta, el
+# paso falla con mensaje claro. Después del build se imprime la huella
+# SHA-256 del certificado del APK con apksigner para verificar que la
+# firma es la esperada.
+#
 # NOTA (Fase 3.0): android/gradlew, android/gradlew.bat y
 # android/gradle/wrapper/gradle-wrapper.jar NO están en el repositorio:
 # android/.gitignore los excluye (es el .gitignore estándar de Flutter).
@@ -69,8 +79,39 @@ jobs:
       - name: flutter test
         run: flutter test --reporter expanded
 
+      - name: Restaurar keystore de firma estable
+        run: |
+          if [ -z "${{ secrets.TRANSMITI2_DEBUG_KEYSTORE_BASE64 }}" ]; then
+            echo "ERROR: falta el secreto TRANSMITI2_DEBUG_KEYSTORE_BASE64" >&2
+            exit 1
+          fi
+          if [ -z "${{ secrets.TRANSMITI2_DEBUG_KEYSTORE_PASSWORD }}" ] || [ -z "${{ secrets.TRANSMITI2_DEBUG_KEY_ALIAS }}" ] || [ -z "${{ secrets.TRANSMITI2_DEBUG_KEY_PASSWORD }}" ]; then
+            echo "ERROR: falta uno de los secretos TRANSMITI2_DEBUG_KEYSTORE_PASSWORD, TRANSMITI2_DEBUG_KEY_ALIAS o TRANSMITI2_DEBUG_KEY_PASSWORD" >&2
+            exit 1
+          fi
+          mkdir -p ~/.android
+          echo "${{ secrets.TRANSMITI2_DEBUG_KEYSTORE_BASE64 }}" | base64 -d > ~/.android/debug.keystore
+          test -s ~/.android/debug.keystore || { echo "ERROR: el keystore restaurado está vacío" >&2; exit 1; }
+          {
+            echo "TRANSMITI2_DEBUG_KEYSTORE_PATH=$HOME/.android/debug.keystore"
+            echo "TRANSMITI2_DEBUG_KEYSTORE_PASSWORD=${{ secrets.TRANSMITI2_DEBUG_KEYSTORE_PASSWORD }}"
+            echo "TRANSMITI2_DEBUG_KEY_ALIAS=${{ secrets.TRANSMITI2_DEBUG_KEY_ALIAS }}"
+            echo "TRANSMITI2_DEBUG_KEY_PASSWORD=${{ secrets.TRANSMITI2_DEBUG_KEY_PASSWORD }}"
+          } >> "$GITHUB_ENV"
+          echo "Keystore de firma estable restaurado en ~/.android/debug.keystore"
+
       - name: Compilar el APK de depuración
         run: flutter build apk --debug
+
+      - name: Verificar firma del APK
+        run: |
+          APK=build/app/outputs/flutter-apk/app-debug.apk
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -name apksigner -type f | sort -V | tail -n 1)
+          AAPT2=$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -name aapt2 -type f | sort -V | tail -n 1)
+          echo "apksigner: $APKSIGNER"
+          echo "aapt2: $AAPT2"
+          "$APKSIGNER" verify --print-certs "$APK"
+          "$AAPT2" dump badging "$APK" | grep -E "^(package|sdkVersion|targetSdkVersion|native-code)"
 
       - name: Pruebas unitarias Kotlin
         working-directory: android
