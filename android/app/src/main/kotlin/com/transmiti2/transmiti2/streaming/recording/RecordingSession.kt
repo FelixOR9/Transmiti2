@@ -224,6 +224,12 @@ data class RecordingResult(
      */
     val quietestSecondPeak: Int? = null,
     val quietestSecondNonZero: Int? = null,
+    /**
+     * Grupo S (S1, solo lectura): pico de la ventana silenciosa que
+     * disparó el detector (`audio_silence_samples`, esperado 0).
+     * `null` si no hubo disparo: nunca se inventa un valor.
+     */
+    val silencePeak: Int? = null,
 ) {
     fun toMap(): Map<String, Any?> = mapOf(
         "recordingId" to recordingId,
@@ -248,6 +254,7 @@ data class RecordingResult(
         "eosTimedOut" to eosTimedOut,
         "quietestSecondPeak" to quietestSecondPeak,
         "quietestSecondNonZero" to quietestSecondNonZero,
+        "silencePeak" to silencePeak,
     )
 
     companion object {
@@ -279,6 +286,7 @@ data class RecordingResult(
             eosTimedOut: Boolean = false,
             quietestSecondPeak: Int? = null,
             quietestSecondNonZero: Int? = null,
+            silencePeak: Int? = null,
         ): RecordingResult {
             val status = when {
                 segments.isEmpty() -> "corrupt"
@@ -309,6 +317,7 @@ data class RecordingResult(
                 eosTimedOut = eosTimedOut,
                 quietestSecondPeak = quietestSecondPeak,
                 quietestSecondNonZero = quietestSecondNonZero,
+                silencePeak = silencePeak,
             )
         }
     }
@@ -554,6 +563,15 @@ open class RecordingSession(
     private var audioLost: Boolean = false
     private var audioLostReason: String? = null
     private var audioLostSegmentIndex: Int? = null
+    /**
+     * Grupo S (S1): pico de la ventana silenciosa que disparó el
+     * detector (`audio_silence_samples`, esperado 0). Se captura en
+     * `onAudioError` desde `details` y se guarda para el evento y
+     * para el resultado de parada (`silencioPico`): aquí, no en el
+     * puerto del encoder — tras la recreación el encoder es otro y
+     * el pico del viejo se perdería. `null` si no hubo disparo.
+     */
+    private var silencePeakAtLoss: Int? = null
     /** Una recreación en segundo plano en curso (como mucho una por
      * segmento: si también falla, se reintenta en la rotación). */
     @Volatile
@@ -730,6 +748,7 @@ open class RecordingSession(
         audioLost = false
         audioLostReason = null
         audioLostSegmentIndex = null
+        silencePeakAtLoss = null
         audioRecreateInFlight = false
         audioRecreatedSegmentIndex = null
         audioFormatWaitExpired = false
@@ -1256,13 +1275,27 @@ open class RecordingSession(
     private fun onAudioError(e: Exception, generation: Int) {
         if (generation != audioGeneration) return
         if (audioLost) return
-        val reason = (e as? RecordingException)?.details?.get("reason")
+        val details = (e as? RecordingException)?.details
+        val reason = details?.get("reason")
             as? String ?: "audio_encoder_error"
         audioLost = true
         audioLostReason = reason
         audioLostSegmentIndex = segmentIndex
         if (audioLostSegmentIndex == segmentIndex) {
             segmentAudioReason = reason
+        }
+        // Grupo S (S1): las claves del disparo de silencio
+        // (`silenceMs`, `silenceStartOffsetMs`, `silencePeak`) viajan
+        // en `details` y se guardan para el evento y para el
+        // resultado de parada (`silencioPico`). Solo existen con el
+        // motivo `audio_silence_samples`; los demás motivos no las
+        // llevan y el mapa del evento queda como antes. Se leen como
+        // `Number`: en un `mapOf` mixto Kotlin infiere `Long` para
+        // el literal `0` (probado: `as? Int` da `null`), así que el
+        // cast debe aceptar `Int` y `Long`.
+        val silencePeak = (details?.get("silencePeak") as? Number)?.toInt()
+        if (silencePeak != null) {
+            silencePeakAtLoss = silencePeak
         }
         // El formato del encoder muerto queda obsoleto: sin él, la
         // rotación abre el segmento siguiente video-only (no con una
@@ -1272,14 +1305,22 @@ open class RecordingSession(
             "recording: audio perdido ($reason) en el segmento " +
                 "$segmentIndex; el video continúa",
         )
+        val eventMap = mutableMapOf<String, Any?>(
+            "recordingId" to recordingId,
+            "reason" to reason,
+            "segmentIndex" to segmentIndex,
+            "message" to (e.message ?: "Audio perdido."),
+        )
+        (details?.get("silenceMs") as? Number)?.let {
+            eventMap["silenceMs"] = it.toLong()
+        }
+        (details?.get("silenceStartOffsetMs") as? Number)?.let {
+            eventMap["silenceStartOffsetMs"] = it.toLong()
+        }
+        silencePeak?.let { eventMap["silencePeak"] = it }
         emitEvent(
             StreamContract.EVENT_RECORDING_AUDIO_LOST,
-            mapOf(
-                "recordingId" to recordingId,
-                "reason" to reason,
-                "segmentIndex" to segmentIndex,
-                "message" to (e.message ?: "Audio perdido."),
-            ),
+            eventMap,
         )
         launchAudioRecreation()
     }
@@ -2209,6 +2250,10 @@ open class RecordingSession(
         // encoder y antes de liberarlo que los demás contadores.
         var quietestPeakAtStop: Int? = null
         var quietestNonZeroAtStop: Int? = null
+        // Grupo S (S1): el pico del disparo de silencio no se lee
+        // del encoder (tras la recreación es otro): se capturó en
+        // `onAudioError` (`silencePeakAtLoss`).
+        var silencePeakAtStop: Int? = null
         try {
             // EOS a ambos encoders (audio primero: parar la captura)
             // y drenado final (5 s en total); si no llega, se detiene
@@ -2301,6 +2346,10 @@ open class RecordingSession(
             quietestPeakAtStop = audioEncoderAtStop?.quietestSecondPeak
             quietestNonZeroAtStop =
                 audioEncoderAtStop?.quietestSecondNonZero
+            // Grupo S (S1): el pico del disparo, capturado en
+            // `onAudioError` (no del encoder: tras la recreación es
+            // otro).
+            silencePeakAtStop = silencePeakAtLoss
             try {
                 encoder?.release()
             } catch (_: Exception) {
@@ -2341,6 +2390,7 @@ open class RecordingSession(
             eosTimedOut = eosTimedOutAtStop,
             quietestSecondPeak = quietestPeakAtStop,
             quietestSecondNonZero = quietestNonZeroAtStop,
+            silencePeak = silencePeakAtStop,
         )
         sessionMutex.withLock {
             lastResult = result

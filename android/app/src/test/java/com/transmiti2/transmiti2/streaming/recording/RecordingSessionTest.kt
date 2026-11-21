@@ -251,11 +251,14 @@ class RecordingSessionTest {
             listener?.onAudioSample(ByteBuffer.allocate(10), info)
         }
 
-        fun deliverError(reason: String = "audio_dead_object") {
+        fun deliverError(
+            reason: String = "audio_dead_object",
+            extraDetails: Map<String, Any?> = emptyMap(),
+        ) {
             listener?.onAudioError(
                 RecordingException.audioError(
                     "Micrófono perdido.",
-                    mapOf("reason" to reason),
+                    mapOf("reason" to reason) + extraDetails,
                 ),
             )
         }
@@ -1253,6 +1256,108 @@ class RecordingSessionTest {
             val result = session.stop()
             assertEquals("ready", result.status)
             assertEquals("audio_input_error", result.segments[0].audioReason)
+        }
+
+    @Test
+    fun `T-S11 perdida por silencio emite recording_audio_lost con las tres claves y el video continua`() =
+        runBlocking {
+            // Grupo S (S1): el motivo nuevo `audio_silence_samples`
+            // viaja con `silenceMs`/`silenceStartOffsetMs`/
+            // `silencePeak` en el evento y en el resultado de parada
+            // (`silencioPico`); el video continúa y el segmento queda
+            // `ready` con `audioReason`.
+            val session = buildSession()
+            startRecording(session, audioEnabled = true)
+            fakeEncoder.deliverSample(0L, true)
+            fakeAudioEncoder.deliverSample(0L)
+            fakeAudioEncoder.deliverSample(21_333L)
+            fakeEncoder.deliverSample(33_333L, false)
+            fakeAudioEncoder.deliverError(
+                reason = "audio_silence_samples",
+                extraDetails = mapOf(
+                    "silenceMs" to 5_000L,
+                    "silenceStartOffsetMs" to 12_345L,
+                    "silencePeak" to 0,
+                ),
+            )
+            val payload = events.first {
+                it.first == StreamContract.EVENT_RECORDING_AUDIO_LOST
+            }.second
+            assertEquals("audio_silence_samples", payload["reason"])
+            assertEquals(5_000L, payload["silenceMs"])
+            assertEquals(12_345L, payload["silenceStartOffsetMs"])
+            assertEquals(0, payload["silencePeak"])
+            assertEquals(RecordingState.RECORDING, session.currentState())
+            // El video continúa tras la pérdida.
+            fakeEncoder.deliverSample(66_666L, false)
+            fakeEncoder.deliverSample(100_000L, false)
+            assertEquals(
+                listOf(0L, 33_333L, 66_666L, 100_000L),
+                muxers[0].writtenPtsByTrack[0],
+            )
+            val result = session.stop()
+            assertEquals("ready", result.status)
+            assertEquals(1, result.segments.size)
+            assertEquals(
+                "audio_silence_samples",
+                result.segments[0].audioReason,
+            )
+            assertEquals(0, result.silencePeak)
+        }
+
+    @Test
+    fun `T-S12 tras la perdida por silencio la rotacion recupera el audio en el segmento siguiente`() =
+        runBlocking {
+            // Grupo S (S1): como la rotación tras la pérdida por
+            // `audio_dead_object`, pero con el motivo nuevo: el
+            // segmento 0 conserva su pista con las muestras previas
+            // a la pérdida y el segmento 1 recupera el audio.
+            val session = buildSession()
+            startRecording(session, audioEnabled = true)
+            fakeEncoder.deliverSample(0L, true)
+            fakeAudioEncoder.deliverSample(0L)
+            fakeAudioEncoder.deliverSample(21_333L)
+            fakeEncoder.deliverSample(1_000_000L, false)
+            // Pérdida a los ~2 s: el segmento 0 conserva su pista con
+            // las muestras que llegaron; la recreación arranca el
+            // encoder nuevo (mismo falso) para el segmento siguiente.
+            fakeAudioEncoder.deliverError(
+                reason = "audio_silence_samples",
+                extraDetails = mapOf(
+                    "silenceMs" to 5_000L,
+                    "silenceStartOffsetMs" to 2_000L,
+                    "silencePeak" to 0,
+                ),
+            )
+            // Las muestras del encoder nuevo a mitad de segmento se
+            // descartan (D7: reanudación solo en el siguiente).
+            for (second in 2..62) {
+                fakeEncoder.deliverSample(
+                    second * 1_000_000L,
+                    second % 2 == 0,
+                )
+                fakeAudioEncoder.deliverSample(second * 1_000_000L + 500_000L)
+            }
+            fakeEncoder.deliverSample(63_000_000L, false)
+            assertEquals(2, muxers.size)
+            // Segmento 0: solo las muestras de audio previas a la pérdida.
+            assertEquals(
+                listOf(0L, 21_333L),
+                muxers[0].writtenPtsByTrack[1],
+            )
+            // Segmento 1: recupera la pista con el encoder nuevo.
+            assertEquals(
+                listOf(500_000L, 1_500_000L, 2_500_000L),
+                muxers[1].writtenPtsByTrack[1],
+            )
+            val result = session.stop()
+            assertEquals(2, result.segments.size)
+            assertEquals(
+                "audio_silence_samples",
+                result.segments[0].audioReason,
+            )
+            assertEquals(null, result.segments[1].audioReason)
+            assertEquals(0, result.silencePeak)
         }
 
     @Test

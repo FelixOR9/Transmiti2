@@ -414,6 +414,18 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
      */
     private var levelMeterDisabled = false
 
+    /**
+     * Grupo S (S1): detector de silencio en las muestras (ceros
+     * exactos 5 s, pico <= 4). Se crea por arranque en
+     * `configureAndStart`; si `observe()` fallara, se desactiva
+     * para ese arranque (`null`) y el audio sigue como antes de S
+     * (sin detección), nunca rompe el bucle lector. Solo lo escribe
+     * el hilo lector. `silenceDetectorFailures` cuenta los fallos
+     * (como `inputErrorCount`/`outputErrorCount` de la ronda U).
+     */
+    private var silenceDetector: AudioSilenceDetector? = null
+    private var silenceDetectorFailures: Int = 0
+
     /** Pico del segundo más silencioso (`null` sin ventana completa). */
     override val quietestSecondPeak: Int?
         get() = levelTracker.quietestSecondPeak
@@ -482,6 +494,10 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
         // arranque (y se reactiva si se había desactivado por fallo).
         levelTracker.reset()
         levelMeterDisabled = false
+        // Grupo S (S1): el detector de silencio se crea por arranque
+        // (y se reactiva si se había desactivado por fallo).
+        silenceDetector = AudioSilenceDetector()
+        silenceDetectorFailures = 0
         val minBuffer = AudioRecord.getMinBufferSize(
             config.sampleRate,
             AudioFormat.CHANNEL_IN_MONO,
@@ -851,6 +867,59 @@ class AudioEncoder(override val config: AudioEncoderConfig) : AudioEncoderPort {
                             levelMeterDisabled = true
                             Transmiti2Logger.e(
                                 "audio: medición de nivel desactivada: " +
+                                    e.javaClass.simpleName,
+                            )
+                        }
+                    }
+                    // Grupo S (S1): detector de silencio en las
+                    // muestras (ceros exactos 5 s, pico <= 4). Se
+                    // evalúa en la misma rama que la medición S0,
+                    // antes de encolar la trama. Guardado igual:
+                    // si fallara, se desactiva para este arranque
+                    // y el audio sigue como antes de S; nunca rompe
+                    // el bucle lector. Al disparar, el lector
+                    // notifica `onAudioError` con el motivo nuevo
+                    // `audio_silence_samples` y sale del bucle, como
+                    // la rama `read == 0` (D7).
+                    val detector = silenceDetector
+                    if (detector != null) {
+                        try {
+                            when (val decision = detector.observe(
+                                pcm,
+                                read,
+                                config.sampleRate,
+                            )) {
+                                is SilenceDecision.Fire -> {
+                                    listener?.onAudioError(
+                                        RecordingException(
+                                            StreamContract.AUDIO_UNAVAILABLE,
+                                            "Audio en silencio: " +
+                                                "${decision.silenceMs} ms " +
+                                                "de ceros exactos.",
+                                            mapOf(
+                                                "stage" to "readLoop",
+                                                "reason" to
+                                                    "audio_silence_samples",
+                                                "silenceMs" to
+                                                    decision.silenceMs,
+                                                "silenceStartOffsetMs" to
+                                                    decision
+                                                        .silenceStartOffsetMs,
+                                                "silencePeak" to
+                                                    decision.silencePeak,
+                                            ),
+                                        ),
+                                    )
+                                    break
+                                }
+                                SilenceDecision.NoFire -> {}
+                            }
+                        } catch (e: Exception) {
+                            silenceDetector = null
+                            silenceDetectorFailures++
+                            Transmiti2Logger.e(
+                                "audio: detector de silencio " +
+                                    "desactivado: " +
                                     e.javaClass.simpleName,
                             )
                         }

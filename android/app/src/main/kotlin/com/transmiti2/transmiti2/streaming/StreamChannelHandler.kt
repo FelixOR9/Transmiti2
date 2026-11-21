@@ -133,6 +133,9 @@ internal fun recordingInfoMap(info: RecordingInfo): Map<String, Any?> {
         "eosTimedOut" to info.eosTimedOut,
         "quietestSecondPeak" to info.quietestSecondPeak,
         "quietestSecondNonZero" to info.quietestSecondNonZero,
+        // Grupo S (S1): el pico del disparo de silencio (esperado
+        // 0); `null` si no hubo disparo.
+        "silencePeak" to info.silencePeak,
     )
 }
 

@@ -241,9 +241,9 @@ class StreamChannelHandlerErrorMappingTest {
     }
 
     @Test
-    fun `recordingInfoMap lleva los 13 campos de audio al metodo`() {
-        // Grupo V (V1, camino real) + Grupo S (S0): el mapa del
-        // método debe llevar los mismos 13 campos de
+    fun `recordingInfoMap lleva los 14 campos de audio al metodo`() {
+        // Grupo V (V1, camino real) + Grupo S (S0) + Grupo S (S1):
+        // el mapa del método debe llevar los mismos 14 campos de
         // instrumentación de audio que el evento `recording_stopped`.
         // Es la función que los soltó en las rondas 3/U (diagnóstico
         // ronda 3, §2): si un campo vuelve a faltar aquí, este test
@@ -287,6 +287,7 @@ class StreamChannelHandlerErrorMappingTest {
             eosTimedOut = true,
             quietestSecondPeak = 12,
             quietestSecondNonZero = 3,
+            silencePeak = 2,
         )
         val map = recordingInfoMap(info)
         assertEquals("rec_20261120_135244_c8a2", map["recordingId"])
@@ -304,6 +305,7 @@ class StreamChannelHandlerErrorMappingTest {
         assertEquals(true, map["eosTimedOut"])
         assertEquals(12, map["quietestSecondPeak"])
         assertEquals(3, map["quietestSecondNonZero"])
+        assertEquals(2, map["silencePeak"])
     }
 
     @Test
@@ -331,5 +333,6 @@ class StreamChannelHandlerErrorMappingTest {
         assertEquals(false, map["eosTimedOut"])
         assertNull(map["quietestSecondPeak"])
         assertNull(map["quietestSecondNonZero"])
+        assertNull(map["silencePeak"])
     }
 }

@@ -94,6 +94,12 @@ data class RecordingInfo(
      */
     val quietestSecondPeak: Int? = null,
     val quietestSecondNonZero: Int? = null,
+    /**
+     * Grupo S (S1, solo lectura): el mismo campo de
+     * `RecordingResult` (el pico de la ventana silenciosa que
+     * disparó el detector, esperado 0). `null` si no hubo disparo.
+     */
+    val silencePeak: Int? = null,
 )
 
 /** Estados de una sesión de transmisión (para las fases 3.1 en adelante). */
