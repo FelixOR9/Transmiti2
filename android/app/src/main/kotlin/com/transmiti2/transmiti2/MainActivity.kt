@@ -13,6 +13,7 @@ import com.transmiti2.transmiti2.streaming.PermissionManager
 import com.transmiti2.transmiti2.streaming.StreamChannelHandler
 import com.transmiti2.transmiti2.streaming.StreamContract
 import com.transmiti2.transmiti2.streaming.StreamForegroundService
+import com.transmiti2.transmiti2.streaming.test.TestChannelHandler
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
@@ -29,6 +30,10 @@ class MainActivity : FlutterFragmentActivity() {
 
     /** Manejador del canal de streaming (para la parada desde la notificación). */
     private var streamHandler: StreamChannelHandler? = null
+
+    /** Canal y manejador de pruebas (FASE 2, grupo 2-b; inertes sin el flag). */
+    private var testingChannel: MethodChannel? = null
+    private var testHandler: TestChannelHandler? = null
 
     /**
      * Receptor de la parada desde la notificación (Fase B, 3.1.2, plan
@@ -115,6 +120,22 @@ class MainActivity : FlutterFragmentActivity() {
             ).also { streamHandler = it },
         )
         streamingChannel = channel
+
+        // Canal de pruebas (FASE 2, grupo 2-b): se registra junto al de
+        // streaming, con su propio manejador. Sin el flag de compilación
+        // (`BuildConfig.TRANSMITI2_TEST_MODE == false`) todos sus
+        // métodos salvo `getTestMode` responden `test_mode_unavailable`.
+        // El manejador construye su instrumentación con el `filesDir` de
+        // la app; los seams del motor (`getRegistrySnapshot`,
+        // `sampleActiveStagingSize`) se cablean en el grupo 2-c.
+        val testingChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            TestChannelHandler.METHOD_CHANNEL,
+        )
+        testingChannel.setMethodCallHandler(
+            TestChannelHandler(applicationContext.filesDir).also { testHandler = it },
+        )
+        this.testingChannel = testingChannel
     }
 
     override fun onDestroy() {
@@ -127,6 +148,10 @@ class MainActivity : FlutterFragmentActivity() {
         }
         streamHandler = null
         streamingChannel?.setMethodCallHandler(null)
+        testHandler?.close()
+        testHandler = null
+        testingChannel?.setMethodCallHandler(null)
+        testingChannel = null
         streamingScope.cancel()
         super.onDestroy()
     }

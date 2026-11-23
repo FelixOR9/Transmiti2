@@ -9,6 +9,14 @@ android {
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
+    // Infraestructura de pruebas físicas (FASE 1 §4.F, FASE 2 grupo
+    // 2-b): hace explícita la generación de `BuildConfig` con AGP
+    // 9.1.1, para que `BuildConfig.TRANSMITI2_TEST_MODE` exista
+    // siempre y sea la única fuente de verdad del modo prueba.
+    buildFeatures {
+        buildConfig = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -31,6 +39,15 @@ android {
         // flag during build.
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        // Puerta de compilación de la infraestructura de pruebas físicas
+        // (FASE 1 §4.F, FASE 2 grupo 2-b): `false` por defecto; solo
+        // `true` en el artefacto CI de pruebas (propiedad Gradle
+        // `transmiti2TestMode`, activada en CI por la variable de
+        // entorno `ORG_GRADLE_PROJECT_transmiti2TestMode`). Sin el
+        // flag, todas las rutas de prueba quedan inertes.
+        val testMode = project.findProperty("transmiti2TestMode")?.toString()?.toBoolean() ?: false
+        buildConfigField("boolean", "TRANSMITI2_TEST_MODE", "$testMode")
     }
 
     // Firma estable (3.1.3): si el CI restauró el keystore dedicado y
@@ -70,6 +87,9 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+            // Blindaje (FASE 1 §4.F): aunque alguien pase la propiedad
+            // `transmiti2TestMode` a un build release, sigue en `false`.
+            buildConfigField("boolean", "TRANSMITI2_TEST_MODE", "false")
         }
     }
 }
