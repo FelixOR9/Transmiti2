@@ -68,6 +68,16 @@ class RecordingDiagnostics {
     /// no se pudo medir (`storage_check_unavailable`) o el error no
     /// trae el dato. Nunca se inventa un valor.
     this.freeBytes,
+    /// Sitio que disparó la auto-parada por error (J3-a, 3.1.4):
+    /// el `triggerSite` nativo (`onError`, `writeSample`,
+    /// `drainSample:storageFull`, ...). `null` sin auto-parada o
+    /// con un payload viejo sin el campo.
+    this.trigger,
+    /// Motivo por el que el último segmento quedó sin renombrar
+    /// (J3-a, 3.1.4): `muxer_stop_failed` si falló `muxer.stop()`,
+    /// `rename_failed` si falló el renombre. `null` si el cierre
+    /// fue limpio o el payload no lo trae.
+    this.closeReason,
     /// FPS esperado de la grabación (ronda 4, fix 3): el rango
     /// seleccionado para el segmento; se muestra en el diagnóstico
     /// para comparar con el FPS medido por segmento.
@@ -93,6 +103,12 @@ class RecordingDiagnostics {
 
   /// Espacio libre medido en bytes (`null` si no se midió).
   final int? freeBytes;
+
+  /// Sitio que disparó la auto-parada por error (J3-a, 3.1.4).
+  final String? trigger;
+
+  /// Motivo por el que el último segmento quedó sin renombrar (J3-a).
+  final String? closeReason;
 
   /// FPS esperado (del evento `recording_started`).
   final int? fps;
@@ -122,6 +138,11 @@ class RecordingDiagnostics {
       exceptionClass: details['exceptionClass'] as String?,
       lastErrorStage: stage,
       freeBytes: (details['freeBytes'] as num?)?.toInt(),
+      // J3-a (3.1.4): el disparador completo viaja en `details`
+      // (mismo shape que `failStart`); un payload viejo sin estos
+      // campos deja los valores en `null`, sin romper.
+      trigger: details['triggerSite'] as String?,
+      closeReason: details['closeReason'] as String?,
     );
   }
 }
@@ -434,6 +455,15 @@ class RecordingController extends ChangeNotifier {
       'Clase de excepción: ${diag.exceptionClass ?? '—'}',
     );
     text.writeln('Última etapa con error: ${diag.lastErrorStage ?? '—'}');
+    // J3-a (3.1.4): el disparador de la auto-parada y el motivo del
+    // cierre del último segmento, cuando el evento los trae. Sin
+    // ellos, la línea no aparece: no se inventa un disparador.
+    if (diag.trigger != null) {
+      text.writeln('Disparador: ${diag.trigger}');
+    }
+    if (diag.closeReason != null) {
+      text.writeln('Cierre del segmento: ${diag.closeReason}');
+    }
     if (_lastRecovery.isNotEmpty) {
       text.writeln(
         'Segmentos utilizables reconciliados: ${_lastRecovery.length}',
@@ -1285,9 +1315,11 @@ class RecordingController extends ChangeNotifier {
           }
         }
         _state = RecordingState.error;
-        // Relojes a cero: la grabación terminó con error (la parada
-        // con error emite este evento y detiene el motor); el
-        // diagnóstico no debe seguir contando (paso 2).
+        // Relojes a cero: la grabación terminó con error; el
+        // diagnóstico no debe seguir contando (paso 2). J3-a: la
+        // auto-parada NO detiene el FGS (eso es J3-b): este evento
+        // solo para el temporizador Dart y marca el error; el
+        // servicio sigue vivo hasta que el motor lo pare.
         _startedAtMs = null;
         _segmentStartedAtMs = null;
         _stopTimer();

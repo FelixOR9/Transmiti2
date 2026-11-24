@@ -30,6 +30,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -84,6 +85,9 @@ class RecordingSessionTest {
         var releaseCalls = 0
         var stopDrainCalls = 0
         var syncFrameRequests = 0
+        /** J3-a: si no es `null`, `requestSyncFrame()` lanza con él
+         * (fuerza el disparador `onSample`/`drain` en rotación). */
+        var syncFrameError: Exception? = null
         var deliverFormatOnStart = true
         var deliverEosOnSignal = true
 
@@ -98,6 +102,7 @@ class RecordingSessionTest {
 
         override fun requestSyncFrame(): Boolean {
             syncFrameRequests++
+            syncFrameError?.let { throw it }
             return true
         }
 
@@ -278,6 +283,9 @@ class RecordingSessionTest {
         val writtenPtsByTrack = mutableMapOf<Int, MutableList<Long>>()
         private var nextTrackIndex = 0
         var writeError: Exception? = null
+        /** J3-a: si no es `null`, `stop()` lanza con él (fuerza
+         * `closeReason = muxer_stop_failed` en `doStop`). */
+        var stopError: Exception? = null
         var started = false
         var stopped = false
         var released = false
@@ -315,6 +323,7 @@ class RecordingSessionTest {
 
         override fun stop() {
             guard.check()
+            stopError?.let { throw it }
             stopped = true
             calls += "stop"
         }
@@ -923,6 +932,436 @@ class RecordingSessionTest {
             )
             assertTrue(
                 eventTypes().contains(StreamContract.EVENT_RECORDING_ERROR),
+            )
+        }
+
+    // --- J3-a (3.1.4): el disparador de la auto-parada viaja
+    // completo (sin reescribirse con el genérico) hasta el
+    // `RecordingResult`, `lastError` y el `details` de
+    // `recording_error`. El FGS no se toca en este grupo.
+
+    /** Payload del último `recording_error` emitido, o `null`. */
+    private fun errorEventPayload(): Map<String, Any?>? =
+        synchronized(events) {
+            events.lastOrNull {
+                it.first == StreamContract.EVENT_RECORDING_ERROR
+            }?.second
+        }
+
+    /** `details` del último `recording_error`, o `null`. */
+    private fun errorDetails(): Map<*, *>? =
+        errorEventPayload()?.get("details") as? Map<*, *>
+
+    /** Número de eventos `recording_error` emitidos hasta ahora. */
+    private fun errorEventCount(): Int =
+        synchronized(events) {
+            events.count { it.first == StreamContract.EVENT_RECORDING_ERROR }
+        }
+
+    @Test
+    fun `J3-a error del encoder conserva el trigger completo y libera el claim`() =
+        runBlocking {
+            val registry = ActiveRecordingRegistry()
+            val session = buildSession(registry = registry)
+            val info = startRecording(session)
+            fakeEncoder.deliverSample(0L, true)
+            fakeEncoder.deliverSample(33_333L, false)
+            fakeEncoder.deliverError()
+            awaitState(session, RecordingState.ERROR)
+            val result = session.stop()
+            assertEquals(
+                StreamContract.ENCODER_ERROR,
+                result.errorCode,
+            )
+            // El trigger llega intacto al resultado.
+            val trigger = result.trigger
+            assertNotNull(trigger)
+            assertEquals(StreamContract.ENCODER_ERROR, trigger!!.code)
+            assertEquals("Error del codificador: codec roto", trigger.message)
+            assertEquals("encoder", trigger.stage)
+            assertEquals(0, trigger.segmentIndex)
+            assertEquals("IllegalStateException", trigger.exceptionClass)
+            assertEquals("onError", trigger.triggerSite)
+            assertEquals(fixedClockMs, trigger.timestampMs)
+            assertNull(trigger.freeBytes)
+            assertNull(result.closeReason)
+            // `lastError` conserva el trigger, no el genérico
+            // (`stage=stop`).
+            val lastError = session.lastErrorSnapshot()
+            assertNotNull(lastError)
+            assertEquals(StreamContract.ENCODER_ERROR, lastError!!.code)
+            assertEquals("encoder", lastError.details["stage"])
+            assertEquals("onError", lastError.details["triggerSite"])
+            assertEquals(0, lastError.details["segmentIndex"])
+            // El evento lleva el mismo shape que `failStart`
+            // ({code, message, details}) con el trigger completo.
+            val payload = errorEventPayload()
+            assertNotNull(payload)
+            assertEquals(StreamContract.ENCODER_ERROR, payload!!["code"])
+            assertEquals(
+                "Error del codificador: codec roto",
+                payload["message"],
+            )
+            val details = errorDetails()
+            assertNotNull(details)
+            assertEquals("encoder", details!!["stage"])
+            assertEquals(0, details["segmentIndex"])
+            assertEquals("IllegalStateException", details["exceptionClass"])
+            assertEquals("onError", details["triggerSite"])
+            assertEquals(fixedClockMs, details["timestampMs"])
+            // Claim liberado: la reserva del grupo tiene éxito.
+            val reservation = registry.tryReserveGroup(
+                info.recordingId,
+                "reconcile:test-j3a",
+            )
+            assertNotNull(reservation)
+            assertEquals(
+                ReleaseResult.RELEASED,
+                registry.releaseGroup(info.recordingId, reservation!!),
+            )
+        }
+
+    @Test
+    fun `J3-a error del muxer al escribir conserva el trigger writeSample`() =
+        runBlocking {
+            val session = buildSession()
+            startRecording(session)
+            fakeEncoder.deliverSample(0L, true)
+            muxers[0].writeError = IllegalStateException(
+                "Muxer has been released!",
+            )
+            fakeEncoder.deliverSample(33_333L, false)
+            awaitState(session, RecordingState.ERROR)
+            val result = session.stop()
+            assertEquals(
+                StreamContract.MUXER_ERROR,
+                result.errorCode,
+            )
+            val trigger = result.trigger
+            assertNotNull(trigger)
+            assertEquals(StreamContract.MUXER_ERROR, trigger!!.code)
+            assertEquals("writeSample", trigger.stage)
+            assertEquals(0, trigger.segmentIndex)
+            assertEquals("IllegalStateException", trigger.exceptionClass)
+            assertEquals("writeSample", trigger.triggerSite)
+            assertEquals(fixedClockMs, trigger.timestampMs)
+            val lastError = session.lastErrorSnapshot()
+            assertNotNull(lastError)
+            assertEquals("writeSample", lastError!!.details["stage"])
+            assertEquals("writeSample", lastError.details["triggerSite"])
+            val details = errorDetails()
+            assertNotNull(details)
+            assertEquals("writeSample", details!!["stage"])
+            assertEquals("writeSample", details["triggerSite"])
+            assertEquals(1, errorEventCount())
+        }
+
+    @Test
+    fun `J3-a error de audio al escribir conserva el trigger writeAudioSample`() =
+        runBlocking {
+            val session = buildSession()
+            startRecording(session, audioEnabled = true)
+            fakeEncoder.deliverSample(0L, true)
+            fakeAudioEncoder.deliverSample(0L)
+            // La muestra de video espera (postAndWait) al hilo del
+            // encoder: la muestra de audio anterior ya se escribió.
+            fakeEncoder.deliverSample(33_333L, false)
+            muxers[0].writeError = IllegalStateException(
+                "Muxer has been released!",
+            )
+            fakeAudioEncoder.deliverSample(66_666L)
+            awaitState(session, RecordingState.ERROR)
+            val result = session.stop()
+            assertEquals(
+                StreamContract.MUXER_ERROR,
+                result.errorCode,
+            )
+            val trigger = result.trigger
+            assertNotNull(trigger)
+            assertEquals("writeAudioSample", trigger!!.stage)
+            assertEquals(0, trigger.segmentIndex)
+            assertEquals("writeAudioSample", trigger.triggerSite)
+            val details = errorDetails()
+            assertNotNull(details)
+            assertEquals("writeAudioSample", details!!["stage"])
+            assertEquals("writeAudioSample", details["triggerSite"])
+        }
+
+    @Test
+    fun `J3-a error en el drenado conserva el trigger onSample`() =
+        runBlocking {
+            fakeEncoder.syncFrameError = IllegalStateException(
+                "sync roto",
+            )
+            val session = buildSession()
+            startRecording(session)
+            // Muestras cada 1 s; a los 60 s se pide el keyframe y
+            // `requestSyncFrame()` lanza: el drenado lo convierte
+            // en parada con error (stage=drain).
+            for (second in 0..60) {
+                fakeEncoder.deliverSample(
+                    second * 1_000_000L,
+                    second % 2 == 0,
+                )
+            }
+            awaitState(session, RecordingState.ERROR)
+            val result = session.stop()
+            assertEquals(
+                StreamContract.MUXER_ERROR,
+                result.errorCode,
+            )
+            val trigger = result.trigger
+            assertNotNull(trigger)
+            assertEquals("drain", trigger!!.stage)
+            assertEquals(0, trigger.segmentIndex)
+            assertEquals("IllegalStateException", trigger.exceptionClass)
+            assertEquals("onSample", trigger.triggerSite)
+            val details = errorDetails()
+            assertNotNull(details)
+            assertEquals("drain", details!!["stage"])
+            assertEquals("onSample", details["triggerSite"])
+        }
+
+    @Test
+    fun `J3-a espacio no medible en rotacion conserva el trigger storageCheck`() =
+        runBlocking {
+            var calls = 0
+            val session = buildSession(
+                freeSpaceBytes = {
+                    calls++
+                    if (calls <= 1) 10L * 1024 * 1024 * 1024 else null
+                },
+            )
+            startRecording(session)
+            for (second in 0..60) {
+                fakeEncoder.deliverSample(
+                    second * 1_000_000L,
+                    second % 2 == 0,
+                )
+            }
+            awaitState(session, RecordingState.ERROR)
+            val result = session.stop()
+            assertEquals(
+                StreamContract.STORAGE_CHECK_UNAVAILABLE,
+                result.errorCode,
+            )
+            val trigger = result.trigger
+            assertNotNull(trigger)
+            assertEquals(
+                StreamContract.STORAGE_CHECK_UNAVAILABLE,
+                trigger!!.code,
+            )
+            assertEquals("rotate", trigger.stage)
+            assertEquals(0, trigger.segmentIndex)
+            assertEquals("drainSample:storageCheck", trigger.triggerSite)
+            // No medido: `freeBytes` en `null`, nunca inventado.
+            assertNull(trigger.freeBytes)
+            val details = errorDetails()
+            assertNotNull(details)
+            assertEquals("rotate", details!!["stage"])
+            assertEquals("drainSample:storageCheck", details["triggerSite"])
+            assertNull(details["freeBytes"])
+            // Segmentos previos intactos.
+            assertEquals(1, result.segments.size)
+            assertTrue(File(dir, result.segments[0].fileName).exists())
+        }
+
+    @Test
+    fun `J3-a sin espacio en rotacion conserva el trigger con freeBytes medido`() =
+        runBlocking {
+            var calls = 0
+            val session = buildSession(
+                freeSpaceBytes = {
+                    calls++
+                    if (calls <= 1) 10L * 1024 * 1024 * 1024 else 100L
+                },
+            )
+            startRecording(session)
+            for (second in 0..60) {
+                fakeEncoder.deliverSample(
+                    second * 1_000_000L,
+                    second % 2 == 0,
+                )
+            }
+            awaitState(session, RecordingState.ERROR)
+            val result = session.stop()
+            assertEquals(
+                StreamContract.STORAGE_FULL,
+                result.errorCode,
+            )
+            val trigger = result.trigger
+            assertNotNull(trigger)
+            assertEquals(StreamContract.STORAGE_FULL, trigger!!.code)
+            assertEquals("rotate", trigger.stage)
+            assertEquals(0, trigger.segmentIndex)
+            assertEquals("drainSample:storageFull", trigger.triggerSite)
+            assertEquals(100L, trigger.freeBytes)
+            val details = errorDetails()
+            assertNotNull(details)
+            assertEquals(100L, details!!["freeBytes"])
+            assertEquals("drainSample:storageFull", details["triggerSite"])
+            assertNull(result.closeReason)
+        }
+
+    @Test
+    fun `J3-a apertura del segmento siguiente fallida conserva el trigger rotate`() =
+        runBlocking {
+            var muxerCalls = 0
+            val session = buildSession(
+                muxerFactory = { path ->
+                    muxerCalls++
+                    if (muxerCalls >= 2) {
+                        throw IllegalStateException("muxer roto")
+                    }
+                    FakeSessionMuxer(path).also { muxers += it }
+                },
+            )
+            startRecording(session)
+            for (second in 0..60) {
+                fakeEncoder.deliverSample(
+                    second * 1_000_000L,
+                    second % 2 == 0,
+                )
+            }
+            awaitState(session, RecordingState.ERROR)
+            val result = session.stop()
+            assertEquals(
+                StreamContract.MUXER_ERROR,
+                result.errorCode,
+            )
+            val trigger = result.trigger
+            assertNotNull(trigger)
+            assertEquals(StreamContract.MUXER_ERROR, trigger!!.code)
+            assertEquals("openSegment", trigger.stage)
+            assertEquals(1, trigger.segmentIndex)
+            assertEquals("IllegalStateException", trigger.exceptionClass)
+            assertEquals("rotate", trigger.triggerSite)
+            val details = errorDetails()
+            assertNotNull(details)
+            assertEquals("openSegment", details!!["stage"])
+            assertEquals(1, details["segmentIndex"])
+            assertEquals("rotate", details["triggerSite"])
+            // El segmento 0 se cerró en la rotación antes del fallo.
+            assertEquals(1, result.segments.size)
+            assertEquals(SegmentStatus.READY, result.segments[0].status)
+        }
+
+    @Test
+    fun `J3-a segundo scheduleErrorStop no re-ejecuta doStop`() =
+        runBlocking {
+            val session = buildSession()
+            startRecording(session)
+            fakeEncoder.deliverSample(0L, true)
+            fakeEncoder.deliverError()
+            awaitState(session, RecordingState.ERROR)
+            val firstResult = session.stop()
+            assertEquals(1, errorEventCount())
+            // Segundo error con la sesión ya en ERROR: la guarda de
+            // `scheduleErrorStop` retorna sin lanzar nada.
+            fakeEncoder.deliverError()
+            delay(200)
+            assertEquals(1, errorEventCount())
+            val secondResult = session.stop()
+            assertSame(firstResult, secondResult)
+            assertEquals(
+                StreamContract.ENCODER_ERROR,
+                secondResult.errorCode,
+            )
+        }
+
+    @Test
+    fun `J3-a carrera stop normal vs error-stop un solo ganador`() =
+        runBlocking {
+            val session = buildSession()
+            startRecording(session)
+            fakeEncoder.deliverSample(0L, true)
+            val normal = async { session.stop() }
+            val withError = async {
+                session.stop(StreamContract.ENCODER_ERROR)
+            }
+            val first = normal.await()
+            val second = withError.await()
+            // Un solo `doStop`: ambos esperan el mismo resultado.
+            assertSame(first, second)
+            val terminal = eventTypes().filter {
+                it == StreamContract.EVENT_RECORDING_STOPPED ||
+                    it == StreamContract.EVENT_RECORDING_ERROR
+            }
+            assertEquals(1, terminal.size)
+            // Gana el primer llamador (la parada normal).
+            assertNull(first.errorCode)
+            assertEquals(
+                listOf(StreamContract.EVENT_RECORDING_STOPPED),
+                terminal,
+            )
+        }
+
+    @Test
+    fun `J3-a muxer stop fallido deja tmp sin renombrar con closeReason`() =
+        runBlocking {
+            val session = buildSession()
+            val info = startRecording(session)
+            fakeEncoder.deliverSample(0L, true)
+            fakeEncoder.deliverSample(33_333L, false)
+            muxers[0].stopError = IllegalStateException("stop roto")
+            val result = session.stop()
+            assertEquals("muxer_stop_failed", result.closeReason)
+            // Parada normal: sin disparador, pero con motivo de cierre.
+            assertNull(result.trigger)
+            assertNull(result.errorCode)
+            assertEquals(1, result.segments.size)
+            assertFalse(result.segments[0].closedCleanly)
+            assertEquals(SegmentStatus.PARTIAL, result.segments[0].status)
+            assertTrue(result.segments[0].fileName.endsWith(".tmp.mp4"))
+            assertTrue(
+                fileStore.segmentStagingFile(info.recordingId, 0).exists(),
+            )
+            assertFalse(
+                fileStore.segmentFile(info.recordingId, 0).exists(),
+            )
+        }
+
+    @Test
+    fun `J3-a renombre fallido deja closeReason rename_failed`() =
+        runBlocking {
+            val session = buildSession()
+            val info = startRecording(session)
+            fakeEncoder.deliverSample(0L, true)
+            // Destino ya ocupado: el renombre no puede sobrescribirlo.
+            fileStore.segmentFile(info.recordingId, 0).writeText("ocupado")
+            val result = session.stop()
+            assertEquals("rename_failed", result.closeReason)
+            assertNull(result.trigger)
+            assertEquals(1, result.segments.size)
+            assertEquals(SegmentStatus.PARTIAL, result.segments[0].status)
+            assertFalse(result.segments[0].closedCleanly)
+            assertTrue(
+                fileStore.segmentStagingFile(info.recordingId, 0).exists(),
+            )
+        }
+
+    @Test
+    fun `J3-a stop con error sin disparador conserva el generico`() =
+        runBlocking {
+            val session = buildSession()
+            startRecording(session)
+            fakeEncoder.deliverSample(0L, true)
+            // Vía del motor (`stopRecordingIfActive`): error sin
+            // `ErrorTrigger`; no se inventa un disparador.
+            val result = session.stop(StreamContract.ENCODER_ERROR)
+            assertEquals(StreamContract.ENCODER_ERROR, result.errorCode)
+            assertNull(result.trigger)
+            assertNull(result.closeReason)
+            val lastError = session.lastErrorSnapshot()
+            assertNotNull(lastError)
+            assertEquals("stop", lastError!!.details["stage"])
+            val details = errorDetails()
+            assertNotNull(details)
+            assertEquals("stop", details!!["stage"])
+            assertEquals(
+                "La grabación se detuvo con error: " +
+                    StreamContract.ENCODER_ERROR + ".",
+                errorEventPayload()?.get("message"),
             )
         }
 
