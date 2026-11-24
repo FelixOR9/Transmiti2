@@ -500,4 +500,124 @@ class RecordingFileStoreTest {
         )
     }
 
+    // --- 3.1.4, J1-a: nombres y duplicados del _final fusionado. ---
+
+    @Test
+    fun `J1a nombres del final fusionado y su staging`() {
+        assertEquals(
+            "rec_20261118_153045_ab12_final.mp4",
+            store.finalFileName("rec_20261118_153045_ab12"),
+        )
+        assertEquals(
+            File(dir, "rec_20261118_153045_ab12_final.mp4"),
+            store.finalFile("rec_20261118_153045_ab12"),
+        )
+        assertEquals(
+            "rec_20261118_153045_ab12_final.tmp.mp4",
+            store.finalStagingFileName("rec_20261118_153045_ab12"),
+        )
+        assertEquals(
+            File(dir, "rec_20261118_153045_ab12_final.tmp.mp4"),
+            store.finalStagingFile("rec_20261118_153045_ab12"),
+        )
+    }
+
+    @Test
+    fun `J1a listSegmentFiles excluye el final y listFinalSegmentFiles lo incluye`() {
+        // Documentado: la fusión enumera por listSegmentFiles(id) o
+        // por el sidecar, nunca por listFinalSegmentFiles() sin
+        // filtrar — ese inventario incluye el _final.mp4 (plan §2.2)
+        // y la reconciliación lo trata como desconocido (nunca lo
+        // toca). Un _final.mp4 en el inventario no es un segmento.
+        File(dir, "rec_1_seg000.mp4").writeText("a")
+        File(dir, "rec_1_seg001.mp4").writeText("b")
+        File(dir, "rec_1_final.mp4").writeText("final")
+        File(dir, "rec_1_final.tmp.mp4").writeText("tmp")
+        assertEquals(
+            listOf("rec_1_seg000.mp4", "rec_1_seg001.mp4"),
+            store.listSegmentFiles("rec_1").map { it.name },
+        )
+        assertEquals(
+            listOf(
+                "rec_1_final.mp4",
+                "rec_1_seg000.mp4",
+                "rec_1_seg001.mp4",
+            ),
+            store.listFinalSegmentFiles().map { it.name },
+        )
+        // El tmp de fusión cae en el staging, como el de segmento.
+        assertEquals(
+            listOf("rec_1_final.tmp.mp4"),
+            store.listStagingFiles().map { it.name },
+        )
+        // parseSegmentFileName no reconoce el final como segmento.
+        assertNull(
+            RecordingFileStore.parseSegmentFileName("rec_1_final.mp4"),
+        )
+    }
+
+    @Test
+    fun `J1a duplicado del final tmp verificado desplaza al final a cuarentena`() {
+        val staging = store.finalStagingFile("rec_1")
+        val final = store.finalFile("rec_1")
+        staging.writeText("nuevo")
+        final.writeText("viejo")
+        val resolution = store.resolveDuplicateDestination(
+            staging = staging,
+            final = final,
+            stagingVerified = true,
+            finalVerified = false,
+            nowMs = 1_792_000_000_000L,
+        )
+        assertEquals(DuplicateResolution.STAGING_KEPT, resolution)
+        assertEquals("nuevo", final.readText())
+        assertFalse(staging.exists())
+        val quarantined = dir.listFiles()!!
+            .filter { it.name.contains(".quarantine-") }
+        assertEquals(1, quarantined.size)
+        assertEquals("viejo", quarantined[0].readText())
+    }
+
+    @Test
+    fun `J1a duplicado del final final verificado manda el tmp a cuarentena`() {
+        val staging = store.finalStagingFile("rec_1")
+        val final = store.finalFile("rec_1")
+        staging.writeText("nuevo")
+        final.writeText("existente")
+        val resolution = store.resolveDuplicateDestination(
+            staging = staging,
+            final = final,
+            stagingVerified = true,
+            finalVerified = true,
+            nowMs = 1_792_000_000_000L,
+        )
+        assertEquals(DuplicateResolution.FINAL_KEPT, resolution)
+        assertEquals("existente", final.readText())
+        assertFalse(staging.exists())
+        assertEquals(1, dir.listFiles()!!.count {
+            it.name.contains(".quarantine-")
+        })
+    }
+
+    @Test
+    fun `J1a duplicado del final sin ningun verificado no mueve nada`() {
+        val staging = store.finalStagingFile("rec_1")
+        val final = store.finalFile("rec_1")
+        staging.writeText("nuevo")
+        final.writeText("existente")
+        val resolution = store.resolveDuplicateDestination(
+            staging = staging,
+            final = final,
+            stagingVerified = false,
+            finalVerified = false,
+            nowMs = 1_792_000_000_000L,
+        )
+        assertEquals(DuplicateResolution.UNRESOLVED, resolution)
+        assertEquals("nuevo", staging.readText())
+        assertEquals("existente", final.readText())
+        assertEquals(0, dir.listFiles()!!.count {
+            it.name.contains(".quarantine-")
+        })
+    }
+
 }

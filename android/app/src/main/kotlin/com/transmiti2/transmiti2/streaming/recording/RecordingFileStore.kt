@@ -349,7 +349,9 @@ private fun JsonValue.Obj.toRecordingMetadata(recordingId: String): RecordingMet
  * - Segmento final: `<recordingId>_seg<NNN>.mp4`
  * - Staging: `<recordingId>_seg<NNN>.tmp.mp4`, renombrado solo tras un
  *   `stop()` correcto del muxer.
- * - Final previsto (fusión futura): `<recordingId>_final.mp4`
+ * - Final fusionado: `<recordingId>_final.mp4` (`SegmentMerger`,
+ *   3.1.4 J1-a); staging de fusión: `<recordingId>_final.tmp.mp4`,
+ *   renombrado solo tras verificar el fusionado.
  * - Sidecar: `<recordingId>.json`
  *
  * Nunca sobrescribe: el id de grabación lleva fecha, hora y 4
@@ -447,6 +449,20 @@ class RecordingFileStore(val recordingsDir: File) {
 
     fun finalFile(recordingId: String): File =
         File(recordingsDir, finalFileName(recordingId))
+
+    /**
+     * Staging de la fusión (3.1.4, J1-a): `<id>_final.tmp.mp4`. Misma
+     * convención que el staging de segmento: el muxer de fusión
+     * escribe aquí y solo tras verificar se renombra al final con
+     * [renameStagingToFinal] (que rehúsa si el destino existe). Un
+     * tmp huérfano de un intento fallido es propio y regenerable: la
+     * siguiente fusión del mismo id lo sobrescribe.
+     */
+    fun finalStagingFileName(recordingId: String): String =
+        "${recordingId}_final.tmp.mp4"
+
+    fun finalStagingFile(recordingId: String): File =
+        File(recordingsDir, finalStagingFileName(recordingId))
 
     fun sidecarFile(recordingId: String): File =
         File(recordingsDir, "$recordingId.json")
