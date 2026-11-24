@@ -388,14 +388,27 @@ class SpikeSegmentMergeTest {
         // Aritmética de la alternativa (NO implementada en el spike:
         // el plan §2.4 paso 5 dice que el offset no avanza). Si el
         // offset de audio avanzara por la duración de VIDEO del
-        // segmento sin audio, el audio del seg2 empezaría en
-        // 120 020 000 µs (hueco real de ~60 s, sin inventar muestras
-        // de silencio) y la diferencia de duraciones quedaría en
-        // ~180 ms, dentro de tolerancia. Decisión pendiente para J1-a.
-        val audioOffsetWithGapMs = 59_920L + 60_000L
-        assertEquals(120_020_000L, audioOffsetWithGapMs * 1_000L + 100_000L)
-        assertEquals(180L, 180_000L - (59_920L + 59_900L))
-        assertTrue(180L <= SPIKE_AV_TOLERANCE_MS)
+        // segmento sin audio (60 000 ms), el audio del seg2 empezaría
+        // en 120 020 000 µs (hueco real de ~60 s, sin inventar
+        // muestras de silencio) y la duración de la pista de audio
+        // MEDIDA por tramo PTS (179 717 ms) casi igualaría a la de
+        // video (180 032 ms): diferencia 315 ms, dentro de ±500 ms.
+        // (La suma de duraciones de audio seguiría siendo 119 820 ms
+        // y su diferencia con el video 60 180 ms: lo que cambia es
+        // el tramo PTS, que es lo que mide el verificador sobre el
+        // archivo.) Decisión pendiente para J1-a.
+        val audioOffsetWithGapUs = (59_920L + 60_000L) * 1_000L
+        val seg2FirstAudioPtsUs = audioOffsetWithGapUs + 100_000L
+        assertEquals(120_020_000L, seg2FirstAudioPtsUs)
+        val seg2LastAudioPtsUs = audioOffsetWithGapUs +
+            audioSamples(59_900L, 100_000L).last().ptsUs
+        val audioSpanMs = (seg2LastAudioPtsUs - 120_000L) / 1_000L + 21L
+        val videoSpanMs =
+            (120_000_000L + videoSamples(60_000L).last().ptsUs) / 1_000L + 33L
+        assertEquals(179_717L, audioSpanMs)
+        assertEquals(180_032L, videoSpanMs)
+        assertEquals(315L, videoSpanMs - audioSpanMs)
+        assertTrue(videoSpanMs - audioSpanMs <= SPIKE_AV_TOLERANCE_MS)
     }
 
     @Test
