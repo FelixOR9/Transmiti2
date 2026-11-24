@@ -3,6 +3,7 @@ package com.transmiti2.transmiti2.streaming
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.view.Surface
+import com.transmiti2.transmiti2.streaming.recording.ErrorTrigger
 import com.transmiti2.transmiti2.streaming.recording.RecordingException
 import com.transmiti2.transmiti2.streaming.recording.RecordingFileStore
 import com.transmiti2.transmiti2.streaming.recording.RecordingResult
@@ -269,7 +270,13 @@ class StreamEngineRecordingTest {
             return startedInfo
         }
 
-        override suspend fun stop(errorCode: String?): RecordingResult {
+        // J3-a (3.1.4): `stop()` ganó el parámetro `errorTrigger`
+        // (disparador completo de la auto-parada); el falso lo acepta
+        // y lo ignora, como antes ignoraba el código en este camino.
+        override suspend fun stop(
+            errorCode: String?,
+            errorTrigger: ErrorTrigger?,
+        ): RecordingResult {
             stopCalls++
             lastStopErrorCode = errorCode
             fakeState = "idle"
