@@ -2,6 +2,7 @@ package com.transmiti2.transmiti2.streaming.recording
 
 import android.media.MediaCodec
 import android.media.MediaFormat
+import com.transmiti2.transmiti2.streaming.Transmiti2Logger
 import java.io.File
 import java.nio.ByteBuffer
 import kotlinx.coroutines.Dispatchers
@@ -44,6 +45,10 @@ class SegmentMergerTest {
 
     @Before
     fun setUp() {
+        // `Transmiti2Logger` sin receptor llamaría a `android.util.Log`,
+        // que lanza en las unitarias JVM puras (los abortos de fusión
+        // registran con `e()`).
+        Transmiti2Logger.sink = { _, _ -> }
         dir = File(
             System.getProperty("java.io.tmpdir"),
             "segment-merger-test-${System.nanoTime()}",
@@ -54,6 +59,7 @@ class SegmentMergerTest {
 
     @After
     fun tearDown() {
+        Transmiti2Logger.sink = null
         dir.deleteRecursively()
     }
 
@@ -1295,6 +1301,7 @@ class SegmentMergerTest {
                 expectedWidth: Int?,
                 expectedHeight: Int?,
                 expectedFps: Int?,
+                expectedAudio: Boolean?,
                 expectedSampleRate: Int?,
                 expectedChannels: Int?,
             ): SegmentVerification {
