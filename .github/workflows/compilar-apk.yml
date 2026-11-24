@@ -107,7 +107,14 @@ jobs:
 
       - name: Verificar modo de pruebas activo en el build
         run: |
-          find android/app/build/generated -name "BuildConfig.java" -path "*debug*" | head -n 1 | xargs grep -H "TRANSMITI2_TEST_MODE" || { echo "ERROR: no se encontró TRANSMITI2_TEST_MODE en el BuildConfig generado"; exit 1; }
+          # El buildDir de Gradle está reubicado por android/build.gradle.kts
+          # a <repo>/build/app (no a android/app/build): ahí vive el
+          # BuildConfig generado. Se exige el valor true, no solo que el
+          # campo exista (si la propiedad no llegara a Gradle, sería false).
+          CFG=$(find build/app/generated -name "BuildConfig.java" -path "*debug*" 2>/dev/null | head -n 1)
+          if [ -z "$CFG" ]; then echo "ERROR: no se encontró BuildConfig.java de debug en build/app/generated"; find build/app/generated -maxdepth 4 -type d 2>/dev/null | head -20; exit 1; fi
+          echo "BuildConfig: $CFG"
+          grep -H "TRANSMITI2_TEST_MODE = true" "$CFG" || { echo "ERROR: TRANSMITI2_TEST_MODE no está en true en el BuildConfig generado"; exit 1; }
 
       - name: Verificar firma del APK
         run: |
