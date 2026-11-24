@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:transmiti2/app/app_scope.dart';
 import 'package:transmiti2/features/home/presentation/home_screen.dart';
 import 'package:transmiti2/features/match/presentation/match_screen.dart';
 import 'package:transmiti2/features/more/presentation/more_screen.dart';
@@ -34,7 +35,7 @@ class _MainShellState extends State<MainShell> {
     });
   }
 
-  Widget _tab(int index) {
+  Widget _tab(int index, {required bool testMode}) {
     if (!_visited.contains(index)) {
       return const SizedBox.shrink();
     }
@@ -42,16 +43,22 @@ class _MainShellState extends State<MainShell> {
       0 => HomeScreen(onOpenReplays: () => _select(_replaysTab)),
       1 => const MatchScreen(),
       2 => const ReplaysScreen(),
-      _ => const MoreScreen(),
+      _ => MoreScreen(testMode: testMode),
     };
   }
 
   @override
   Widget build(BuildContext context) {
+    // Puerta de compilación de pruebas, leída al arrancar
+    // (`AppServices.create` → `getTestMode`): solo con `true` la
+    // pestaña Más muestra la fila de pruebas.
+    final bool testMode = AppScope.of(context).testMode;
     return Scaffold(
       body: IndexedStack(
         index: _index,
-        children: <Widget>[for (int i = 0; i < _items.length; i++) _tab(i)],
+        children: <Widget>[
+          for (int i = 0; i < _items.length; i++) _tab(i, testMode: testMode),
+        ],
       ),
       bottomNavigationBar: AppBottomNav(
         items: _items,

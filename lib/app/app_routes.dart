@@ -14,4 +14,5 @@ abstract final class AppRoutes {
   static const String scoreboard = '/marcador';
   static const String matchClock = '/cronometro';
   static const String stats = '/estadisticas';
+  static const String testing = '/pruebas';
 }

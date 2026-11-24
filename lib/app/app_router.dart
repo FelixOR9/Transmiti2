@@ -11,6 +11,7 @@ import 'package:transmiti2/features/scoreboard/presentation/scoreboard_screen.da
 import 'package:transmiti2/features/shell/presentation/main_shell.dart';
 import 'package:transmiti2/features/sponsors/presentation/sponsors_screen.dart';
 import 'package:transmiti2/features/stats/presentation/stats_screen.dart';
+import 'package:transmiti2/features/testing/presentation/test_screen.dart';
 
 /// Traduce el nombre de una ruta en su pantalla.
 ///
@@ -36,6 +37,7 @@ abstract final class AppRouter {
       AppRoutes.scoreboard => const ScoreboardScreen(),
       AppRoutes.matchClock => const MatchClockScreen(),
       AppRoutes.stats => const StatsScreen(),
+      AppRoutes.testing => const TestScreen(),
       _ => const MainShell(),
     };
     return MaterialPageRoute<void>(

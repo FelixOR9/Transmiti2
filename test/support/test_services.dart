@@ -6,6 +6,7 @@ import 'package:transmiti2/features/match/application/match_session.dart';
 import 'package:transmiti2/features/match/domain/soccer_match.dart';
 import 'package:transmiti2/features/streaming/application/streaming_controller.dart';
 import 'package:transmiti2/features/streaming/application/streaming_service.dart';
+import 'package:transmiti2/features/testing/application/test_controller.dart';
 
 import 'fake_streaming.dart';
 import 'fakes.dart';
@@ -19,6 +20,8 @@ AppServices createTestServices({
   Duration? clockTick,
   Duration tapCooldown = Duration.zero,
   StreamingService? streamingService,
+  bool testMode = false,
+  TestController? testing,
 }) {
   final InMemoryTeamRepository teams = InMemoryTeamRepository();
   final InMemoryPlayerRepository players = InMemoryPlayerRepository();
@@ -46,6 +49,8 @@ AppServices createTestServices({
       service: streamingService ?? FakeStreamingService(),
       nowMs: nowMs,
     ),
+    testMode: testMode,
+    testController: testing,
   );
 }
 

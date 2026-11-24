@@ -5,7 +5,12 @@ import 'package:transmiti2/core/app_info.dart';
 
 /// Pestaña Más: administración y datos de la aplicación.
 class MoreScreen extends StatelessWidget {
-  const MoreScreen({super.key});
+  const MoreScreen({super.key, this.testMode = false});
+
+  /// Puerta de compilación de pruebas: solo con `true` se muestra la
+  /// fila «Pruebas de diagnóstico» (diseño base §4.F). En producción
+  /// la fila no existe (ni siquiera como widget oculto).
+  final bool testMode;
 
   @override
   Widget build(BuildContext context) {
@@ -27,6 +32,17 @@ class MoreScreen extends StatelessWidget {
                   onTap: () =>
                       Navigator.of(context).pushNamed(AppRoutes.sponsors),
                 ),
+                if (testMode) ...<Widget>[
+                  const SizedBox(height: 12),
+                  _MenuRow(
+                    key: const Key('more-test-row'),
+                    icon: Icons.bug_report_outlined,
+                    title: 'Pruebas de diagnóstico',
+                    subtitle: 'Sesiones, pausas y diagnósticos',
+                    onTap: () =>
+                        Navigator.of(context).pushNamed(AppRoutes.testing),
+                  ),
+                ],
                 const SizedBox(height: 32),
                 Center(
                   child: Text(

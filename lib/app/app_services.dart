@@ -18,6 +18,8 @@ import 'package:transmiti2/features/streaming/application/streaming_service.dart
 import 'package:transmiti2/features/streaming/data/recording_repository.dart';
 import 'package:transmiti2/features/streaming/data/stream_destination_repository.dart';
 import 'package:transmiti2/features/streaming/domain/stream_contract.dart';
+import 'package:transmiti2/features/testing/application/test_controller.dart';
+import 'package:transmiti2/features/testing/domain/test_contract.dart';
 
 /// Resultado de `AppServices.resolveRecordingsDir` (subetapa 0,
 /// 3.1.4, grupo 0-f): la ruta canónica más cómo se llegó a ella.
@@ -57,7 +59,14 @@ class AppServices {
     required this.streaming,
     this.clockTick = const Duration(milliseconds: 250),
     this.tapCooldown = const Duration(milliseconds: 700),
-  });
+    this.testMode = false,
+    TestController? testController,
+  }) : testController =
+           testController ??
+           TestController(
+             testService: MethodChannelTestService(),
+             streamingService: MethodChannelStreamingService(),
+           );
 
   final TeamRepository teams;
   final PlayerRepository players;
@@ -70,6 +79,18 @@ class AppServices {
   /// Destinos de transmisión y claves (Fase 3.0: solo infraestructura y
   /// destino manual; sin cámara, transmisión ni grabación todavía).
   final StreamingController streaming;
+
+  /// Puerta de compilación de pruebas (`BuildConfig
+  /// .TRANSMITI2_TEST_MODE`), leída al arrancar por el canal de
+  /// pruebas (`getTestMode`). Fuente única de verdad en Gradle: Dart
+  /// nunca la inventa. `false` en producción y cuando la lectura
+  /// falla (fail-closed).
+  final bool testMode;
+
+  /// Controlador de la infraestructura de pruebas (sesión/campaña,
+  /// muestreador, pausas, almacenamiento). Inerte con
+  /// `testMode == false`.
+  final TestController testController;
 
   /// Cada cuánto se repinta el reloj en pantalla. El tiempo siempre se calcula
   /// con la hora real, así que esto solo afecta a la fluidez visual. Nulo
@@ -227,15 +248,36 @@ class AppServices {
   /// `streamingService` y `recordingsDirPathOverride` son costuras
   /// de inyección para las pruebas (servicio falso / ruta simulada);
   /// `recordingsDirAttemptTimeout` y `recordingsDirRetryDelays`
-  /// acortan los tiempos del wrapper solo en pruebas.
+  /// acortan los tiempos del wrapper solo en pruebas. `testService`
+  /// es la costura del canal de pruebas (para leer `getTestMode` al
+  /// arrancar sin tocar el canal real en las pruebas).
   static Future<AppServices> create({
     StreamingService? streamingService,
+    TestService? testService,
     String? recordingsDirPathOverride,
     Duration? recordingsDirAttemptTimeout,
     List<Duration>? recordingsDirRetryDelays,
   }) async {
     final StreamingService service =
         streamingService ?? MethodChannelStreamingService();
+    // Puerta de compilación de pruebas (FASE 2, grupo 2-d): se lee
+    // una sola vez al arrancar por el canal de pruebas y se expone al
+    // shell. Un fallo del canal deja `testMode` en `false` y NUNCA
+    // bloquea el arranque (fail-closed).
+    final TestService testSvc = testService ?? MethodChannelTestService();
+    bool testMode = false;
+    try {
+      testMode = await testSvc
+          .getTestMode()
+          .timeout(const Duration(seconds: 2));
+    } catch (_) {
+      testMode = false;
+    }
+    final TestController testController = TestController(
+      testService: testSvc,
+      streamingService: service,
+      testMode: testMode,
+    );
     // Ruta canónica + cómo se resolvió (intento y duración medida,
     // grupo 0-f): el diagnóstico del teléfono (F1/F8) los muestra.
     // Con `recordingsDirPathOverride` (solo pruebas) no hay
@@ -302,6 +344,8 @@ class AppServices {
       gallery: ImagePickerGallery(),
       session: session,
       streaming: streaming,
+      testMode: testMode,
+      testController: testController,
     );
   }
 }
