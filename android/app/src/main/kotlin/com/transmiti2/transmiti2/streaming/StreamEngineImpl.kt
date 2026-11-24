@@ -617,8 +617,12 @@ class StreamEngineImpl(
      * la sesión no programó la parada: puerta cerrada, sin grabación
      * activa o `kind` desconocido). Nunca materializa el motor ni
      * arranca una grabación: sin sesión no hay nada que inyectar.
+     * Pública (no `internal`) como los demás seams de pruebas del
+     * manejador de streaming: los tests unitarios la llaman
+     * directamente, igual que `testRegistrySnapshot` /
+     * `testActiveStagingSize` se exponen para el canal.
      */
-    internal fun testInjectError(kind: String): Map<String, Any?> {
+    fun testInjectError(kind: String): Map<String, Any?> {
         if (!recordingSessionLazy.isInitialized()) {
             return mapOf(
                 "injected" to false,
@@ -1148,12 +1152,13 @@ class StreamEngineImpl(
      * 3.1.4): mismo camino que `stopRecording()` (el botón de la UI
      * y la notificación convergen: MainActivity → `StreamChannelHandler`
      * → aquí), pero el `FGS_STOPPED` de instrumentación lleva origen
-     * `notification` en vez de `normal_stop`. Interna: solo la usa
-     * `StreamChannelHandler.stopRecordingFromService()`. El origen
-     * viaja como parámetro local (sin estado compartido): no hay
-     * carrera con una parada simultánea desde la UI.
+     * `notification` en vez de `normal_stop`. Pública (no `internal`):
+     * la usan `StreamChannelHandler.stopRecordingFromService()` y los
+     * tests unitarios directamente. El origen viaja como parámetro
+     * local (sin estado compartido): no hay carrera con una parada
+     * simultánea desde la UI.
      */
-    internal suspend fun stopRecordingFromNotification(): RecordingInfo =
+    suspend fun stopRecordingFromNotification(): RecordingInfo =
         stopRecordingInternal(fgsStopOrigin = "notification")
 
     private suspend fun stopRecordingInternal(
