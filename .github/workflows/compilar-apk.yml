@@ -101,7 +101,13 @@ jobs:
           echo "Keystore de firma estable restaurado en ~/.android/debug.keystore"
 
       - name: Compilar el APK de depuración
+        env:
+          ORG_GRADLE_PROJECT_transmiti2TestMode: 'true'
         run: flutter build apk --debug
+
+      - name: Verificar modo de pruebas activo en el build
+        run: |
+          find android/app/build/generated -name "BuildConfig.java" -path "*debug*" | head -n 1 | xargs grep -H "TRANSMITI2_TEST_MODE" || { echo "ERROR: no se encontró TRANSMITI2_TEST_MODE en el BuildConfig generado"; exit 1; }
 
       - name: Verificar firma del APK
         run: |
@@ -124,7 +130,7 @@ jobs:
       - name: Guardar el APK como archivo descargable
         uses: actions/upload-artifact@v4
         with:
-          name: transmiti2-debug-apk-etapa3
+          name: transmiti2-test-apk-etapa3
           path: build/app/outputs/flutter-apk/app-debug.apk
           if-no-files-found: error
           retention-days: 7
