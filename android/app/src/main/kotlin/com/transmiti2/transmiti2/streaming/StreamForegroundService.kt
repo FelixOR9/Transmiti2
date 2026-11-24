@@ -209,6 +209,12 @@ class StreamForegroundService : Service() {
         // hasta que la grabación para; wake lock y ticker en marcha.
         // Se guarda el escenario con el que arrancó (3.1.3): la
         // notificación lo usa en cada refresco.
+        // J3-b: limpiar cualquier `delayedStop` pendiente (programado
+        // por una acción "Detener" anterior): si no, mataría el FGS
+        // de ESTA grabación a los 60 s aunque siga activa (plan
+        // §1.5 punto 6). Al parar el servicio, `onDestroy()` ya
+        // limpia los pendientes, así que este es el único hueco.
+        tickerHandler.removeCallbacks(delayedStop)
         currentScenario = scenario
         if (recordingStartElapsedMs == 0L) {
             recordingStartElapsedMs = SystemClock.elapsedRealtime()

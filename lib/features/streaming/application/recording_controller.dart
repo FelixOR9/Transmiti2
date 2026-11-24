@@ -181,6 +181,9 @@ class RecordingController extends ChangeNotifier {
     required bool Function() isPreviewActive,
     NowMs? nowMs,
     RecordingTimerFactory? createTimer,
+    // Primer plano para el vigilante de `service_stopped` (J3-b):
+    // por defecto se lee del `WidgetsBinding`; en pruebas se inyecta.
+    bool Function()? isForeground,
     // Ruta canónica y cómo se resolvió (subetapa 0, grupo 0-f):
     // las mide `AppServices` al arrancar y llegan por
     // `StreamingController`. `null` = no medido (pruebas sin
@@ -193,6 +196,7 @@ class RecordingController extends ChangeNotifier {
        _recordings = recordings,
        _isPreviewActive = isPreviewActive,
        _nowMs = nowMs ?? systemNowMs,
+       _isForegroundCheck = isForeground ?? _defaultIsForeground,
        _createTimer = createTimer ?? Timer.periodic;
 
   final StreamingService _service;
@@ -200,6 +204,7 @@ class RecordingController extends ChangeNotifier {
   final RecordingRepository _recordings;
   final bool Function() _isPreviewActive;
   final NowMs _nowMs;
+  final bool Function() _isForegroundCheck;
   final RecordingTimerFactory _createTimer;
 
   /// Ruta canónica de grabaciones (`<filesDir>/recordings/`).
@@ -290,6 +295,35 @@ class RecordingController extends ChangeNotifier {
 
   RecordingDiagnostics? _diagnostics;
   RecordingDiagnostics? get diagnostics => _diagnostics;
+
+  /// Plazo del vigilante de `service_stopped` (J3-b): el motor para
+  /// el FGS inmediatamente tras `recording_error`, así que 5 s es
+  /// el mismo plazo del criterio físico J3-P1 (la notificación debe
+  /// desaparecer en ≤ 5 s tras el error).
+  static const Duration _serviceStoppedTimeout = Duration(seconds: 5);
+
+  /// Motivo de la última parada del servicio (`service_stopped`,
+  /// J3-b, 3.1.4): `normal_stop` o `error_stop`. `null` si el
+  /// servicio no ha parado (o el evento llegó sin motivo, payload
+  /// viejo). Se muestra en la tarjeta de diagnóstico y se limpia al
+  /// iniciar una grabación nueva.
+  String? _serviceStoppedReason;
+  String? get serviceStoppedReason => _serviceStoppedReason;
+
+  /// Anomalía del vigilante de `service_stopped` (J3-b): `true` si,
+  /// tras un `recording_error` con la app en primer plano, la
+  /// confirmación de parada del servicio no llegó en 5 s. Detector,
+  /// no corrector: no para nada, solo lo muestra en la tarjeta.
+  /// Se limpia al llegar `service_stopped` o al iniciar una
+  /// grabación nueva.
+  bool _serviceStoppedMissing = false;
+  bool get serviceStoppedMissing => _serviceStoppedMissing;
+
+  /// Vigilante de `service_stopped` armado tras `recording_error`
+  /// (J3-b). `true` mientras espera la confirmación.
+  Timer? _serviceStoppedWatchdog;
+  bool get serviceStoppedWatchdogArmed =>
+      _serviceStoppedWatchdog?.isActive ?? false;
 
   /// Segmentos interrumpidos clasificados en la última recuperación.
   List<RecoveredSegmentInfo> _lastRecovery = const <RecoveredSegmentInfo>[];
@@ -463,6 +497,19 @@ class RecordingController extends ChangeNotifier {
     }
     if (diag.closeReason != null) {
       text.writeln('Cierre del segmento: ${diag.closeReason}');
+    }
+    // J3-b (3.1.4): parada del servicio y su vigilante. La línea de
+    // motivo solo aparece con `service_stopped` (sin motivo en un
+    // payload viejo no se inventa). La anomalía solo aparece si el
+    // vigilante disparó con la app en primer plano.
+    if (_serviceStoppedReason != null) {
+      text.writeln('Servicio detenido: $_serviceStoppedReason');
+    }
+    if (_serviceStoppedMissing) {
+      text.writeln(
+        'ANOMALÍA: sin service_stopped 5 s tras el error '
+        '(el servicio puede seguir vivo)',
+      );
     }
     if (_lastRecovery.isNotEmpty) {
       text.writeln(
@@ -738,6 +785,8 @@ class RecordingController extends ChangeNotifier {
       // (el tiempo se recalcula desde `_startedAtMs` al volver y la
       // re-sincronización lo vuelve a arrancar si se sigue grabando).
       _stopTimer();
+      // J3-b: sin UI no hay tarjeta que avise del vigilante.
+      _cancelServiceStoppedWatchdog();
     }
   }
 
@@ -1143,6 +1192,51 @@ class RecordingController extends ChangeNotifier {
     _timer = null;
   }
 
+  /// `true` si la app está en primer plano (J3-b): el vigilante
+  /// solo marca la anomalía entonces; en segundo plano los eventos
+  /// pueden llegar tarde y no es anomalía. Por defecto se lee de
+  /// `WidgetsBinding.instance.lifecycleState` (`null` o `resumed` =
+  /// primer plano); sin `WidgetsBinding` (pruebas sin `testWidgets`)
+  /// se asume primer plano. Inyectable para las pruebas, como el
+  /// reloj y la fábrica de temporizadores.
+  bool _isForeground() => _isForegroundCheck();
+
+  static bool _defaultIsForeground() {
+    try {
+      final AppLifecycleState? state =
+          WidgetsBinding.instance.lifecycleState;
+      return state == null || state == AppLifecycleState.resumed;
+    } on Object {
+      return true;
+    }
+  }
+
+  /// Arma el vigilante de `service_stopped` tras `recording_error`
+  /// (J3-b): si en 5 s no llegó la confirmación con la app en
+  /// primer plano, la tarjeta marca la anomalía. Detector, no
+  /// corrector: no toca el servicio. Se cancela al llegar
+  /// `service_stopped`, al iniciar otra grabación o al soltar la UI.
+  /// Es un temporizador periódico que se cancela en su primer tick
+  /// (un solo disparo, con la misma fábrica inyectable del de 1 s).
+  void _armServiceStoppedWatchdog() {
+    _serviceStoppedWatchdog?.cancel();
+    _serviceStoppedWatchdog = _createTimer(_serviceStoppedTimeout, (_) {
+      _serviceStoppedWatchdog?.cancel();
+      _serviceStoppedWatchdog = null;
+      if (_state == RecordingState.error &&
+          _serviceStoppedReason == null &&
+          _isForeground()) {
+        _serviceStoppedMissing = true;
+        notifyListeners();
+      }
+    });
+  }
+
+  void _cancelServiceStoppedWatchdog() {
+    _serviceStoppedWatchdog?.cancel();
+    _serviceStoppedWatchdog = null;
+  }
+
   /// Fusiona segmentos verificados en `_segments` por índice (los ya
   /// conocidos se actualizan, los nuevos se añaden en orden). La lista
   /// de Dart puede haber perdido eventos; la del motor es completa.
@@ -1216,6 +1310,11 @@ class RecordingController extends ChangeNotifier {
           _state = RecordingState.recording;
           _startTimer();
         }
+        // J3-b: grabación nueva: se limpia el estado de parada del
+        // servicio de la anterior y se cancela su vigilante.
+        _serviceStoppedReason = null;
+        _serviceStoppedMissing = false;
+        _cancelServiceStoppedWatchdog();
         notifyListeners();
       case StreamContract.eventRecordingSegment:
         final RecordingSegmentInfo segment =
@@ -1269,6 +1368,10 @@ class RecordingController extends ChangeNotifier {
         _startedAtMs = null;
         _segmentStartedAtMs = null;
         _stopTimer();
+        // J3-b: parada normal: no hay vigilante que esperar (el
+        // `service_stopped` de la parada normal, si llega, cancela
+        // igualmente el que hubiera).
+        _cancelServiceStoppedWatchdog();
         notifyListeners();
       case StreamContract.eventRecordingAudioLost:
         // Pérdida de audio en caliente (3.1.3, D7): el video
@@ -1288,6 +1391,15 @@ class RecordingController extends ChangeNotifier {
         _audioLostSilencePeak = (event['silencePeak'] as num?)?.toInt();
         notifyListeners();
       case StreamContract.eventRecordingError:
+        // J3-b: el vigilante solo se arma si había una grabación en
+        // curso (`recording`/`rotating`/`stopping`): si el inicio
+        // falló (`starting`, `failStart`), el motor ya paró el FGS
+        // sin emitir `service_stopped` y armarlo sería un falso
+        // positivo.
+        final bool wasRecording =
+            _state == RecordingState.recording ||
+            _state == RecordingState.rotating ||
+            _state == RecordingState.stopping;
         _errorCode =
             event['code'] as String? ?? event['errorCode'] as String?;
         _errorMessage = event['message'] as String?;
@@ -1316,13 +1428,31 @@ class RecordingController extends ChangeNotifier {
         }
         _state = RecordingState.error;
         // Relojes a cero: la grabación terminó con error; el
-        // diagnóstico no debe seguir contando (paso 2). J3-a: la
-        // auto-parada NO detiene el FGS (eso es J3-b): este evento
-        // solo para el temporizador Dart y marca el error; el
-        // servicio sigue vivo hasta que el motor lo pare.
+        // diagnóstico no debe seguir contando (paso 2). J3-b: el
+        // motor para el FGS al completar la parada con error y emite
+        // `service_stopped` con `reason=error_stop` (antes, en J3-a,
+        // la auto-parada NO detenía el FGS). Este evento solo para el
+        // temporizador Dart y marca el error; el vigilante avisa si
+        // la confirmación no llega en 5 s.
         _startedAtMs = null;
         _segmentStartedAtMs = null;
         _stopTimer();
+        _serviceStoppedReason = null;
+        _serviceStoppedMissing = false;
+        if (wasRecording) {
+          _armServiceStoppedWatchdog();
+        }
+        notifyListeners();
+      case StreamContract.eventServiceStopped:
+        // J3-b: el motor paró el FGS; el motivo (`normal_stop` /
+        // `error_stop`) se muestra en la tarjeta. Solo observa: no
+        // cambia el estado de grabación (eso lo hacen
+        // `recording_stopped` / `recording_error`) ni llama a
+        // `stopRecording()`. Sin motivo (payload viejo) se cancela
+        // el vigilante igualmente, sin línea de motivo.
+        _serviceStoppedReason = event['reason'] as String?;
+        _serviceStoppedMissing = false;
+        _cancelServiceStoppedWatchdog();
         notifyListeners();
     }
   }
@@ -1330,6 +1460,7 @@ class RecordingController extends ChangeNotifier {
   @override
   void dispose() {
     _stopTimer();
+    _cancelServiceStoppedWatchdog();
     unawaited(_eventsSubscription?.cancel());
     super.dispose();
   }

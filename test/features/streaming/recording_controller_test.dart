@@ -43,6 +43,7 @@ void main() {
     late RecordingController recording;
     late List<FakeTimer> timers;
     late bool previewActive;
+    late bool foreground;
     late int now;
     late int notifications;
 
@@ -61,6 +62,7 @@ void main() {
       recordings = InMemoryRecordingRepository();
       timers = <FakeTimer>[];
       previewActive = true;
+      foreground = true;
       now = 1000000;
       notifications = 0;
       recording = RecordingController(
@@ -69,6 +71,7 @@ void main() {
         recordings: recordings,
         isPreviewActive: () => previewActive,
         nowMs: () => now,
+        isForeground: () => foreground,
         createTimer: (Duration duration, void Function(Timer) callback) {
           final FakeTimer timer = FakeTimer(callback);
           timers.add(timer);
@@ -786,10 +789,13 @@ void main() {
         expect(recording.diagnostics?.lastErrorStage, 'encoder');
         expect(recording.diagnostics?.trigger, 'onError');
         expect(recording.diagnostics?.closeReason, 'muxer_stop_failed');
-        // El temporizador se detiene y el handler NO invoca
+        // El temporizador de 1 s se detiene y el handler NO invoca
         // `stopRecording()` (el motor ya paró; re-entrar sería un
         // error y dejaría el FGS vivo igualmente: eso es J3-b).
-        expect(timers.every((FakeTimer t) => !t.isActive), isTrue);
+        // J3-b: el único temporizador activo es el vigilante de
+        // `service_stopped` (el primero de la lista es el de 1 s).
+        expect(timers.first.isActive, isFalse);
+        expect(recording.serviceStoppedWatchdogArmed, isTrue);
         expect(service.stopRecordingCalls, 0);
         expect(recording.diagnosticText, contains('Disparador: onError'));
         expect(
@@ -822,7 +828,10 @@ void main() {
         expect(recording.diagnostics?.trigger, isNull);
         expect(recording.diagnostics?.closeReason, isNull);
         expect(recording.diagnostics?.freeBytes, isNull);
-        expect(timers.every((FakeTimer t) => !t.isActive), isTrue);
+        // J3-b: el temporizador de 1 s se detiene; el vigilante de
+        // `service_stopped` queda armado (ver test anterior).
+        expect(timers.first.isActive, isFalse);
+        expect(recording.serviceStoppedWatchdogArmed, isTrue);
         expect(service.stopRecordingCalls, 0);
       },
     );
@@ -858,6 +867,130 @@ void main() {
         expect(service.stopRecordingCalls, 0);
         expect(recording.diagnosticText, contains('Espacio libre: 100 bytes'));
         expect(recording.diagnosticText, isNot(contains('Disparador:')));
+      },
+    );
+
+    // J3-b (3.1.4): `service_stopped` y su vigilante.
+
+    testWidgets(
+      'service_stopped tras recording_error muestra el motivo y cancela el vigilante',
+      (WidgetTester tester) async {
+        await pumpController(tester);
+        await recording.start();
+        await tester.pump();
+        service.emitEvent(<String, Object?>{
+          'type': StreamContract.eventRecordingError,
+          'recordingId': 'rec_20261118_120000_ab12',
+          'code': StreamContract.encoderError,
+          'message': 'Error del codificador: codec roto.',
+          'details': <String, Object?>{
+            'code': StreamContract.encoderError,
+            'stage': 'encoder',
+            'segmentIndex': 0,
+            'triggerSite': 'onError',
+          },
+        });
+        await tester.pump();
+        expect(recording.serviceStoppedWatchdogArmed, isTrue);
+
+        service.emitEvent(<String, Object?>{
+          'type': StreamContract.eventServiceStopped,
+          'recordingId': 'rec_20261118_120000_ab12',
+          'reason': 'error_stop',
+        });
+        await tester.pump();
+
+        expect(recording.serviceStoppedReason, 'error_stop');
+        expect(recording.serviceStoppedMissing, isFalse);
+        expect(recording.serviceStoppedWatchdogArmed, isFalse);
+        expect(service.stopRecordingCalls, 0);
+        expect(
+          recording.diagnosticText,
+          contains('Servicio detenido: error_stop'),
+        );
+        expect(recording.diagnosticText, isNot(contains('ANOMALÍA')));
+      },
+    );
+
+    testWidgets(
+      'service_stopped sin motivo (payload viejo) cancela el vigilante sin romper',
+      (WidgetTester tester) async {
+        await pumpController(tester);
+        await recording.start();
+        await tester.pump();
+        service.emitEvent(<String, Object?>{
+          'type': StreamContract.eventRecordingError,
+          'recordingId': 'rec_20261118_120000_ab12',
+          'code': StreamContract.encoderError,
+        });
+        await tester.pump();
+        expect(recording.serviceStoppedWatchdogArmed, isTrue);
+
+        service.emitEvent(<String, Object?>{
+          'type': StreamContract.eventServiceStopped,
+          'recordingId': 'rec_20261118_120000_ab12',
+        });
+        await tester.pump();
+
+        expect(recording.serviceStoppedReason, isNull);
+        expect(recording.serviceStoppedWatchdogArmed, isFalse);
+        expect(
+          recording.diagnosticText,
+          isNot(contains('Servicio detenido:')),
+        );
+      },
+    );
+
+    testWidgets(
+      'sin service_stopped en 5 s tras recording_error la tarjeta marca anomalía',
+      (WidgetTester tester) async {
+        await pumpController(tester);
+        await recording.start();
+        await tester.pump();
+        service.emitEvent(<String, Object?>{
+          'type': StreamContract.eventRecordingError,
+          'recordingId': 'rec_20261118_120000_ab12',
+          'code': StreamContract.encoderError,
+          'message': 'Error del codificador: codec roto.',
+        });
+        await tester.pump();
+        expect(recording.serviceStoppedWatchdogArmed, isTrue);
+
+        // El vigilante es el último temporizador creado.
+        timers.last.fire();
+        await tester.pump();
+
+        expect(recording.serviceStoppedMissing, isTrue);
+        expect(
+          recording.diagnosticText,
+          contains('ANOMALÍA: sin service_stopped 5 s tras el error'),
+        );
+      },
+    );
+
+    testWidgets(
+      'con la app en segundo plano el vigilante no marca anomalía',
+      (WidgetTester tester) async {
+        await pumpController(tester);
+        await recording.start();
+        await tester.pump();
+        service.emitEvent(<String, Object?>{
+          'type': StreamContract.eventRecordingError,
+          'recordingId': 'rec_20261118_120000_ab12',
+          'code': StreamContract.encoderError,
+          'message': 'Error del codificador: codec roto.',
+        });
+        await tester.pump();
+        expect(recording.serviceStoppedWatchdogArmed, isTrue);
+
+        // La app pasa a segundo plano: los eventos pueden llegar
+        // tarde y el vigilante no debe marcar anomalía.
+        foreground = false;
+        timers.last.fire();
+        await tester.pump();
+
+        expect(recording.serviceStoppedMissing, isFalse);
+        expect(recording.diagnosticText, isNot(contains('ANOMALÍA')));
       },
     );
 

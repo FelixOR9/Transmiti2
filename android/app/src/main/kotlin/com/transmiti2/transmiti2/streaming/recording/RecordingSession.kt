@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
@@ -725,6 +726,30 @@ open class RecordingSession(
     private var lastError: RecordingException? = null
     private var lastResult: RecordingResult? = null
     private var stopResult: CompletableDeferred<RecordingResult>? = null
+
+    /**
+     * Aviso al motor cuando `stop()` completa una parada con error
+     * (J3-b, 3.1.4, plan §1.3 pasos 2-3). Lo instala el motor al
+     * materializar la sesión; la sesión nunca para el FGS (no conoce
+     * el `Context` por diseño): solo avisa con el código, el
+     * disparador y el id de la grabación que se detuvo, DESPUÉS de
+     * haber publicado `ERROR`, liberado el claim y emitido
+     * `recording_error` (o, si `doStop` lanzó antes de emitir, con
+     * el claim ya liberado en su `finally`: el motor para el FGS
+     * igualmente para no dejarlo vivo, plan §1.5 punto 5). `null`
+     * sin motor (unitarias de la sesión): la sesión funciona igual
+     * que antes. Solo lo invoca el `stop()` ganador (el primero que
+     * reserva `stopResult`); los perdedores retornan el resultado
+     * del ganador sin avisar. Nunca lanza fuera: un handler que
+     * lance se traga en `notifyErrorStopCompleted`.
+     */
+    var onSessionErrorStop: (
+        (
+            code: String,
+            trigger: ErrorTrigger?,
+            recordingId: String,
+        ) -> Unit
+    )? = null
 
     private var recordingId: String? = null
     /**
@@ -2788,6 +2813,59 @@ open class RecordingSession(
     }
 
     /**
+     * Avisa al motor de que `stop()` completó una parada con error
+     * (J3-b). Nunca lanza: si el handler no está instalado o lanza,
+     * la parada ya está hecha y el aviso se pierde sin romper nada
+     * (guard_new_execution_path: el camino nuevo degrada al
+     * comportamiento anterior).
+     */
+    private fun notifyErrorStopCompleted(
+        code: String,
+        trigger: ErrorTrigger?,
+        recordingId: String,
+    ) {
+        try {
+            onSessionErrorStop?.invoke(code, trigger, recordingId)
+        } catch (_: Exception) {
+        }
+    }
+
+    /**
+     * Espera el resultado del `stop()` ganador (J3-b, plan §1.3 paso
+     * 3: el ganador fija `errorCode` y evento; el perdedor retorna el
+     * resultado del ganador). Si el perdedor pedía una parada con
+     * error, su código se registra en log: antes se perdía en
+     * silencio (plan §1.5 puntos 1-2). Si el ganador falló con
+     * excepción, se registra igual y se relanza la misma excepción.
+     */
+    private suspend fun awaitLoserStop(
+        deferred: Deferred<RecordingResult>,
+        requestedErrorCode: String?,
+    ): RecordingResult {
+        val result = try {
+            deferred.await()
+        } catch (e: Exception) {
+            if (requestedErrorCode != null) {
+                Transmiti2Logger.d(
+                    "recording: stop() perdedor (errorCode=" +
+                        "$requestedErrorCode): el ganador falló con " +
+                        "${e.javaClass.simpleName}; se relanza",
+                )
+            }
+            throw e
+        }
+        if (requestedErrorCode != null) {
+            Transmiti2Logger.d(
+                "recording: stop() perdedor (errorCode=" +
+                    "$requestedErrorCode): el ganador fijó " +
+                    "errorCode=${result.errorCode} " +
+                    "status=${result.status}",
+            )
+        }
+        return result
+    }
+
+    /**
      * Detiene la grabación y finaliza el segmento actual. Idempotente
      * desde `IDLE` (no falla, no hace nada) y desde `ERROR` (devuelve
      * el resultado ya calculado). `errorCode` es `null` en la parada
@@ -2797,13 +2875,22 @@ open class RecordingSession(
      * `null` en la parada normal y en un `stop(errorCode)` sin
      * disparador (p. ej. desde el motor); en ese caso `doStop`
      * conserva el genérico de siempre y no inventa un disparador.
+     *
+     * Semántica del ganador (J3-b, plan §1.3 paso 3): el primer
+     * `stop()` que reserva `stopResult` ejecuta `doStop` y fija
+     * `errorCode` y evento; los demás esperan y retornan el resultado
+     * del ganador, y si pedían una parada con error su código queda
+     * registrado en log (`awaitLoserStop`). Al completar el ganador
+     * una parada con error, avisa al motor vía `onSessionErrorStop`
+     * (después de publicar `ERROR` y emitir `recording_error`) para
+     * que pare el FGS.
      */
     open suspend fun stop(
         errorCode: String? = null,
         errorTrigger: ErrorTrigger? = null,
     ): RecordingResult {
         val existing = sessionMutex.withLock { stopResult }
-        if (existing != null) return existing.await()
+        if (existing != null) return awaitLoserStop(existing, errorCode)
         val deferred = CompletableDeferred<RecordingResult>()
         val isFirst = sessionMutex.withLock {
             if (stopResult != null) {
@@ -2813,9 +2900,30 @@ open class RecordingSession(
                 true
             }
         }
-        if (!isFirst) return stopResult!!.await()
+        if (!isFirst) return awaitLoserStop(stopResult!!, errorCode)
+        // Id de la grabación que este `stop()` va a detener: si
+        // `doStop` lanza (§1.5 punto 5), el aviso al motor usa este
+        // id (el claim ya se liberó en el `finally` de `doStop`).
+        val idBeforeStop = sessionMutex.withLock { recordingId }
         return try {
             val result = doStop(errorCode, errorTrigger)
+            // J3-b: solo el ganador avisa al motor, y ANTES de
+            // completar el deferred: así el aviso (y la parada del
+            // FGS) ya ocurrió cuando los perdedores despiertan y
+            // corren su `finally`. Solo si `doStop` detuvo algo
+            // real con este código: un `idle` (vacío) o el
+            // resultado viejo de un `ERROR` anterior no avisan.
+            if (errorCode != null &&
+                result.status != "idle" &&
+                result.errorCode == errorCode &&
+                result.recordingId.isNotEmpty()
+            ) {
+                notifyErrorStopCompleted(
+                    errorCode,
+                    errorTrigger,
+                    result.recordingId,
+                )
+            }
             deferred.complete(result)
             // Tras una parada normal el estado vuelve a IDLE: la
             // siguiente llamada a `stop()` debe devolver «vacío», no
@@ -2828,6 +2936,19 @@ open class RecordingSession(
             }
             result
         } catch (e: Exception) {
+            // J3-b (§1.5 punto 5): `doStop` lanzó ANTES de emitir
+            // `recording_error` (p. ej. EOS agotado con el encoder
+            // muerto), pero su `finally` ya liberó claim y encoders:
+            // el motor para el FGS igualmente. Sin `recording_error`
+            // previo, Dart solo verá `service_stopped` (el hueco de
+            // evento sigue siendo conocido, no se inventa un error).
+            if (errorCode != null && idBeforeStop != null) {
+                notifyErrorStopCompleted(
+                    errorCode,
+                    errorTrigger,
+                    idBeforeStop,
+                )
+            }
             deferred.completeExceptionally(e)
             throw e
         }

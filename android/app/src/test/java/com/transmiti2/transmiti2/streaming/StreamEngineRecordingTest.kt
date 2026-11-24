@@ -273,6 +273,11 @@ class StreamEngineRecordingTest {
         // J3-a (3.1.4): `stop()` ganó el parámetro `errorTrigger`
         // (disparador completo de la auto-parada); el falso lo acepta
         // y lo ignora, como antes ignoraba el código en este camino.
+        // J3-b: si es true, `stop(errorCode)` invoca el handler de
+        // error-stop del motor (como la sesión real al completar
+        // `doStop` con error); por defecto no se invoca, como antes.
+        var invokeErrorStopHandler = false
+
         override suspend fun stop(
             errorCode: String?,
             errorTrigger: ErrorTrigger?,
@@ -284,6 +289,15 @@ class StreamEngineRecordingTest {
             fakeAudioEnabled = false
             fakeAudioActive = false
             fakeAudioReason = null
+            if (invokeErrorStopHandler && errorCode != null &&
+                stopResult.recordingId.isNotEmpty()
+            ) {
+                onSessionErrorStop?.invoke(
+                    errorCode,
+                    errorTrigger,
+                    stopResult.recordingId,
+                )
+            }
             return stopResult
         }
 
@@ -350,6 +364,13 @@ class StreamEngineRecordingTest {
 
         fun eventTypes(): List<String> {
             return events.mapNotNull { it["type"] as? String }
+        }
+
+        /** Eventos `service_stopped` recibidos, en orden (J3-b). */
+        fun serviceStoppedEvents(): List<Map<String, Any?>> {
+            return events.filter {
+                it["type"] == StreamContract.EVENT_SERVICE_STOPPED
+            }
         }
 
         /** Resultado de parada con un segmento `ready` de 12 s. */
@@ -528,7 +549,8 @@ class StreamEngineRecordingTest {
     }
 
     @Test
-    fun `si la sesion falla el FGS se detiene`() = runBlocking {
+    fun `si la sesion falla el FGS se detiene sin evento service_stopped`() =
+        runBlocking {
         val fixture = Fixture()
         fixture.recording.startError = RecordingException.encoderError(
             "Sin codificador H.264.",
@@ -545,6 +567,13 @@ class StreamEngineRecordingTest {
         }
         assertEquals(1, fixture.fgs.startCalls)
         assertEquals(1, fixture.fgs.stopCalls)
+        // J3-b: sin evento `service_stopped` (la grabación nunca
+        // arrancó y Dart nunca vio `service_started`).
+        assertFalse(
+            fixture.eventTypes().contains(
+                StreamContract.EVENT_SERVICE_STOPPED,
+            ),
+        )
     }
 
     @Test
@@ -603,11 +632,14 @@ class StreamEngineRecordingTest {
             )
             assertEquals(1, fixture.recording.stopCalls)
             assertEquals(1, fixture.fgs.stopCalls)
-            assertTrue(
-                fixture.eventTypes().contains(
-                    StreamContract.EVENT_SERVICE_STOPPED,
-                ),
+            // J3-b: un solo `service_stopped`, con motivo normal_stop.
+            val stopped = fixture.serviceStoppedEvents()
+            assertEquals(1, stopped.size)
+            assertEquals(
+                "rec_20261118_120000_ab12",
+                stopped[0]["recordingId"],
             )
+            assertEquals("normal_stop", stopped[0]["reason"])
         }
 
     @Test
@@ -709,12 +741,22 @@ class StreamEngineRecordingTest {
             assertEquals(1, fixture.session.closeCalls)
             assertEquals(1, fixture.fgs.stopCalls)
             assertFalse(fixture.session.isOpen)
+            // J3-b: este camino no emite `service_stopped`
+            // (comportamiento anterior conservado).
+            assertFalse(
+                fixture.eventTypes().contains(
+                    StreamContract.EVENT_SERVICE_STOPPED,
+                ),
+            )
         }
 
     @Test
     fun `la desconexion de la camara detiene la grabacion con camera_disconnected`() =
         runBlocking {
             val fixture = Fixture()
+            // J3-b: la sesión real avisa al motor al completar el
+            // `stop(errorCode)`; el falso lo reproduce con el flag.
+            fixture.recording.invokeErrorStopHandler = true
             fixture.recording.stopResult = fixture.readyStopResult()
             val engine = fixture.engine()
             engine.startPreview()
@@ -728,11 +770,122 @@ class StreamEngineRecordingTest {
                 fixture.recording.lastStopErrorCode,
             )
             assertEquals(1, fixture.fgs.stopCalls)
+            // J3-b: el aviso de error-stop ya emitió
+            // `service_stopped` (error_stop); el `finally` de
+            // `stopRecordingIfActive` no lo duplica.
+            val stopped = fixture.serviceStoppedEvents()
+            assertEquals(1, stopped.size)
+            assertEquals("error_stop", stopped[0]["reason"])
             assertTrue(
                 fixture.eventTypes().contains(
                     StreamContract.EVENT_PREVIEW_ERROR,
                 ),
             )
+        }
+
+    // J3-b (3.1.4): parada del FGS por error-stop.
+
+    @Test
+    fun `el error-stop de la sesion detiene el FGS una sola vez y emite service_stopped con motivo error_stop`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.recording.invokeErrorStopHandler = true
+            fixture.recording.stopResult = fixture.readyStopResult()
+                .copy(errorCode = StreamContract.ENCODER_ERROR)
+            val engine = fixture.engine()
+            engine.startPreview()
+            engine.startRecording(RecordingOptions())
+
+            // La sesión completó un `stop(errorCode)` (en producción
+            // lo dispara `scheduleErrorStop` al final de `doStop`).
+            fixture.recording.stop(StreamContract.ENCODER_ERROR)
+
+            assertEquals(1, fixture.fgs.stopCalls)
+            val stopped = fixture.serviceStoppedEvents()
+            assertEquals(1, stopped.size)
+            assertEquals(
+                "rec_20261118_120000_ab12",
+                stopped[0]["recordingId"],
+            )
+            assertEquals("error_stop", stopped[0]["reason"])
+        }
+
+    @Test
+    fun `doble error-stop no duplica la parada del FGS`() = runBlocking {
+        val fixture = Fixture()
+        fixture.recording.invokeErrorStopHandler = true
+        fixture.recording.stopResult = fixture.readyStopResult()
+            .copy(errorCode = StreamContract.ENCODER_ERROR)
+        val engine = fixture.engine()
+        engine.startPreview()
+        engine.startRecording(RecordingOptions())
+
+        // Dos avisos de error-stop (en producción el segundo
+        // `stop()` es perdedor y ni siquiera avisa: aquí se fuerza
+        // el aviso dos veces para probar la guarda del motor).
+        fixture.recording.stop(StreamContract.ENCODER_ERROR)
+        fixture.recording.stop(StreamContract.ENCODER_ERROR)
+
+        assertEquals(1, fixture.fgs.stopCalls)
+        assertEquals(1, fixture.serviceStoppedEvents().size)
+    }
+
+    @Test
+    fun `stopRecording tras un error-stop no emite service_stopped duplicado`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.recording.invokeErrorStopHandler = true
+            fixture.recording.stopResult = fixture.readyStopResult()
+                .copy(errorCode = StreamContract.ENCODER_ERROR)
+            val engine = fixture.engine()
+            engine.startPreview()
+            engine.startRecording(RecordingOptions())
+
+            // Gana el error-stop; la parada normal llega después.
+            fixture.recording.stop(StreamContract.ENCODER_ERROR)
+            engine.stopRecording()
+
+            assertEquals(2, fixture.recording.stopCalls)
+            assertEquals(1, fixture.fgs.stopCalls)
+            val stopped = fixture.serviceStoppedEvents()
+            assertEquals(1, stopped.size)
+            assertEquals("error_stop", stopped[0]["reason"])
+        }
+
+    @Test
+    fun `un error-stop tardio de una grabacion anterior no detiene el FGS de la grabacion nueva`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.recording.invokeErrorStopHandler = true
+            fixture.recording.stopResult = fixture.readyStopResult()
+                .copy(errorCode = StreamContract.ENCODER_ERROR)
+            val engine = fixture.engine()
+            engine.startPreview()
+            engine.startRecording(RecordingOptions())
+
+            fixture.recording.stop(StreamContract.ENCODER_ERROR)
+            assertEquals(1, fixture.fgs.stopCalls)
+
+            // Segunda grabación con id nuevo: la guarda se resetea
+            // en su `startRecording`.
+            fixture.recording.startedInfo =
+                fixture.recording.startedInfo.copy(
+                    recordingId = "rec_20261118_120001_cd34",
+                )
+            val secondId = engine.startRecording(RecordingOptions())
+            assertEquals("rec_20261118_120001_cd34", secondId)
+            assertEquals(2, fixture.fgs.startCalls)
+
+            // Aviso tardío de la grabación anterior (A): debe
+            // ignorarse; el FGS de B sigue vivo.
+            fixture.recording.onSessionErrorStop?.invoke(
+                StreamContract.ENCODER_ERROR,
+                null,
+                "rec_20261118_120000_ab12",
+            )
+
+            assertEquals(1, fixture.fgs.stopCalls)
+            assertEquals(1, fixture.serviceStoppedEvents().size)
         }
 
     @Test

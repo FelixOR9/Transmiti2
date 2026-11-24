@@ -89,7 +89,11 @@ abstract final class StreamContract {
   static const String eventPermissionChanged = 'permission_changed';
 
   /// Se emiten desde la subetapa 3.1.2, cuando el servicio arranca y para
-  /// de verdad con una grabación.
+  /// de verdad con una grabación. `service_stopped` lleva
+  /// `recordingId` y, desde J3-b (3.1.4), `reason`: `normal_stop`
+  /// (parada por `stop()`) o `error_stop` (auto-parada por error: la
+  /// sesión completó `stop(errorCode)` y el motor paró el FGS). Un
+  /// payload viejo sin `reason` sigue parseando (motivo `null`).
   static const String eventServiceStarted = 'service_started';
   static const String eventServiceStopped = 'service_stopped';
 

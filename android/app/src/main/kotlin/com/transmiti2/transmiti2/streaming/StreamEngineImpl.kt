@@ -7,6 +7,7 @@ import android.view.Display
 import android.view.Surface
 import android.view.WindowManager
 import com.transmiti2.transmiti2.streaming.recording.DefaultSegmentVerifier
+import com.transmiti2.transmiti2.streaming.recording.ErrorTrigger
 import com.transmiti2.transmiti2.streaming.recording.RecordingException
 import com.transmiti2.transmiti2.streaming.recording.RecordingFileStore
 import com.transmiti2.transmiti2.streaming.recording.RecordingResult
@@ -20,6 +21,8 @@ import com.transmiti2.transmiti2.streaming.test.TestEventResult
 import com.transmiti2.transmiti2.streaming.test.TestEventType
 import com.transmiti2.transmiti2.streaming.test.TestHooks
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
@@ -198,6 +201,31 @@ class StreamEngineImpl(
      * errores de cámara). Siempre se toma ANTES que el mutex del motor.
      */
     private val recordingMutex = Mutex()
+
+    /**
+     * Guarda de parada del FGS por grabación (J3-b, plan §1.3 paso
+     * 3): `true` cuando el FGS de la grabación en curso ya se paró
+     * (por cualquier vía). La parada del FGS por error se ejecuta
+     * UNA SOLA VEZ por grabación aunque lleguen dos avisos de
+     * error-stop o la parada normal y la de error compitan: la
+     * primera vía que llega consume la guarda y las demás son no-op
+     * (sin segundo `stopRecordingService()` ni segundo
+     * `service_stopped`). Se resetea en `startRecording`, antes de
+     * arrancar el FGS de la grabación nueva.
+     */
+    private val fgsStopRequested = AtomicBoolean(false)
+
+    /**
+     * Id de la grabación activa (J3-b): se fija al arrancar una
+     * grabación y se limpia al pararla. Un aviso de error-stop
+     * tardío de una grabación anterior (id distinto al activo) se
+     * ignora: sin esta comprobación, el aviso podría parar el FGS
+     * de la grabación nueva tras el reseteo de la guarda en su
+     * `startRecording`. `null` sin grabación activa (o si la
+     * grabación terminó y su parada ya limpió el id).
+     */
+    private val activeRecordingId = AtomicReference<String?>(null)
+
     private var state = State.IDLE
     private var handle: SurfaceProducerHandle? = null
     private var session: PreviewSession? = null
@@ -226,7 +254,7 @@ class StreamEngineImpl(
         val emit: (String, Map<String, Any?>) -> Unit = { type, payload ->
             scope.launch { emitEvent(type, payload) }
         }
-        recordingSessionFactory(emit)
+        val created = recordingSessionFactory(emit)
             ?: context?.let { ctx ->
                 RecordingSession(
                     scope = scope,
@@ -238,6 +266,14 @@ class StreamEngineImpl(
                     testHooks = testHooks,
                 )
             }
+        // J3-b: la sesión avisa al motor cuando completa una parada
+        // con error; el motor —no la sesión— para el FGS (la sesión
+        // no conoce el `Context`). Se instala aquí para cubrir las
+        // dos vías de construcción (fábrica de pruebas y real).
+        created?.onSessionErrorStop = { code, trigger, recordingId ->
+            onSessionErrorStop(code, trigger, recordingId)
+        }
+        created
     }
     private val recordingSession: RecordingSession?
         get() = recordingSessionLazy.value
@@ -997,6 +1033,12 @@ class StreamEngineImpl(
                 RecordingScenario.WITHOUT_AUDIO
             }
             val fgs = foregroundService
+            // J3-b: nueva grabación, nueva guarda de parada del FGS.
+            // Se resetea ANTES de arrancar el servicio (y después
+            // del rechazo de inicio duplicado de arriba: un segundo
+            // inicio fallido no debe re-armar ni tocar el FGS de la
+            // grabación activa).
+            fgsStopRequested.set(false)
             if (fgs != null && !fgs.startRecordingService(scenario)) {
                 val missing = if (effectiveAudio) {
                     "cámara o de micrófono"
@@ -1018,6 +1060,9 @@ class StreamEngineImpl(
                     cameraManager = cameraManager,
                     audioEnabled = effectiveAudio,
                 )
+                // J3-b: la grabación activa es esta; su aviso de
+                // error-stop (si llega) podrá parar su FGS.
+                activeRecordingId.set(started.recordingId)
                 if (fgs != null) {
                     emitEvent(
                         StreamContract.EVENT_SERVICE_STARTED,
@@ -1028,13 +1073,11 @@ class StreamEngineImpl(
             } catch (e: Exception) {
                 // La sesión falló con el FGS ya arrancado: se detiene el
                 // servicio para no dejarlo huérfano (el evento
-                // `recording_error` ya lo emitió la sesión).
-                if (fgs != null) {
-                    try {
-                        fgs.stopRecordingService()
-                    } catch (_: Exception) {
-                    }
-                }
+                // `recording_error` ya lo emitió la sesión). Sin evento
+                // `service_stopped`: la grabación nunca arrancó y Dart
+                // nunca vio `service_started` (J3-b: converge en el
+                // mismo helper, sin evento).
+                stopForegroundServiceOnce(reason = null, recordingId = null)
                 throw e
             }
         }
@@ -1044,31 +1087,41 @@ class StreamEngineImpl(
      * Detiene la grabación (Fase B, 3.1.2). Idempotente desde `IDLE`
      * (la sesión devuelve el resultado vacío, `status = "idle"`).
      * Detiene el FGS al terminar (plan §9.2, paso 5) y emite
-     * `service_stopped` cuando hubo grabación. `filePath` es el primer
-     * segmento (la ruta final fusionada llega en 3.1.4; los segmentos
-     * se identifican por nombre, plan §8.1).
+     * `service_stopped` cuando hubo grabación (J3-b: con
+     * `reason=normal_stop`; si ganó la parada por error, el evento
+     * ya salió con `reason=error_stop` y no se duplica).
+     * `filePath` es el primer segmento (la ruta final fusionada llega
+     * en 3.1.4; los segmentos se identifican por nombre, plan §8.1).
      */
     override suspend fun stopRecording(): RecordingInfo {
         val recording = recordingSession
+        // Resultado de la parada, capturado antes del `finally` para
+        // decidir si hay evento `service_stopped` (J3-b: el evento
+        // vive ahora en el helper único de parada del FGS).
+        var stoppedResult: RecordingResult? = null
         val result = if (recording == null) {
             RecordingResult.empty()
         } else {
             try {
                 recordingMutex.withLock { recording.stop() }
+                    .also { stoppedResult = it }
             } finally {
-                foregroundService?.let { fgs ->
-                    try {
-                        fgs.stopRecordingService()
-                    } catch (_: Exception) {
-                    }
+                val stopped = stoppedResult
+                // J3-b: converge en el helper único. Si ganó la
+                // parada por error, su aviso ya paró el FGS y emitió
+                // `service_stopped` (error_stop): la guarda bloquea
+                // el duplicado. Sin grabación (`idle`) o si `stop()`
+                // lanzó, se para el FGS sin evento (comportamiento
+                // anterior).
+                stopForegroundServiceOnce(
+                    reason = "normal_stop",
+                    recordingId = stopped?.takeIf { it.status != "idle" }
+                        ?.recordingId,
+                )
+                stopped?.let {
+                    activeRecordingId.compareAndSet(it.recordingId, null)
                 }
             }
-        }
-        if (recording != null && result.status != "idle") {
-            emitEvent(
-                StreamContract.EVENT_SERVICE_STOPPED,
-                mapOf("recordingId" to result.recordingId),
-            )
         }
         return RecordingInfo(
             recordingId = result.recordingId,
@@ -1162,11 +1215,99 @@ class StreamEngineImpl(
     }
 
     /**
+     * Único punto de parada del FGS (J3-b, plan §1.3 pasos 2-4):
+     * la parada normal, la de cámara/superficie, la de inicio
+     * fallido y la de error-stop convergen aquí; no hay un
+     * `stopRecordingService()` fuera de este helper. La primera
+     * llamada por grabación para el servicio; las demás son no-op
+     * (guarda `fgsStopRequested`). Un aviso de error-stop de una
+     * grabación anterior (id distinto al activo) se ignora para no
+     * matar el FGS de la grabación nueva.
+     *
+     * `reason` es el motivo del evento `service_stopped`
+     * (`normal_stop` | `error_stop`); `null` = parar el servicio
+     * sin emitir el evento (parada de inicio fallido y redes de
+     * seguridad de `stopRecordingIfActive`, que conservan su
+     * comportamiento anterior). Sin `recordingId` no se emite el
+     * evento (no hay grabación a la que atribuirlo). Devuelve
+     * `true` si esta llamada paró el servicio.
+     */
+    private fun stopForegroundServiceOnce(
+        reason: String?,
+        recordingId: String?,
+    ): Boolean {
+        if (recordingId != null) {
+            val active = activeRecordingId.get()
+            if (active != null && active != recordingId) {
+                Transmiti2Logger.d(
+                    "recording: parada del FGS ignorada: aviso " +
+                        "tardío de $recordingId con $active activa",
+                )
+                return false
+            }
+        }
+        if (!fgsStopRequested.compareAndSet(false, true)) return false
+        foregroundService?.let { fgs ->
+            try {
+                fgs.stopRecordingService()
+            } catch (_: Exception) {
+            }
+        }
+        if (reason != null && recordingId != null) {
+            scope.launch {
+                emitEvent(
+                    StreamContract.EVENT_SERVICE_STOPPED,
+                    mapOf(
+                        "recordingId" to recordingId,
+                        "reason" to reason,
+                    ),
+                )
+            }
+        }
+        return true
+    }
+
+    /**
+     * La sesión completó una parada con error (J3-b, plan §1.3 paso
+     * 2). Orden: (f) `recording_error` ya se emitió dentro de
+     * `doStop` antes de avisar (o, si `doStop` lanzó, el claim ya
+     * está liberado y no hay evento que preservar: plan §1.5 punto
+     * 5) → (g) parada del FGS → (h) `service_stopped` con
+     * `reason=error_stop`. El orden (f) antes de (g) preserva el
+     * diagnóstico aunque el proceso muera entre ambos. Se ejecuta
+     * una sola vez por grabación (guarda de
+     * `stopForegroundServiceOnce`).
+     */
+    private fun onSessionErrorStop(
+        code: String,
+        trigger: ErrorTrigger?,
+        recordingId: String,
+    ) {
+        Transmiti2Logger.d(
+            "recording: error-stop completado (code=$code " +
+                "stage=${trigger?.stage} segmento=" +
+                "${trigger?.segmentIndex} id=$recordingId): " +
+                "parando el FGS",
+        )
+        if (stopForegroundServiceOnce(
+                reason = "error_stop",
+                recordingId = recordingId,
+            )
+        ) {
+            activeRecordingId.compareAndSet(recordingId, null)
+        }
+    }
+
+    /**
      * Detiene la grabación si hay una en curso (idempotente desde
      * `IDLE` o `ERROR`) y detiene el FGS. Nunca lanza: una parada de
      * vista previa o un error de cámara no deben fallar porque la
      * parada de la grabación falle. Con `errorCode`, la parada se
      * registra como error (desconexión de cámara, plan §6.4).
+     * J3-b: la parada del FGS converge en
+     * `stopForegroundServiceOnce`; con `errorCode`, el aviso de
+     * error-stop de la sesión ya emitió `service_stopped` con
+     * `reason=error_stop` y el `finally` no lo duplica.
      */
     private suspend fun stopRecordingIfActive(errorCode: String? = null) {
         val recording = recordingSession ?: return
@@ -1174,12 +1315,14 @@ class StreamEngineImpl(
             recordingMutex.withLock { recording.stop(errorCode) }
         } catch (_: Exception) {
         } finally {
-            foregroundService?.let { fgs ->
-                try {
-                    fgs.stopRecordingService()
-                } catch (_: Exception) {
-                }
-            }
+            // J3-b: converge en el helper único, sin evento: si la
+            // parada llevaba `errorCode`, el aviso de error-stop de
+            // la sesión ya paró el FGS y emitió `service_stopped`
+            // (error_stop); este `finally` es la red de seguridad
+            // para los casos sin aviso (sesión ya en IDLE/ERROR, o
+            // `stop()` que lanzó) y conserva el comportamiento
+            // anterior de no emitir evento en este camino.
+            stopForegroundServiceOnce(reason = null, recordingId = null)
         }
     }
 
