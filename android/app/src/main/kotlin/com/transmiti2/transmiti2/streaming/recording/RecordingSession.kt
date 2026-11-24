@@ -702,6 +702,16 @@ open class RecordingSession(
      * producción y tests no cambian.
      */
     private val testHooks: TestHooks = TestHooks.NO_OP,
+    /**
+     * Puerta del hook de inyección de error solo-para-pruebas (J3-c,
+     * 3.1.4, plan §1.3 paso 6; autorización J0.3). Por defecto
+     * `{ false }`: el hook es inerte salvo que el cableado pase
+     * `{ BuildConfig.TRANSMITI2_TEST_MODE }` (falso en producción).
+     * La guarda se comprueba en CADA entrada del hook
+     * ([injectTestError]); con ella en `false` el hook no hace nada:
+     * ni emite, ni programa paradas, ni toca la grabación.
+     */
+    private val testErrorInjectionEnabled: () -> Boolean = { false },
 ) : VideoEncoderListener {
 
     private val segmentVerifier: SegmentVerifier = verifier
@@ -2793,6 +2803,13 @@ open class RecordingSession(
      * (`ErrorTrigger`: excepción original + sitio + instante) a
      * `stop()`/`doStop`, no solo `error.code`. El FGS no se toca
      * aquí: eso es J3-b.
+     *
+     * J3-c (3.1.4, plan §1.3 paso 6): antes de lanzar `stop()` se
+     * emite `ERROR_STOP_TRIGGERED` con el disparador completo, por
+     * los ganchos de pruebas (no-op sin sesión de pruebas activa o
+     * con `testHooks` NO_OP: en producción no cuesta nada). Solo se
+     * emite cuando la parada se programa de verdad (tras el retorno
+     * temprano de `IDLE`/`ERROR`).
      */
     private fun scheduleErrorStop(
         error: RecordingException,
@@ -2804,11 +2821,81 @@ open class RecordingSession(
             return
         }
         val trigger = ErrorTrigger.from(error, triggerSite, clockMs())
+        testHooks.record(
+            TestEventType.ERROR_STOP_TRIGGERED,
+            operation = "scheduleErrorStop",
+            recordingId = recordingId,
+            detail = trigger.toMap(),
+        )
         scope.launch {
             try {
                 stop(error.code, trigger)
             } catch (_: Exception) {
             }
+        }
+    }
+
+    /**
+     * Hook de inyección de error SOLO para pruebas (J3-c, 3.1.4, plan
+     * §1.3 paso 6; autorización J0.3). Fuerza en caliente un fallo del
+     * mismo shape que los reales, para probar J3 sin esperar un fallo
+     * del hardware (prueba física J3-P1). Lo invoca el canal de
+     * pruebas (`TestChannelHandler.injectTestError` → motor → sesión);
+     * no hay UI ni canal nuevo.
+     *
+     * `kind` es `encoder_error` (fuerza el `onError` del encoder, el
+     * mismo callback que usa el encoder real) o `drain_write_error`
+     * (fuerza el fallo de escritura en el drenado, mismo shape que el
+     * `catch` de `writeSampleData`: `muxer_error`, `stage=writeSample`;
+     * el `triggerSite` lleva el prefijo `test_injection:` y el mensaje
+     * marca la inyección, para distinguirlo del real en el informe).
+     * Cualquier otro `kind` retorna `false` sin hacer nada.
+     *
+     * Protección (doble puerta, imposible de activar en producción):
+     * 1) el canal de pruebas responde `test_mode_unavailable` con
+     * `testMode == false` antes de llegar aquí; 2) ESTA guarda
+     * (`testErrorInjectionEnabled`, `{ false }` por defecto y
+     * `{ BuildConfig.TRANSMITI2_TEST_MODE }` en el cableado real):
+     * con ella en `false` el método retorna `false` sin emitir ni
+     * programar nada. Sin grabación activa (`IDLE`/`ERROR`) también
+     * retorna `false`: el hook nunca arranca nada por sí mismo.
+     * Retorna `true` solo cuando se programó la parada con error.
+     */
+    open fun injectTestError(kind: String): Boolean {
+        if (!testErrorInjectionEnabled()) return false
+        if (state == RecordingState.IDLE ||
+            state == RecordingState.ERROR
+        ) {
+            return false
+        }
+        return when (kind) {
+            "encoder_error" -> {
+                onError(
+                    RuntimeException(
+                        "inyección de pruebas: fallo forzado del encoder",
+                    ),
+                )
+                true
+            }
+            "drain_write_error" -> {
+                val injected = RuntimeException(
+                    "inyección de pruebas: fallo de escritura en el drenado",
+                )
+                scheduleErrorStop(
+                    RecordingException.muxerError(
+                        "Error al escribir en el muxer " +
+                            "(inyección de pruebas)",
+                        mapOf(
+                            "stage" to "writeSample",
+                            "segmentIndex" to segmentIndex,
+                            "exceptionClass" to injected.javaClass.simpleName,
+                        ),
+                    ),
+                    triggerSite = "test_injection:writeSample",
+                )
+                true
+            }
+            else -> false
         }
     }
 

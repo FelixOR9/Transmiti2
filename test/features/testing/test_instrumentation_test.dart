@@ -63,6 +63,7 @@ void main() {
       expect(TestContract.getPauseState, 'getPauseState');
       expect(TestContract.getRegistrySnapshot, 'getRegistrySnapshot');
       expect(TestContract.sampleActiveStagingSize, 'sampleActiveStagingSize');
+      expect(TestContract.injectTestError, 'injectTestError');
     });
 
     test('los códigos de error son distintos', () {
@@ -95,6 +96,28 @@ void main() {
       );
       expect(TestEventType.fromWireName('PAUSE_ENTERED'), TestEventType.pauseEntered);
       expect(TestEventType.fromWireName('DESCONOCIDO'), isNull);
+      // J3-c: los nuevos tipos usan los nombres de cable Kotlin.
+      expect(
+        TestEventType.errorStopTriggered.wireName,
+        'ERROR_STOP_TRIGGERED',
+      );
+      expect(TestEventType.fgsStopped.wireName, 'FGS_STOPPED');
+      expect(
+        TestEventType.armedPauseWriteFailed.wireName,
+        'ARMED_PAUSE_WRITE_FAILED',
+      );
+      expect(
+        TestEventType.fromWireName('ERROR_STOP_TRIGGERED'),
+        TestEventType.errorStopTriggered,
+      );
+      expect(
+        TestEventType.fromWireName('FGS_STOPPED'),
+        TestEventType.fgsStopped,
+      );
+      expect(
+        TestEventType.fromWireName('ARMED_PAUSE_WRITE_FAILED'),
+        TestEventType.armedPauseWriteFailed,
+      );
     });
 
     test('TestEvent.fromMap reconstruye el evento y descarta el corrupto', () {
@@ -133,6 +156,106 @@ void main() {
         }),
         isNull,
       );
+    });
+
+    test('TestEvent.fromMap reconstruye los eventos J3-c y tolera payloads viejos', () {
+      // ERROR_STOP_TRIGGERED con el trigger completo (plan §1.3 paso 6).
+      final TestEvent? triggered = TestEvent.fromMap(<Object?, Object?>{
+        'sessionId': 'sess_1',
+        'testRunId': 'run_1',
+        'recordingId': 'rec_20261124_120000_ab12',
+        'operation': 'scheduleErrorStop',
+        'event': 'ERROR_STOP_TRIGGERED',
+        'monotonicMs': 1000,
+        'wallMs': 1764000001000,
+        'result': 'ok',
+        'detail': <Object?, Object?>{
+          'code': 'encoder_error',
+          'message': 'Error del codificador: codec roto',
+          'stage': 'encoder',
+          'segmentIndex': 0,
+          'exceptionClass': 'IllegalStateException',
+          'triggerSite': 'onError',
+          'timestampMs': 1764000000000,
+          'freeBytes': null,
+        },
+        'origin': 'observed',
+      });
+      expect(triggered, isNotNull);
+      expect(triggered!.event, TestEventType.errorStopTriggered);
+      expect(triggered.recordingId, 'rec_20261124_120000_ab12');
+      expect(triggered.detail['code'], 'encoder_error');
+      expect(triggered.detail['stage'], 'encoder');
+      expect(triggered.detail['segmentIndex'], 0);
+      expect(triggered.detail['triggerSite'], 'onError');
+      expect(triggered.toMap()['event'], 'ERROR_STOP_TRIGGERED');
+      expect(
+        (triggered.toMap()['detail'] as Map<String, Object?>)['stage'],
+        'encoder',
+      );
+
+      // FGS_STOPPED con el detalle mínimo (solo el origen).
+      final TestEvent? fgsStopped = TestEvent.fromMap(<Object?, Object?>{
+        'sessionId': 'sess_1',
+        'testRunId': 'run_1',
+        'recordingId': 'rec_20261124_120000_ab12',
+        'operation': 'fgs',
+        'event': 'FGS_STOPPED',
+        'monotonicMs': 2000,
+        'wallMs': 1764000002000,
+        'detail': <Object?, Object?>{'origin': 'error_stop'},
+      });
+      expect(fgsStopped, isNotNull);
+      expect(fgsStopped!.event, TestEventType.fgsStopped);
+      expect(fgsStopped.detail['origin'], 'error_stop');
+
+      // Compat hacia atrás: payload viejo sin `detail` sigue
+      // parseando (detalle vacío, sin romper).
+      final TestEvent? legacy = TestEvent.fromMap(<Object?, Object?>{
+        'sessionId': 'sess_1',
+        'testRunId': 'run_1',
+        'event': 'FGS_STOPPED',
+        'monotonicMs': 3000,
+        'wallMs': 1764000003000,
+      });
+      expect(legacy, isNotNull);
+      expect(legacy!.event, TestEventType.fgsStopped);
+      expect(legacy.detail, isEmpty);
+
+      // TEST_RUN_CONTINUED con la sesión anterior (J3-c).
+      final TestEvent? continued = TestEvent.fromMap(<Object?, Object?>{
+        'sessionId': 'sess_2',
+        'testRunId': 'run_1',
+        'operation': 'session',
+        'event': 'TEST_RUN_CONTINUED',
+        'monotonicMs': 4000,
+        'wallMs': 1764000004000,
+        'detail': <Object?, Object?>{
+          'adoptedTestRunId': 'run_1',
+          'previousSessionId': 'sess_1',
+        },
+      });
+      expect(continued, isNotNull);
+      expect(continued!.event, TestEventType.testRunContinued);
+      expect(continued.detail['previousSessionId'], 'sess_1');
+
+      // Resultado de la inyección: `injected: false` no es error.
+      final TestErrorInjectionResult injected =
+          TestErrorInjectionResult.fromMap(<Object?, Object?>{
+            'injected': false,
+            'kind': 'encoder_error',
+            'reason': 'not_injected',
+          });
+      expect(injected.injected, isFalse);
+      expect(injected.kind, 'encoder_error');
+      expect(injected.reason, 'not_injected');
+      final TestErrorInjectionResult ok =
+          TestErrorInjectionResult.fromMap(<Object?, Object?>{
+            'injected': true,
+            'kind': 'drain_write_error',
+          });
+      expect(ok.injected, isTrue);
+      expect(ok.reason, isNull);
     });
   });
 
@@ -460,6 +583,41 @@ void main() {
       expect(service.deleteCalls, isEmpty);
       await controller.refreshSessions();
       expect(controller.sessions.length, 1);
+      controller.dispose();
+    });
+  });
+
+  group('inyección de error (J3-c)', () {
+    test('injectTestError delega en el servicio con el kind pedido', () async {
+      final FakeTestService service = FakeTestService();
+      final TestController controller = _controller(
+        service,
+        FakeStreamingService(),
+      );
+      final TestErrorInjectionResult result =
+          await controller.injectTestError('drain_write_error');
+      expect(result.injected, isTrue);
+      expect(service.injectCalls, <String>['drain_write_error']);
+      controller.dispose();
+    });
+
+    test('injectTestError sin testMode lanza test_mode_unavailable sin llamar', () async {
+      final FakeTestService service = FakeTestService(testMode: false);
+      final TestController controller = _controller(
+        service,
+        FakeStreamingService(),
+      );
+      await expectLater(
+        controller.injectTestError('encoder_error'),
+        throwsA(
+          isA<TestException>().having(
+            (TestException e) => e.code,
+            'code',
+            TestContract.testModeUnavailable,
+          ),
+        ),
+      );
+      expect(service.injectCalls, isEmpty);
       controller.dispose();
     });
   });

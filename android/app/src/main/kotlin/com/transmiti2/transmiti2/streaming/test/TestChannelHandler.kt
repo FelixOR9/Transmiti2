@@ -55,6 +55,19 @@ class TestChannelHandler(
     exportRoot: File = File(filesDir, "test-exports"),
     private val registrySnapshotProvider: (() -> Map<String, Any?>)? = null,
     private val stagingSizeProvider: (() -> Long?)? = null,
+    /**
+     * Inyección de error solo-para-pruebas (J3-c, 3.1.4; autorización
+     * J0.3). Seam inyectable como `registrySnapshotProvider` /
+     * `stagingSizeProvider`: el grupo 2-c lo cablea al motor
+     * (`StreamChannelHandler.testInjectError` → motor → sesión). Sin
+     * proveedor, `injectTestError` responde `test_not_available`
+     * (nunca se inventa una inyección). El manejador NO materializa
+     * el motor ni toca la grabación: solo delega. La puerta real
+     * está en la sesión (`testErrorInjectionEnabled`, falso en
+     * producción); con `testMode == false` el `onMethodCall` ya
+     * responde `test_mode_unavailable` antes de llegar aquí.
+     */
+    private val errorInjectionProvider: ((String) -> Map<String, Any?>)? = null,
     appVersion: String = "unknown",
     instrumentation: TestInstrumentation? = null,
     store: TestDiagnosticsStore? = null,
@@ -80,6 +93,11 @@ class TestChannelHandler(
         const val GET_PAUSE_STATE = "getPauseState"
         const val GET_REGISTRY_SNAPSHOT = "getRegistrySnapshot"
         const val SAMPLE_ACTIVE_STAGING_SIZE = "sampleActiveStagingSize"
+        /** Inyección de error solo-para-pruebas (J3-c, 3.1.4). */
+        const val INJECT_TEST_ERROR = "injectTestError"
+
+        /** `kind` válidos de `injectTestError` (J3-c). */
+        val INJECT_TEST_ERROR_KINDS = setOf("encoder_error", "drain_write_error")
 
         const val ERR_TEST_MODE_UNAVAILABLE = "test_mode_unavailable"
         const val ERR_TEST_STORAGE_FULL = "test_storage_full"
@@ -175,8 +193,17 @@ class TestChannelHandler(
                     // ya creado queda como sesión interrumpida (lo
                     // detecta el próximo `beginSession`); no se
                     // arranca una segunda sesión en memoria.
-                    null
+                    return null
                 }
+                // J3-c: la sesión continúa la campaña del intento
+                // armado (`TEST_RUN_CONTINUED`, con la sesión
+                // anterior interrumpida de la misma campaña si la
+                // hay). Es el emisor que faltaba para este tipo.
+                val previous = begun.interruptedPrevious
+                    .firstOrNull { it.previousTestRunId == intent.testRunId }
+                    ?.previousSessionId
+                instrumentation.recordTestRunContinued(intent.testRunId, previous)
+                session
             }
         }
     }
@@ -211,6 +238,7 @@ class TestChannelHandler(
                 GET_PAUSE_STATE -> getPauseState(call, result)
                 GET_REGISTRY_SNAPSHOT -> getRegistrySnapshot(result)
                 SAMPLE_ACTIVE_STAGING_SIZE -> sampleActiveStagingSize(result)
+                INJECT_TEST_ERROR -> injectTestError(call, result)
                 else -> result.notImplemented()
             }
         } catch (e: Exception) {
@@ -286,6 +314,16 @@ class TestChannelHandler(
                         mapOf("reason" to "session_already_active"),
                     )
                     return
+                }
+                // J3-c: continuación explícita de campaña: la sesión
+                // adopta `adoptTestRunId` (`TEST_RUN_CONTINUED`, con
+                // la sesión anterior interrumpida de la misma campaña
+                // si la hay). Sin adopción no se emite.
+                if (adoptTestRunId != null) {
+                    val previous = begun.interruptedPrevious
+                        .firstOrNull { it.previousTestRunId == adoptTestRunId }
+                        ?.previousSessionId
+                    instrumentation.recordTestRunContinued(adoptTestRunId, previous)
                 }
                 result.success(
                     mapOf(
@@ -596,6 +634,41 @@ class TestChannelHandler(
                 "active" to (size != null),
             ),
         )
+    }
+
+    /**
+     * Inyección de error solo-para-pruebas (J3-c, 3.1.4; autorización
+     * J0.3): fuerza en caliente un fallo del encoder (`encoder_error`)
+     * o de escritura en el drenado (`drain_write_error`) en la
+     * grabación en curso, para la prueba física J3-P1. Argumento
+     * `kind` obligatorio; cualquier otro valor responde `test_error`
+     * sin tocar nada. Sin proveedor responde `test_not_available`;
+     * con `testMode == false` el `onMethodCall` ya respondió
+     * `test_mode_unavailable` antes de llegar aquí. La respuesta es
+     * el mapa del proveedor (`{injected, kind, reason}`); un
+     * `injected: false` NO es un error del canal (puerta cerrada,
+     * sin grabación activa): el llamador lo interpreta.
+     */
+    private fun injectTestError(call: MethodCall, result: MethodChannel.Result) {
+        val kind: String? = call.argument("kind")
+        if (kind == null || kind !in INJECT_TEST_ERROR_KINDS) {
+            result.error(
+                ERR_TEST_ERROR,
+                "Tipo de inyección desconocido: $kind.",
+                mapOf("reason" to "unknown_injection_kind"),
+            )
+            return
+        }
+        val provider = errorInjectionProvider
+        if (provider == null) {
+            result.error(
+                ERR_TEST_NOT_AVAILABLE,
+                "La inyección de error aún no está cableada al motor.",
+                mapOf("reason" to "error_injection_not_wired"),
+            )
+            return
+        }
+        result.success(provider(kind))
     }
 
     // ------------------------------------------------------------------

@@ -12,6 +12,12 @@ import com.transmiti2.transmiti2.streaming.PreviewSessionListener
 import com.transmiti2.transmiti2.streaming.StreamContract
 import com.transmiti2.transmiti2.streaming.Transmiti2Logger
 import com.transmiti2.transmiti2.streaming.VideoSize
+import com.transmiti2.transmiti2.streaming.test.PausePoint
+import com.transmiti2.transmiti2.streaming.test.TestEvent
+import com.transmiti2.transmiti2.streaming.test.TestEventOrigin
+import com.transmiti2.transmiti2.streaming.test.TestEventResult
+import com.transmiti2.transmiti2.streaming.test.TestEventType
+import com.transmiti2.transmiti2.streaming.test.TestHooks
 import java.io.File
 import java.nio.ByteBuffer
 import java.util.concurrent.CountDownLatch
@@ -495,6 +501,8 @@ class RecordingSessionTest {
         muxerFactory: ((String) -> RecordingMuxer)? = null,
         registry: ActiveRecordingRegistry = ActiveRecordingRegistry(),
         freeSpaceBytes: (() -> Long?)? = null,
+        testHooks: TestHooks = TestHooks.NO_OP,
+        testErrorInjectionEnabled: () -> Boolean = { false },
     ): RecordingSession {
         return RecordingSession(
             scope = CoroutineScope(Dispatchers.Unconfined),
@@ -526,7 +534,47 @@ class RecordingSessionTest {
             formatTimeoutMs = formatTimeoutMs,
             eosTimeoutMs = eosTimeoutMs,
             registry = registry,
+            testHooks = testHooks,
+            testErrorInjectionEnabled = testErrorInjectionEnabled,
         )
+    }
+
+    /** Ganchos de pruebas que capturan los eventos registrados (J3-c). */
+    private class CapturingTestHooks : TestHooks {
+        data class Recorded(
+            val event: TestEventType,
+            val operation: String,
+            val recordingId: String?,
+            val detail: Map<String, Any?>,
+        )
+
+        val records = mutableListOf<Recorded>()
+
+        override fun record(
+            event: TestEventType,
+            operation: String,
+            recordingId: String?,
+            result: TestEventResult,
+            errorCode: String?,
+            durationMs: Long?,
+            detail: Map<String, Any?>,
+            origin: TestEventOrigin,
+            wasSuspended: Boolean?,
+        ): TestEvent? {
+            synchronized(records) {
+                records += Recorded(event, operation, recordingId, detail)
+            }
+            return null
+        }
+
+        override suspend fun awaitPauseIfArmed(point: PausePoint, runId: String?): Boolean =
+            false
+
+        override fun resumePause(point: PausePoint): Boolean = false
+        override val sessionActive: Boolean = false
+
+        fun ofType(event: TestEventType): List<Recorded> =
+            synchronized(records) { records.filter { it.event == event } }
     }
 
     @Before
@@ -1120,6 +1168,160 @@ class RecordingSessionTest {
             assertNotNull(details)
             assertEquals("drain", details!!["stage"])
             assertEquals("onSample", details["triggerSite"])
+        }
+
+    // --- J3-c (3.1.4): instrumentación de error-stop y hook de
+    // inyección solo-para-pruebas (plan §1.3 paso 6).
+
+    @Test
+    fun `J3-c onError real emite ERROR_STOP_TRIGGERED con el trigger completo`() =
+        runBlocking {
+            val hooks = CapturingTestHooks()
+            val session = buildSession(testHooks = hooks)
+            val info = startRecording(session)
+            fakeEncoder.deliverSample(0L, true)
+            fakeEncoder.deliverSample(33_333L, false)
+            fakeEncoder.deliverError()
+            awaitState(session, RecordingState.ERROR)
+            val result = session.stop()
+            assertEquals(StreamContract.ENCODER_ERROR, result.errorCode)
+
+            val triggered = hooks.ofType(TestEventType.ERROR_STOP_TRIGGERED)
+            assertEquals(1, triggered.size)
+            assertEquals("scheduleErrorStop", triggered[0].operation)
+            assertEquals(info.recordingId, triggered[0].recordingId)
+            val detail = triggered[0].detail
+            assertEquals(StreamContract.ENCODER_ERROR, detail["code"])
+            assertEquals("Error del codificador: codec roto", detail["message"])
+            assertEquals("encoder", detail["stage"])
+            assertEquals(0, detail["segmentIndex"])
+            assertEquals("IllegalStateException", detail["exceptionClass"])
+            assertEquals("onError", detail["triggerSite"])
+            assertEquals(fixedClockMs, detail["timestampMs"])
+            assertNull(detail["freeBytes"])
+        }
+
+    @Test
+    fun `J3-c injectTestError encoder_error detiene con encoder_error y emite el evento`() =
+        runBlocking {
+            val hooks = CapturingTestHooks()
+            val session = buildSession(
+                testHooks = hooks,
+                testErrorInjectionEnabled = { true },
+            )
+            val info = startRecording(session)
+            fakeEncoder.deliverSample(0L, true)
+
+            assertTrue(session.injectTestError("encoder_error"))
+            awaitState(session, RecordingState.ERROR)
+            val result = session.stop()
+            assertEquals(StreamContract.ENCODER_ERROR, result.errorCode)
+            val trigger = result.trigger
+            assertNotNull(trigger)
+            assertEquals("encoder", trigger!!.stage)
+            assertEquals(0, trigger.segmentIndex)
+            assertEquals("onError", trigger.triggerSite)
+            assertTrue(
+                trigger.message!!.contains("inyección de pruebas"),
+            )
+
+            val triggered = hooks.ofType(TestEventType.ERROR_STOP_TRIGGERED)
+            assertEquals(1, triggered.size)
+            assertEquals("encoder_error", triggered[0].detail["code"])
+            assertEquals("encoder", triggered[0].detail["stage"])
+            assertEquals(info.recordingId, triggered[0].recordingId)
+            assertEquals(1, errorEventCount())
+        }
+
+    @Test
+    fun `J3-c injectTestError drain_write_error detiene con muxer_error y stage writeSample`() =
+        runBlocking {
+            val hooks = CapturingTestHooks()
+            val session = buildSession(
+                testHooks = hooks,
+                testErrorInjectionEnabled = { true },
+            )
+            val info = startRecording(session)
+            fakeEncoder.deliverSample(0L, true)
+
+            assertTrue(session.injectTestError("drain_write_error"))
+            awaitState(session, RecordingState.ERROR)
+            val result = session.stop()
+            assertEquals(StreamContract.MUXER_ERROR, result.errorCode)
+            val trigger = result.trigger
+            assertNotNull(trigger)
+            assertEquals("writeSample", trigger!!.stage)
+            assertEquals(0, trigger.segmentIndex)
+            assertEquals("RuntimeException", trigger.exceptionClass)
+            assertEquals("test_injection:writeSample", trigger.triggerSite)
+
+            val triggered = hooks.ofType(TestEventType.ERROR_STOP_TRIGGERED)
+            assertEquals(1, triggered.size)
+            assertEquals("muxer_error", triggered[0].detail["code"])
+            assertEquals("writeSample", triggered[0].detail["stage"])
+            assertEquals(
+                "test_injection:writeSample",
+                triggered[0].detail["triggerSite"],
+            )
+            assertEquals(info.recordingId, triggered[0].recordingId)
+        }
+
+    @Test
+    fun `J3-c injectTestError con la puerta cerrada es inerte y no toca la grabacion`() =
+        runBlocking {
+            val hooks = CapturingTestHooks()
+            // Puerta por defecto (`{ false }`): producción.
+            val session = buildSession(testHooks = hooks)
+            startRecording(session)
+            fakeEncoder.deliverSample(0L, true)
+            fakeEncoder.deliverSample(33_333L, false)
+
+            assertFalse(session.injectTestError("encoder_error"))
+            assertFalse(session.injectTestError("drain_write_error"))
+            assertFalse(session.injectTestError("camara_rota"))
+            assertEquals(RecordingState.RECORDING, session.currentState())
+            assertTrue(
+                hooks.ofType(TestEventType.ERROR_STOP_TRIGGERED).isEmpty(),
+            )
+            assertEquals(0, errorEventCount())
+            // La grabación sigue viva: se puede parar normal.
+            val result = session.stop()
+            assertEquals("ready", result.status)
+            assertNull(result.errorCode)
+        }
+
+    @Test
+    fun `J3-c injectTestError con kind desconocido es inerte aunque la puerta este abierta`() =
+        runBlocking {
+            val hooks = CapturingTestHooks()
+            val session = buildSession(
+                testHooks = hooks,
+                testErrorInjectionEnabled = { true },
+            )
+            startRecording(session)
+            fakeEncoder.deliverSample(0L, true)
+
+            assertFalse(session.injectTestError("camara_rota"))
+            assertEquals(RecordingState.RECORDING, session.currentState())
+            assertTrue(
+                hooks.ofType(TestEventType.ERROR_STOP_TRIGGERED).isEmpty(),
+            )
+            session.stop()
+        }
+
+    @Test
+    fun `J3-c injectTestError sin grabacion activa es inerte`() =
+        runBlocking {
+            val hooks = CapturingTestHooks()
+            val session = buildSession(
+                testHooks = hooks,
+                testErrorInjectionEnabled = { true },
+            )
+            // Sin `startRecording`: el hook nunca arranca nada.
+            assertFalse(session.injectTestError("encoder_error"))
+            assertTrue(
+                hooks.ofType(TestEventType.ERROR_STOP_TRIGGERED).isEmpty(),
+            )
         }
 
     @Test

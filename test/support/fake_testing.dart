@@ -32,6 +32,16 @@ class FakeTestService implements TestService {
     reason: 'no_recording_session',
   );
 
+  /// Resultado enlatado de `injectTestError` (J3-c).
+  TestErrorInjectionResult injectionResult =
+      const TestErrorInjectionResult(
+        injected: true,
+        kind: 'encoder_error',
+      );
+
+  /// `kind` recibidos por `injectTestError`, en orden (J3-c).
+  final List<String> injectCalls = <String>[];
+
   int _sessionCounter = 0;
 
   int startTestSessionCalls = 0;
@@ -326,5 +336,12 @@ class FakeTestService implements TestService {
   Future<TestStagingSample> sampleActiveStagingSize() async {
     _requireTestMode();
     return stagingSample;
+  }
+
+  @override
+  Future<TestErrorInjectionResult> injectTestError(String kind) async {
+    _requireTestMode();
+    injectCalls.add(kind);
+    return injectionResult;
   }
 }

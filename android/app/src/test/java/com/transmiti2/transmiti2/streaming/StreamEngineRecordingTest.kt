@@ -18,6 +18,12 @@ import com.transmiti2.transmiti2.streaming.recording.SegmentStatus
 import com.transmiti2.transmiti2.streaming.recording.SegmentVerification
 import com.transmiti2.transmiti2.streaming.recording.SegmentVerifier
 import com.transmiti2.transmiti2.streaming.recording.VerificationChecks
+import com.transmiti2.transmiti2.streaming.test.PausePoint
+import com.transmiti2.transmiti2.streaming.test.TestEvent
+import com.transmiti2.transmiti2.streaming.test.TestEventOrigin
+import com.transmiti2.transmiti2.streaming.test.TestEventResult
+import com.transmiti2.transmiti2.streaming.test.TestEventType
+import com.transmiti2.transmiti2.streaming.test.TestHooks
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -305,6 +311,17 @@ class StreamEngineRecordingTest {
             reconcileCalls++
             return reconcileResult
         }
+
+        /** `kind` recibidos por `injectTestError` (J3-c). */
+        var injectedKinds = mutableListOf<String>()
+
+        /** Resultado enlatado de `injectTestError` (J3-c). */
+        var injectResult = true
+
+        override fun injectTestError(kind: String): Boolean {
+            injectedKinds += kind
+            return injectResult
+        }
     }
 
     private class FakeForegroundService : ForegroundServiceControl {
@@ -325,6 +342,43 @@ class StreamEngineRecordingTest {
         }
     }
 
+    /** Ganchos de pruebas que capturan los eventos registrados (J3-c). */
+    private class CapturingTestHooks : TestHooks {
+        data class Recorded(
+            val event: TestEventType,
+            val recordingId: String?,
+            val detail: Map<String, Any?>,
+        )
+
+        val records = mutableListOf<Recorded>()
+
+        override fun record(
+            event: TestEventType,
+            operation: String,
+            recordingId: String?,
+            result: TestEventResult,
+            errorCode: String?,
+            durationMs: Long?,
+            detail: Map<String, Any?>,
+            origin: TestEventOrigin,
+            wasSuspended: Boolean?,
+        ): TestEvent? {
+            synchronized(records) {
+                records += Recorded(event, recordingId, detail)
+            }
+            return null
+        }
+
+        override suspend fun awaitPauseIfArmed(point: PausePoint, runId: String?): Boolean =
+            false
+
+        override fun resumePause(point: PausePoint): Boolean = false
+        override val sessionActive: Boolean = false
+
+        fun ofType(event: TestEventType): List<Recorded> =
+            synchronized(records) { records.filter { it.event == event } }
+    }
+
     private inner class Fixture(
         permissionGranted: Boolean = true,
         val displayRotation: Int = 0,
@@ -341,10 +395,13 @@ class StreamEngineRecordingTest {
         val scope = CoroutineScope(Dispatchers.Unconfined)
         val recording = FakeRecordingSession(scope)
         val fgs = FakeForegroundService()
+        /** Ganchos capturadores (J3-c): por defecto los del fixture. */
+        val hooks = CapturingTestHooks()
 
         fun engine(
             useRecording: Boolean = true,
             useFgs: Boolean = true,
+            testHooks: TestHooks = hooks,
         ): StreamEngineImpl {
             return StreamEngineImpl(
                 cameraPermissionGranted = { permissionGranted },
@@ -359,6 +416,7 @@ class StreamEngineRecordingTest {
                     if (useRecording) recording else null
                 },
                 foregroundService = if (useFgs) fgs else null,
+                testHooks = testHooks,
             )
         }
 
@@ -886,6 +944,187 @@ class StreamEngineRecordingTest {
 
             assertEquals(1, fixture.fgs.stopCalls)
             assertEquals(1, fixture.serviceStoppedEvents().size)
+        }
+
+    // J3-c (3.1.4): instrumentación `FGS_STOPPED` y hook de
+    // inyección de error (plan §1.3 paso 6).
+
+    @Test
+    fun `J3-c el error-stop emite FGS_STOPPED con origen error_stop una sola vez`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.recording.invokeErrorStopHandler = true
+            fixture.recording.stopResult = fixture.readyStopResult()
+                .copy(errorCode = StreamContract.ENCODER_ERROR)
+            val engine = fixture.engine()
+            engine.startPreview()
+            engine.startRecording(RecordingOptions())
+
+            fixture.recording.stop(StreamContract.ENCODER_ERROR)
+
+            assertEquals(1, fixture.fgs.stopCalls)
+            val stopped = fixture.hooks.ofType(TestEventType.FGS_STOPPED)
+            assertEquals(1, stopped.size)
+            assertEquals("error_stop", stopped[0].detail["origin"])
+            assertEquals("error_stop", stopped[0].detail["reason"])
+            assertEquals(
+                "rec_20261118_120000_ab12",
+                stopped[0].recordingId,
+            )
+            // El `service_stopped` de siempre sigue saliendo igual.
+            val serviceStopped = fixture.serviceStoppedEvents()
+            assertEquals(1, serviceStopped.size)
+            assertEquals("error_stop", serviceStopped[0]["reason"])
+        }
+
+    @Test
+    fun `J3-c la parada normal emite FGS_STOPPED con origen normal_stop`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.recording.stopResult = fixture.readyStopResult()
+            val engine = fixture.engine()
+            engine.startPreview()
+            engine.startRecording(RecordingOptions())
+
+            engine.stopRecording()
+
+            assertEquals(1, fixture.fgs.stopCalls)
+            val stopped = fixture.hooks.ofType(TestEventType.FGS_STOPPED)
+            assertEquals(1, stopped.size)
+            assertEquals("normal_stop", stopped[0].detail["origin"])
+            assertEquals("normal_stop", stopped[0].detail["reason"])
+            assertEquals(
+                "rec_20261118_120000_ab12",
+                stopped[0].recordingId,
+            )
+        }
+
+    @Test
+    fun `J3-c la parada desde la notificacion emite FGS_STOPPED con origen notification`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.recording.stopResult = fixture.readyStopResult()
+            val engine = fixture.engine()
+            engine.startPreview()
+            engine.startRecording(RecordingOptions())
+
+            engine.stopRecordingFromNotification()
+
+            assertEquals(1, fixture.fgs.stopCalls)
+            val stopped = fixture.hooks.ofType(TestEventType.FGS_STOPPED)
+            assertEquals(1, stopped.size)
+            assertEquals("notification", stopped[0].detail["origin"])
+            // El `service_stopped` de siempre sigue con
+            // `reason=normal_stop`: la notificación es una parada
+            // normal; solo la instrumentación distingue el origen.
+            val serviceStopped = fixture.serviceStoppedEvents()
+            assertEquals(1, serviceStopped.size)
+            assertEquals("normal_stop", serviceStopped[0]["reason"])
+        }
+
+    @Test
+    fun `J3-c la desconexion de camara sin aviso emite FGS_STOPPED camera_error`() =
+        runBlocking {
+            val fixture = Fixture()
+            // Sin aviso de error-stop de la sesión (la parada con
+            // error la cierra `stopRecordingIfActive`): es el caso
+            // en que la sesión ya estaba en ERROR con otro código.
+            fixture.recording.invokeErrorStopHandler = false
+            fixture.recording.stopResult = fixture.readyStopResult()
+            val engine = fixture.engine()
+            engine.startPreview()
+            engine.startRecording(RecordingOptions())
+
+            fixture.session.fireDisconnected()
+
+            assertEquals(1, fixture.recording.stopCalls)
+            assertEquals(1, fixture.fgs.stopCalls)
+            val stopped = fixture.hooks.ofType(TestEventType.FGS_STOPPED)
+            assertEquals(1, stopped.size)
+            assertEquals("camera_error", stopped[0].detail["origin"])
+            assertFalse(stopped[0].detail.containsKey("reason"))
+            // Sin `service_stopped`: la red de seguridad conserva su
+            // comportamiento anterior.
+            assertTrue(fixture.serviceStoppedEvents().isEmpty())
+        }
+
+    @Test
+    fun `J3-c el inicio fallido emite FGS_STOPPED con origen start_failed y sin recordingId`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.recording.startError = RecordingException.encoderError(
+                "Sin codificador H.264.",
+                mapOf("stage" to "configure"),
+            )
+            val engine = fixture.engine()
+            engine.startPreview()
+
+            try {
+                engine.startRecording(RecordingOptions())
+                fail("Se esperaba RecordingException")
+            } catch (e: RecordingException) {
+                assertEquals(StreamContract.ENCODER_ERROR, e.code)
+            }
+            assertEquals(1, fixture.fgs.stopCalls)
+            val stopped = fixture.hooks.ofType(TestEventType.FGS_STOPPED)
+            assertEquals(1, stopped.size)
+            assertEquals("start_failed", stopped[0].detail["origin"])
+            assertNull(stopped[0].recordingId)
+            assertFalse(
+                fixture.eventTypes().contains(
+                    StreamContract.EVENT_SERVICE_STOPPED,
+                ),
+            )
+        }
+
+    @Test
+    fun `J3-c doble error-stop emite un solo FGS_STOPPED`() = runBlocking {
+        val fixture = Fixture()
+        fixture.recording.invokeErrorStopHandler = true
+        fixture.recording.stopResult = fixture.readyStopResult()
+            .copy(errorCode = StreamContract.ENCODER_ERROR)
+        val engine = fixture.engine()
+        engine.startPreview()
+        engine.startRecording(RecordingOptions())
+
+        fixture.recording.stop(StreamContract.ENCODER_ERROR)
+        fixture.recording.stop(StreamContract.ENCODER_ERROR)
+
+        assertEquals(1, fixture.fgs.stopCalls)
+        assertEquals(
+            1,
+            fixture.hooks.ofType(TestEventType.FGS_STOPPED).size,
+        )
+    }
+
+    @Test
+    fun `J3-c testInjectError delega en la sesion y responde el mapa`() =
+        runBlocking {
+            val fixture = Fixture()
+            val engine = fixture.engine()
+            // Sin motor materializado: no hay nada que inyectar y no
+            // se materializa la sesión por la consulta.
+            val beforeStart = engine.testInjectError("encoder_error")
+            assertEquals(false, beforeStart["injected"])
+            assertEquals("engine_not_started", beforeStart["reason"])
+            assertTrue(fixture.recording.injectedKinds.isEmpty())
+
+            engine.startPreview()
+            engine.startRecording(RecordingOptions())
+            val injected = engine.testInjectError("encoder_error")
+            assertEquals(true, injected["injected"])
+            assertEquals("encoder_error", injected["kind"])
+            assertNull(injected["reason"])
+            assertEquals(listOf("encoder_error"), fixture.recording.injectedKinds)
+
+            fixture.recording.injectResult = false
+            val notInjected = engine.testInjectError("drain_write_error")
+            assertEquals(false, notInjected["injected"])
+            assertEquals("not_injected", notInjected["reason"])
+            assertEquals(
+                listOf("encoder_error", "drain_write_error"),
+                fixture.recording.injectedKinds,
+            )
         }
 
     @Test

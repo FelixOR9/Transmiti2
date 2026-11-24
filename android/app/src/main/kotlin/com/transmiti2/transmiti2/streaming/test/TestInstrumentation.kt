@@ -88,6 +88,31 @@ enum class TestEventType {
     ARMED_PAUSE_EXPIRED,
     PROCESS_INTERRUPTED,
     TEST_RUN_CONTINUED,
+    /**
+     * Auto-parada por error programada (J3-c, 3.1.4, plan §1.3 paso 6):
+     * se emite en `scheduleErrorStop` ANTES de lanzar `stop()`, con el
+     * disparador completo en `detail` (`ErrorTrigger.toMap()`: code,
+     * message, stage, segmentIndex, exceptionClass, triggerSite,
+     * timestampMs, freeBytes).
+     */
+    ERROR_STOP_TRIGGERED,
+    /**
+     * Parada del servicio en primer plano (J3-c, 3.1.4, plan §1.3
+     * paso 6): la emite el motor en su único punto de parada del FGS,
+     * con el origen en `detail["origin"]` (`error_stop` |
+     * `normal_stop` | `camera_error` | `notification` |
+     * `start_failed`; `detail["reason"]` solo cuando el camino lleva
+     * un `reason` de `service_stopped`).
+     */
+    FGS_STOPPED,
+    /**
+     * Fallo al escribir la intención de pausa (`armed-pause.json`,
+     * J3-c, 3.1.4): lo emite `TestSyncPoints.arm` cuando la escritura
+     * falla (el error se relanza: el canal sigue respondiendo
+     * `test_error`). `detail` lleva `point`, `testRunId` y
+     * `exceptionClass`.
+     */
+    ARMED_PAUSE_WRITE_FAILED,
     ERROR,
 }
 
@@ -522,6 +547,32 @@ class TestInstrumentation(
         }
         return session
     }
+
+    /**
+     * Registra `TEST_RUN_CONTINUED` (J3-c, 3.1.4): la sesión activa
+     * continúa una campaña existente (`adoptedTestRunId`), tras haber
+     * arrancado con `startSession`. Es el emisor que faltaba: el tipo
+     * estaba declarado pero nada lo emitía (hueco de trazabilidad de
+     * la investigación F7b/P0). Lo llaman los dos caminos de adopción
+     * (`TestChannelHandler.startTestSession` con `adoptTestRunId` y
+     * `adoptCampaignIfArmed`); una sesión nueva sin adopción nunca lo
+     * emite. `previousSessionId` es la sesión anterior interrumpida
+     * de la misma campaña, si la hay. No-op sin sesión activa o con
+     * la instrumentación desactivada (como `record`).
+     */
+    fun recordTestRunContinued(
+        adoptedTestRunId: String,
+        previousSessionId: String? = null,
+    ): TestEvent? = record(
+        TestEventType.TEST_RUN_CONTINUED,
+        operation = "session",
+        detail = buildMap {
+            put("adoptedTestRunId", adoptedTestRunId)
+            if (previousSessionId != null) {
+                put("previousSessionId", previousSessionId)
+            }
+        },
+    )
 
     /**
      * Registra un evento con los relojes del [clock]. No-op (retorna

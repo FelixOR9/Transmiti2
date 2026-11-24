@@ -392,6 +392,18 @@ class TestController extends ChangeNotifier {
     });
   }
 
+  /// Inyección de error solo-para-pruebas (J3-c, 3.1.4; autorización
+  /// J0.3): fuerza en caliente un fallo del encoder (`encoder_error`)
+  /// o de escritura en el drenado (`drain_write_error`) en la
+  /// grabación en curso (prueba física J3-P1). Exige `testMode`;
+  /// `injected: false` no lanza (ver `TestErrorInjectionResult`).
+  Future<TestErrorInjectionResult> injectTestError(String kind) {
+    return _guarded(() async {
+      _requireTestMode();
+      return _testService.injectTestError(kind);
+    });
+  }
+
   // ------------------------------------------------------------------
   // Eliminación y exportación
   // ------------------------------------------------------------------

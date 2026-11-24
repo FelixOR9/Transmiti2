@@ -38,10 +38,11 @@ class MainActivity : FlutterFragmentActivity() {
     /**
      * Receptor de la parada desde la notificación (Fase B, 3.1.2, plan
      * §9.4): el servicio envía `ACTION_STOP_RECORDING` y aquí se
-     * traduce en `engine.stopRecording()` (mismo camino que el botón
-     * de la UI). No exportado: solo el propio servicio puede enviarlo.
-     * Si la Activity está destruida, el broadcast no llega y el
-     * servicio se autodestruye por su plazo diferido (60 s).
+     * traduce en `engine.stopRecordingFromNotification()` (mismo camino
+     * que el botón de la UI; J3-c: la instrumentación distingue el
+     * origen `notification`). No exportado: solo el propio servicio
+     * puede enviarlo. Si la Activity está destruida, el broadcast no
+     * llega y el servicio se autodestruye por su plazo diferido (60 s).
      */
     private val stopRecordingReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -127,11 +128,12 @@ class MainActivity : FlutterFragmentActivity() {
         // métodos salvo `getTestMode` responden `test_mode_unavailable`.
         // El manejador construye su instrumentación con el `filesDir` de
         // la app; los seams del motor (`getRegistrySnapshot`,
-        // `sampleActiveStagingSize`) se cablean aquí (grupo 2-c) con
-        // lambdas que leen el motor a través del manejador de
-        // streaming: MainActivity nunca toca archivos de grabación
-        // directamente. Los proveedores NO materializan el motor (el
-        // manejador responde «no disponible» si aún no existe).
+        // `sampleActiveStagingSize`, `injectTestError` en J3-c) se
+        // cablean aquí (grupo 2-c) con lambdas que leen el motor a
+        // través del manejador de streaming: MainActivity nunca toca
+        // archivos de grabación directamente. Los proveedores NO
+        // materializan el motor (el manejador responde «no
+        // disponible» si aún no existe).
         val testingChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             TestChannelHandler.METHOD_CHANNEL,
@@ -144,6 +146,19 @@ class MainActivity : FlutterFragmentActivity() {
                     ?: mapOf("available" to false, "reason" to "engine_not_started")
             },
             stagingSizeProvider = { streamHandler?.testActiveStagingSize() },
+            // J3-c: la inyección de error solo-para-pruebas llega al
+            // motor por el mismo seam que los otros proveedores (el
+            // manejador de pruebas nunca toca la grabación
+            // directamente). Sin motor, el proveedor responde
+            // `engine_not_started` sin materializarlo.
+            errorInjectionProvider = { kind ->
+                streamHandler?.testInjectError(kind)
+                    ?: mapOf(
+                        "injected" to false,
+                        "kind" to kind,
+                        "reason" to "engine_not_started",
+                    )
+            },
         ).also { testHandler = it }
         testingChannel.setMethodCallHandler(testHandlerInstance)
         this.testingChannel = testingChannel

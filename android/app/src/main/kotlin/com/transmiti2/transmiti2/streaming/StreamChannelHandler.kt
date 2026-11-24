@@ -304,6 +304,30 @@ class StreamChannelHandler(
         return previewEngine?.testActiveStagingSize()
     }
 
+    /**
+     * Inyección de error solo-para-pruebas (J3-c, 3.1.4; autorización
+     * J0.3): delega en el motor (`StreamEngineImpl.testInjectError` →
+     * sesión), que es quien guarda por `testMode`. NO materializa el
+     * motor; sin motor responde `{injected: false, reason:
+     * "engine_not_started"}`. La puerta real está en la sesión; este
+     * método solo transporta el mapa.
+     */
+    fun testInjectError(kind: String): Map<String, Any?> {
+        if (!previewEngineLazy.isInitialized()) {
+            return mapOf(
+                "injected" to false,
+                "kind" to kind,
+                "reason" to "engine_not_started",
+            )
+        }
+        return previewEngine?.testInjectError(kind)
+            ?: mapOf(
+                "injected" to false,
+                "kind" to kind,
+                "reason" to "engine_not_started",
+            )
+    }
+
     /** Resultado pendiente de una solicitud de permisos en curso. */
     private var pendingPermissionResult: MethodChannel.Result? = null
 
@@ -735,7 +759,10 @@ class StreamChannelHandler(
     fun stopRecordingFromService() {
         scope.launch {
             try {
-                previewEngine?.stopRecording()
+                // J3-c: mismo camino que el botón de la UI, pero el
+                // `FGS_STOPPED` de instrumentación lleva origen
+                // `notification` en vez de `normal_stop`.
+                previewEngine?.stopRecordingFromNotification()
             } catch (_: Exception) {
             }
         }

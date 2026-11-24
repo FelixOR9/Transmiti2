@@ -36,6 +36,8 @@ abstract final class TestContract {
   static const String getPauseState = 'getPauseState';
   static const String getRegistrySnapshot = 'getRegistrySnapshot';
   static const String sampleActiveStagingSize = 'sampleActiveStagingSize';
+  /// Inyección de error solo-para-pruebas (J3-c, 3.1.4).
+  static const String injectTestError = 'injectTestError';
 
   static const String testModeUnavailable = 'test_mode_unavailable';
   static const String testStorageFull = 'test_storage_full';
@@ -129,6 +131,14 @@ abstract class TestService {
 
   /// Tamaño del `.tmp` activo (`null` sin grabación activa).
   Future<TestStagingSample> sampleActiveStagingSize();
+
+  /// Inyección de error solo-para-pruebas (J3-c, 3.1.4; autorización
+  /// J0.3): fuerza en caliente un fallo del encoder (`encoder_error`)
+  /// o de escritura en el drenado (`drain_write_error`) en la
+  /// grabación en curso. Solo con `testMode`; en producción el canal
+  /// responde `test_mode_unavailable`. `injected: false` no es un
+  /// error del canal (puerta cerrada o sin grabación activa).
+  Future<TestErrorInjectionResult> injectTestError(String kind);
 }
 
 class MethodChannelTestService implements TestService {
@@ -471,6 +481,23 @@ class MethodChannelTestService implements TestService {
       throw _fromPlatform(e);
     }
   }
+
+  @override
+  Future<TestErrorInjectionResult> injectTestError(String kind) async {
+    try {
+      final Map<Object?, Object?>? result = await _channel
+          .invokeMapMethod<String, Object?>(
+            TestContract.injectTestError,
+            <String, Object>{'kind': kind},
+          );
+      if (result == null) {
+        _contractError(TestContract.injectTestError);
+      }
+      return TestErrorInjectionResult.fromMap(result);
+    } on PlatformException catch (e) {
+      throw _fromPlatform(e);
+    }
+  }
 }
 
 /// Puntos de pausa de la reconciliación (Revisión 1 §4.2 + diseño
@@ -601,6 +628,9 @@ enum TestEventType {
   armedPauseExpired,
   processInterrupted,
   testRunContinued,
+  errorStopTriggered,
+  fgsStopped,
+  armedPauseWriteFailed,
   error;
 
   /// Nombre de cable (`SESSION_STARTED`, …). Es el mismo que el
@@ -640,6 +670,9 @@ enum TestEventType {
       TestEventType.armedPauseExpired: 'ARMED_PAUSE_EXPIRED',
       TestEventType.processInterrupted: 'PROCESS_INTERRUPTED',
       TestEventType.testRunContinued: 'TEST_RUN_CONTINUED',
+      TestEventType.errorStopTriggered: 'ERROR_STOP_TRIGGERED',
+      TestEventType.fgsStopped: 'FGS_STOPPED',
+      TestEventType.armedPauseWriteFailed: 'ARMED_PAUSE_WRITE_FAILED',
       TestEventType.error: 'ERROR',
     };
     return names[this]!;
@@ -983,6 +1016,30 @@ class TestStagingSample {
     return TestStagingSample(
       tmpSizeBytes: (map['tmpSizeBytes'] as num?)?.toInt(),
       active: map['active'] as bool? ?? false,
+    );
+  }
+}
+
+/// Resultado de `injectTestError` (J3-c, 3.1.4): el mapa nativo
+/// `{injected, kind, reason}`. `injected: false` no es un error del
+/// canal: `reason` dice por qué no se inyectó (`engine_not_started` |
+/// `not_injected`).
+class TestErrorInjectionResult {
+  const TestErrorInjectionResult({
+    required this.injected,
+    required this.kind,
+    this.reason,
+  });
+
+  final bool injected;
+  final String kind;
+  final String? reason;
+
+  static TestErrorInjectionResult fromMap(Map<Object?, Object?> map) {
+    return TestErrorInjectionResult(
+      injected: map['injected'] as bool? ?? false,
+      kind: map['kind'] as String? ?? '',
+      reason: map['reason'] as String?,
     );
   }
 }

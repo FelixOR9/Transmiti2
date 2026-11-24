@@ -372,6 +372,14 @@ class TestSyncPoints(
      * Arma la pausa para [point] escribiendo la intención (una sola
      * intención a la vez; un armado nuevo sustituye al anterior y
      * registra `ARMED_PAUSE_REPLACED`). Exige sesión activa.
+     *
+     * J3-c (3.1.4): si la escritura de `armed-pause.json` falla, se
+     * registra `ARMED_PAUSE_WRITE_FAILED` (resultado `FAILED`, con
+     * `point`, `testRunId` y `exceptionClass`) y el error se relanza:
+     * el canal sigue respondiendo `test_error` como antes; el evento
+     * solo añade trazabilidad (sin él, el fallo no dejaba rastro en
+     * la sesión). El fsync de la escritura NO es de este grupo:
+     * queda pendiente para J4.
      */
     suspend fun arm(point: PausePoint): ArmedPauseIntent {
         val session = instrumentation.activeSession
@@ -389,7 +397,21 @@ class TestSyncPoints(
         val replaced = withContext(ioDispatcher) {
             val previousRaw = intentAccess.read()
             val previous = previousRaw?.let { ArmedPauseIntent.fromJson(it) }
-            intentAccess.write(intent.toJson())
+            try {
+                intentAccess.write(intent.toJson())
+            } catch (e: Exception) {
+                instrumentation.record(
+                    TestEventType.ARMED_PAUSE_WRITE_FAILED,
+                    operation = "reconcile",
+                    result = TestEventResult.FAILED,
+                    detail = mapOf(
+                        "point" to point.name,
+                        "testRunId" to intent.testRunId,
+                        "exceptionClass" to e.javaClass.simpleName,
+                    ),
+                )
+                throw e
+            }
             previous
         }
         if (replaced != null) {
