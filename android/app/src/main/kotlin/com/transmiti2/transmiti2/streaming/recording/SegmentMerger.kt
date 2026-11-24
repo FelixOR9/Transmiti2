@@ -228,9 +228,12 @@ data class MergeResult(
 /**
  * Aborto interno: la fusión se descarta (el tmp se tira, los
  * segmentos quedan intactos). No es un crash: [MergeResult] lleva el
- * motivo.
+ * motivo. El nombre NO es `MergeAbort`: el spike J1-0 define una
+ * clase privada con ese mismo nombre en el mismo paquete y en el
+ * runtime de las unitarias (clases de test antes que las de main) haría
+ * sombra a esta, con `NoSuchMethodError` en los abortos.
  */
-private class MergeAbort(
+private class MergeAbortException(
     val reason: String,
     val detailReason: String? = null,
     val affectedIndices: List<Int> = emptyList(),
@@ -331,7 +334,7 @@ class SegmentMerger(
                 mergeInternal(recordingId)
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: MergeAbort) {
+            } catch (e: MergeAbortException) {
                 Transmiti2Logger.e(
                     "merge: $recordingId abortado (${e.reason}" +
                         (e.detailReason?.let { ": $it" } ?: "") + ")",
@@ -435,10 +438,10 @@ class SegmentMerger(
             null
         }
         if (free == null) {
-            throw MergeAbort("storage_check_unavailable")
+            throw MergeAbortException("storage_check_unavailable")
         }
         if (free < totalSizeBytes + RecordingSession.MIN_FREE_BYTES_START) {
-            throw MergeAbort("storage_full")
+            throw MergeAbortException("storage_full")
         }
 
         // Pasada A: formatos reales de cada segmento (sin asumirlos).
@@ -451,7 +454,7 @@ class SegmentMerger(
         val referenceVideo = tracks.first().videoFormat
         for (track in tracks) {
             if (!mergeVideoFormatsEqual(referenceVideo, track.videoFormat)) {
-                throw MergeAbort(
+                throw MergeAbortException(
                     "merge_formato_distinto",
                     "video seg${track.input.index}",
                 )
@@ -463,7 +466,7 @@ class SegmentMerger(
             val referenceAudio = audioTracks.first()
             for (audio in audioTracks) {
                 if (!mergeAudioFormatsEqual(referenceAudio, audio)) {
-                    throw MergeAbort("merge_formato_distinto", "audio")
+                    throw MergeAbortException("merge_formato_distinto", "audio")
                 }
             }
         }
@@ -487,7 +490,7 @@ class SegmentMerger(
         val muxer = try {
             muxerFactory(tmpFile)
         } catch (e: Exception) {
-            throw MergeAbort("muxer_error", e.javaClass.simpleName)
+            throw MergeAbortException("muxer_error", e.javaClass.simpleName)
         }
         val copy = try {
             muxer.setOrientationHint(rotationDegrees)
@@ -508,10 +511,10 @@ class SegmentMerger(
             try {
                 muxer.stop()
             } catch (e: Exception) {
-                throw MergeAbort("muxer_stop_failed", e.javaClass.simpleName)
+                throw MergeAbortException("muxer_stop_failed", e.javaClass.simpleName)
             }
             result
-        } catch (abort: MergeAbort) {
+        } catch (abort: MergeAbortException) {
             safeRelease(muxer)
             discardTmp(tmpFile)
             throw abort
@@ -522,7 +525,7 @@ class SegmentMerger(
         } catch (e: Exception) {
             safeRelease(muxer)
             discardTmp(tmpFile)
-            throw MergeAbort("muxer_error", e.javaClass.simpleName)
+            throw MergeAbortException("muxer_error", e.javaClass.simpleName)
         }
         safeRelease(muxer)
 
@@ -543,11 +546,11 @@ class SegmentMerger(
                 ?: sidecar?.audioChannels,
         ) ?: run {
             discardTmp(tmpFile)
-            throw MergeAbort("merge_verify_failed", "verificacion_sin_resultado")
+            throw MergeAbortException("merge_verify_failed", "verificacion_sin_resultado")
         }
         if (!isAcceptableMerged(verification)) {
             discardTmp(tmpFile)
-            throw MergeAbort("merge_verify_failed", verification.reason)
+            throw MergeAbortException("merge_verify_failed", verification.reason)
         }
         val checks = verification.checks
         val durationToleranceMs = MERGE_DURATION_TOLERANCE_MS +
@@ -558,14 +561,14 @@ class SegmentMerger(
             abs(checks.durationMs - sumVideoMs) > durationToleranceMs
         ) {
             discardTmp(tmpFile)
-            throw MergeAbort("merge_verify_failed", "duracion_video_no_coincide")
+            throw MergeAbortException("merge_verify_failed", "duracion_video_no_coincide")
         }
         if (hasAudio && copy.audioSampleCount > 0) {
             if (checks.audioDurationMs == null ||
                 abs(checks.audioDurationMs - sumAudioMs) > durationToleranceMs
             ) {
                 discardTmp(tmpFile)
-                throw MergeAbort(
+                throw MergeAbortException(
                     "merge_verify_failed",
                     "duracion_audio_no_coincide",
                 )
@@ -577,18 +580,18 @@ class SegmentMerger(
             durationToleranceMs
         ) {
             discardTmp(tmpFile)
-            throw MergeAbort(
+            throw MergeAbortException(
                 "merge_verify_failed",
                 "duracion_referencia_no_coincide",
             )
         }
         if (checks.sampleCount != copy.videoSampleCount) {
             discardTmp(tmpFile)
-            throw MergeAbort("merge_verify_failed", "muestras_video_no_coinciden")
+            throw MergeAbortException("merge_verify_failed", "muestras_video_no_coinciden")
         }
         if (hasAudio && checks.audioSampleCount != copy.audioSampleCount) {
             discardTmp(tmpFile)
-            throw MergeAbort("merge_verify_failed", "muestras_audio_no_coinciden")
+            throw MergeAbortException("merge_verify_failed", "muestras_audio_no_coinciden")
         }
 
         // Paso 7 (renombre atómico): solo si verifica. Si el destino
@@ -597,7 +600,7 @@ class SegmentMerger(
         val resolution: DuplicateResolution?
         if (!finalFile.exists()) {
             if (!fileStore.renameStagingToFinal(tmpFile, finalFile)) {
-                throw MergeAbort("merge_rename_failed")
+                throw MergeAbortException("merge_rename_failed")
             }
             resolution = null
         } else {
@@ -662,7 +665,7 @@ class SegmentMerger(
                     )
                 }
                 DuplicateResolution.UNRESOLVED -> {
-                    throw MergeAbort("merge_rename_failed")
+                    throw MergeAbortException("merge_rename_failed")
                 }
             }
         }
@@ -769,28 +772,28 @@ class SegmentMerger(
         sidecar: RecordingMetadata?,
     ): List<MergeSegmentInput> {
         val files = fileStore.listSegmentFiles(recordingId)
-        if (files.isEmpty()) throw MergeAbort("merge_sin_segmentos")
+        if (files.isEmpty()) throw MergeAbortException("merge_sin_segmentos")
         val parsed = files.map { file ->
             val parsedName = RecordingFileStore.parseSegmentFileName(file.name)
             if (parsedName == null || parsedName.first != recordingId) {
-                throw MergeAbort("merge_nombre_no_canonico", file.name)
+                throw MergeAbortException("merge_nombre_no_canonico", file.name)
             }
             file to parsedName.second
         }
         val indices = parsed.map { it.second }
         if (indices.toSet().size != indices.size) {
-            throw MergeAbort("merge_indice_duplicado")
+            throw MergeAbortException("merge_indice_duplicado")
         }
         val maxIndex = indices.max()
         val missing = (0..maxIndex).filter { it !in indices.toSet() }
         if (missing.isNotEmpty()) {
-            throw MergeAbort("merge_skipped_gap", affectedIndices = missing)
+            throw MergeAbortException("merge_skipped_gap", affectedIndices = missing)
         }
         val ordered = parsed.sortedBy { it.second }
         return ordered.map { (file, index) ->
             val entry = sidecar?.segments?.find { it.index == index }
             if (entry?.status == "corrupt") {
-                throw MergeAbort(
+                throw MergeAbortException(
                     "merge_skipped_corrupt",
                     "sidecar seg$index",
                     listOf(index),
@@ -824,14 +827,14 @@ class SegmentMerger(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    throw MergeAbort(
+                    throw MergeAbortException(
                         "merge_skipped_pending",
                         e.javaClass.simpleName,
                         listOf(index),
                     )
                 }
                 when (verification.status) {
-                    SegmentStatus.CORRUPT -> throw MergeAbort(
+                    SegmentStatus.CORRUPT -> throw MergeAbortException(
                         "merge_skipped_corrupt",
                         verification.reason,
                         listOf(index),
@@ -884,7 +887,7 @@ class SegmentMerger(
         val extractor = try {
             extractorFactory(input.file)
         } catch (e: Exception) {
-            throw MergeAbort(
+            throw MergeAbortException(
                 "merge_segmento_no_legible",
                 e.javaClass.simpleName,
                 listOf(input.index),
@@ -898,10 +901,10 @@ class SegmentMerger(
                 audioFormat = extractor.audioFormat,
                 audioMediaFormat = extractor.audioMediaFormat,
             )
-        } catch (e: MergeAbort) {
+        } catch (e: MergeAbortException) {
             throw e
         } catch (e: Exception) {
-            throw MergeAbort(
+            throw MergeAbortException(
                 "merge_segmento_no_legible",
                 e.javaClass.simpleName,
                 listOf(input.index),
@@ -975,7 +978,7 @@ class SegmentMerger(
             val extractor = try {
                 extractorFactory(input.file)
             } catch (e: Exception) {
-                throw MergeAbort(
+                throw MergeAbortException(
                     "merge_segmento_no_legible",
                     e.javaClass.simpleName,
                     listOf(input.index),
@@ -1006,7 +1009,7 @@ class SegmentMerger(
                     if (lastWrittenVideoPtsUs != null &&
                         rebasedPtsUs <= lastWrittenVideoPtsUs!!
                     ) {
-                        throw MergeAbort(
+                        throw MergeAbortException(
                             "merge_pts_no_monotonos",
                             "video seg${input.index}",
                         )
@@ -1040,7 +1043,7 @@ class SegmentMerger(
                     if (lastWrittenAudioPtsUs != null &&
                         rebasedPtsUs <= lastWrittenAudioPtsUs!!
                     ) {
-                        throw MergeAbort(
+                        throw MergeAbortException(
                             "merge_pts_no_monotonos",
                             "audio seg${input.index}",
                         )
@@ -1067,7 +1070,7 @@ class SegmentMerger(
                     val sample = try {
                         extractor.nextSample()
                     } catch (e: Exception) {
-                        throw MergeAbort(
+                        throw MergeAbortException(
                             "merge_segmento_no_legible",
                             e.javaClass.simpleName,
                             listOf(input.index),
@@ -1094,7 +1097,7 @@ class SegmentMerger(
                 pendingAudio?.let { writeAudio(it, preserveEos = isLastSegment) }
 
                 if (videoSamples == 0) {
-                    throw MergeAbort("sin_muestras", "video seg${input.index}")
+                    throw MergeAbortException("sin_muestras", "video seg${input.index}")
                 }
                 if (audioSamples == 0) {
                     // Segmento sin audio (sin pista o sin muestras):
@@ -1118,7 +1121,7 @@ class SegmentMerger(
                     input.videoDurationMs,
                     firstVideoPtsUs,
                     lastSegmentVideoPtsUs,
-                ) ?: throw MergeAbort(
+                ) ?: throw MergeAbortException(
                     "sin_muestras",
                     "video seg${input.index}",
                 )
