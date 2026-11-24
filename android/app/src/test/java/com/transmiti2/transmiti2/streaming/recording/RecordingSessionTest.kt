@@ -1291,7 +1291,7 @@ class RecordingSessionTest {
         }
 
     @Test
-    fun `J3-c injectTestError con kind desconocido es inerte aunque la puerta este abierta`() =
+    fun `J3-c injectTestError con kind desconocido es inerte aunque la puerta este abierta`() {
         runBlocking {
             val hooks = CapturingTestHooks()
             val session = buildSession(
@@ -1308,6 +1308,7 @@ class RecordingSessionTest {
             )
             session.stop()
         }
+    }
 
     @Test
     fun `J3-c injectTestError sin grabacion activa es inerte`() =
