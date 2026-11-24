@@ -238,6 +238,23 @@ data class RecordingResult(
      * `null` si no hubo disparo: nunca se inventa un valor.
      */
     val silencePeak: Int? = null,
+    /**
+     * J3-a (3.1.4): disparador de la auto-parada por error, tal cual
+     * llegó a `scheduleErrorStop` (código, etapa, segmento, clase de
+     * la excepción, sitio, instante y espacio libre cuando aplica).
+     * `null` en la parada normal y en un `stop(errorCode)` sin
+     * disparador (p. ej. desde el motor): en esos casos no se
+     * inventa un disparador.
+     */
+    val trigger: ErrorTrigger? = null,
+    /**
+     * J3-a (3.1.4): motivo por el que el último segmento cerrado en
+     * `doStop` quedó sin renombrar (`muxer_stop_failed` si falló
+     * `muxer.stop()`, `rename_failed` si falló el renombre,
+     * `interrupted` si el cierre fue interrumpido). `null` si el
+     * cierre y el renombre fueron limpios o no había segmento.
+     */
+    val closeReason: String? = null,
 ) {
     fun toMap(): Map<String, Any?> = mapOf(
         "recordingId" to recordingId,
@@ -263,6 +280,8 @@ data class RecordingResult(
         "quietestSecondPeak" to quietestSecondPeak,
         "quietestSecondNonZero" to quietestSecondNonZero,
         "silencePeak" to silencePeak,
+        "trigger" to trigger?.toMap(),
+        "closeReason" to closeReason,
     )
 
     companion object {
@@ -295,6 +314,8 @@ data class RecordingResult(
             quietestSecondPeak: Int? = null,
             quietestSecondNonZero: Int? = null,
             silencePeak: Int? = null,
+            trigger: ErrorTrigger? = null,
+            closeReason: String? = null,
         ): RecordingResult {
             val status = when {
                 segments.isEmpty() -> "corrupt"
@@ -326,6 +347,63 @@ data class RecordingResult(
                 quietestSecondPeak = quietestSecondPeak,
                 quietestSecondNonZero = quietestSecondNonZero,
                 silencePeak = silencePeak,
+                trigger = trigger,
+                closeReason = closeReason,
+            )
+        }
+    }
+}
+
+/**
+ * Disparador de una auto-parada por error (J3-a, 3.1.4, plan §1.3
+ * paso 1): el `RecordingException` completo que llegó a
+ * `scheduleErrorStop`, con el sitio que lo disparó y el instante en
+ * que se programó la parada. Se construye una sola vez en
+ * `scheduleErrorStop` y viaja intacto por `stop()`/`doStop` hasta el
+ * `RecordingResult` y el `details` de `recording_error`: ni
+ * `doStop` ni nadie lo reescribe con un genérico. `freeBytes` es el
+ * espacio libre medido cuando el disparador lo trae (`storage_full`
+ * en rotación); `null` cuando no se midió
+ * (`storage_check_unavailable`) o el disparador no lo trae: nunca
+ * se inventa un valor.
+ */
+data class ErrorTrigger(
+    val code: String,
+    val message: String?,
+    val stage: String?,
+    val segmentIndex: Int?,
+    val exceptionClass: String?,
+    val triggerSite: String,
+    val timestampMs: Long,
+    val freeBytes: Long?,
+) {
+    fun toMap(): Map<String, Any?> = mapOf(
+        "code" to code,
+        "message" to message,
+        "stage" to stage,
+        "segmentIndex" to segmentIndex,
+        "exceptionClass" to exceptionClass,
+        "triggerSite" to triggerSite,
+        "timestampMs" to timestampMs,
+        "freeBytes" to freeBytes,
+    )
+
+    companion object {
+        fun from(
+            error: RecordingException,
+            triggerSite: String,
+            timestampMs: Long,
+        ): ErrorTrigger {
+            val details = error.details
+            return ErrorTrigger(
+                code = error.code,
+                message = error.message,
+                stage = details["stage"] as? String,
+                segmentIndex = (details["segmentIndex"] as? Number)?.toInt(),
+                exceptionClass = details["exceptionClass"] as? String,
+                triggerSite = triggerSite,
+                timestampMs = timestampMs,
+                freeBytes = (details["freeBytes"] as? Number)?.toLong(),
             )
         }
     }
@@ -806,6 +884,15 @@ open class RecordingSession(
     private val metadataSegments = mutableListOf<SegmentMetadata>()
 
     fun currentState(): RecordingState = state
+
+    /**
+     * J3-a (3.1.4): último error tal cual quedó registrado, sin
+     * reescribir: tras una auto-parada es el disparador original
+     * (`scheduleErrorStop`); tras `failStart`, el error de inicio.
+     * Solo lectura, para diagnóstico y tests: la UI lee el error
+     * desde el evento `recording_error`.
+     */
+    fun lastErrorSnapshot(): RecordingException? = lastError
 
     /** Instantánea del estado para `getRecordingStatus`. */
     open fun statusSnapshot(): RecordingStatusSnapshot {
@@ -1791,6 +1878,7 @@ open class RecordingSession(
                             ),
                         )
                     },
+                    triggerSite = "maybeOpenSegmentPosted",
                 )
             }
             false
@@ -1923,6 +2011,7 @@ open class RecordingSession(
                         "exceptionClass" to e.javaClass.simpleName,
                     ),
                 ),
+                triggerSite = "writeAudioSample",
             )
             return
         }
@@ -2168,6 +2257,7 @@ open class RecordingSession(
                         "exceptionClass" to e.javaClass.simpleName,
                     ),
                 ),
+                triggerSite = "onSample",
             )
         }
     }
@@ -2228,6 +2318,7 @@ open class RecordingSession(
                             check = "free_space_check",
                             segmentIndex = segmentIndex,
                         ),
+                        triggerSite = "drainSample:storageCheck",
                     )
                     return
                 }
@@ -2239,8 +2330,12 @@ open class RecordingSession(
                             mapOf(
                                 "stage" to "rotate",
                                 "segmentIndex" to segmentIndex,
+                                // J3-a: el espacio medido viaja con
+                                // el disparador (nunca se inventa).
+                                "freeBytes" to free,
                             ),
                         ),
+                        triggerSite = "drainSample:storageFull",
                     )
                     return
                 }
@@ -2314,6 +2409,7 @@ open class RecordingSession(
                         "exceptionClass" to e.javaClass.simpleName,
                     ),
                 ),
+                triggerSite = "writeSample",
             )
             return
         }
@@ -2367,6 +2463,7 @@ open class RecordingSession(
                         ),
                     )
                 },
+                triggerSite = "rotate",
             )
             return
         }
@@ -2457,16 +2554,23 @@ open class RecordingSession(
         val firstKeyframe = segmentFirstKeyframe
         val monotonic = segmentPtsMonotonic
         var closedCleanly = false
+        // J3-a (3.1.4): distinguir "falló muxer.stop()" de "falló
+        // el renombre": hoy ambos dejaban el .tmp con
+        // closedCleanly=false sin motivo.
+        var closeReason: String? = null
         if (cleanly) {
             try {
                 currentMuxer.stop()
                 closedCleanly = true
             } catch (e: Exception) {
+                closeReason = "muxer_stop_failed"
                 Transmiti2Logger.e(
                     "recording: stop() del muxer falló en el segmento " +
                         "$index: ${e.javaClass.simpleName}",
                 )
             }
+        } else {
+            closeReason = "interrupted"
         }
         try {
             currentMuxer.release()
@@ -2481,6 +2585,12 @@ open class RecordingSession(
             renameStagingWithRetry(staging, final, index)
         } else {
             false
+        }
+        // J3-a (3.1.4): el renombre solo se intenta con el muxer
+        // parado; si falló, el motivo es el renombre (no el stop,
+        // que ya fue bien y deja closeReason en null).
+        if (closedCleanly && !renamed) {
+            closeReason = "rename_failed"
         }
         if (renamed) {
             // El sidecar debe reflejar el nombre real (0-d1, primer
@@ -2519,6 +2629,7 @@ open class RecordingSession(
             audioReason = segmentAudioReason,
             audioStartOffsetMs = audioStartOffsetMs,
             audioGapSamples = segmentAudioGapSamples,
+            closeReason = closeReason,
         )
     }
 
@@ -2643,6 +2754,7 @@ open class RecordingSession(
                     "exceptionClass" to e.javaClass.simpleName,
                 ),
             ),
+            triggerSite = "onError",
         )
     }
 
@@ -2650,16 +2762,26 @@ open class RecordingSession(
         eosDeferred?.complete(Unit)
     }
 
-    /** Programa una parada con error (desde el drenado, sin bloquearlo). */
-    private fun scheduleErrorStop(error: RecordingException) {
+    /**
+     * Programa una parada con error (desde el drenado, sin bloquearlo).
+     * J3-a (3.1.4, plan §1.3 paso 1): el disparador viaja completo
+     * (`ErrorTrigger`: excepción original + sitio + instante) a
+     * `stop()`/`doStop`, no solo `error.code`. El FGS no se toca
+     * aquí: eso es J3-b.
+     */
+    private fun scheduleErrorStop(
+        error: RecordingException,
+        triggerSite: String,
+    ) {
         if (state == RecordingState.IDLE ||
             state == RecordingState.ERROR
         ) {
             return
         }
+        val trigger = ErrorTrigger.from(error, triggerSite, clockMs())
         scope.launch {
             try {
-                stop(error.code)
+                stop(error.code, trigger)
             } catch (_: Exception) {
             }
         }
@@ -2670,9 +2792,16 @@ open class RecordingSession(
      * desde `IDLE` (no falla, no hace nada) y desde `ERROR` (devuelve
      * el resultado ya calculado). `errorCode` es `null` en la parada
      * normal; en un error (encoder, muxer, almacenamiento, cámara)
-     * lleva el código real y el estado queda `ERROR`.
+     * lleva el código real y el estado queda `ERROR`. `errorTrigger`
+     * es el disparador completo de una auto-parada por error (J3-a):
+     * `null` en la parada normal y en un `stop(errorCode)` sin
+     * disparador (p. ej. desde el motor); en ese caso `doStop`
+     * conserva el genérico de siempre y no inventa un disparador.
      */
-    open suspend fun stop(errorCode: String? = null): RecordingResult {
+    open suspend fun stop(
+        errorCode: String? = null,
+        errorTrigger: ErrorTrigger? = null,
+    ): RecordingResult {
         val existing = sessionMutex.withLock { stopResult }
         if (existing != null) return existing.await()
         val deferred = CompletableDeferred<RecordingResult>()
@@ -2686,7 +2815,7 @@ open class RecordingSession(
         }
         if (!isFirst) return stopResult!!.await()
         return try {
-            val result = doStop(errorCode)
+            val result = doStop(errorCode, errorTrigger)
             deferred.complete(result)
             // Tras una parada normal el estado vuelve a IDLE: la
             // siguiente llamada a `stop()` debe devolver «vacío», no
@@ -2704,7 +2833,10 @@ open class RecordingSession(
         }
     }
 
-    private suspend fun doStop(errorCode: String?): RecordingResult {
+    private suspend fun doStop(
+        errorCode: String?,
+        errorTrigger: ErrorTrigger? = null,
+    ): RecordingResult {
         val idAtStop: String?
         val wasActive: Boolean
         sessionMutex.withLock {
@@ -2751,6 +2883,9 @@ open class RecordingSession(
         // del encoder (tras la recreación es otro): se capturó en
         // `onAudioError` (`silencePeakAtLoss`).
         var silencePeakAtStop: Int? = null
+        // J3-a: motivo del cierre del último segmento (se fija en el
+        // `try`, se lee al construir el resultado, tras el `finally`).
+        var closeReasonAtStop: String? = null
         try {
             // EOS a ambos encoders (audio primero: parar la captura)
             // y drenado final (5 s en total); si no llega, se detiene
@@ -2782,11 +2917,15 @@ open class RecordingSession(
             }
             // Cierre del último segmento en el hilo del encoder: la
             // cola de audio y el buffer pre-muxer se vacían antes.
+            // J3-a: el motivo del cierre queda en el resultado (si
+            // el muxer no paró o el renombre falló, el .tmp queda
+            // sin renombrar y hay que saber por qué).
             val closed = runOnEncoderThread {
                 flushAudioQueue(null)
                 flushPreMuxerBuffer()
                 closeCurrentSegment(cleanly = true)
             }
+            closeReasonAtStop = closed?.closeReason
             if (closed != null) {
                 verifyAsync(closed, closedCleanly = closed.closedCleanly)
             }
@@ -2897,24 +3036,64 @@ open class RecordingSession(
             quietestSecondPeak = quietestPeakAtStop,
             quietestSecondNonZero = quietestNonZeroAtStop,
             silencePeak = silencePeakAtStop,
+            trigger = errorTrigger,
+            closeReason = closeReasonAtStop,
         )
         sessionMutex.withLock {
             lastResult = result
             if (errorCode != null) {
                 state = RecordingState.ERROR
-                lastError = RecordingException(
-                    errorCode,
-                    "La grabación se detuvo con error: $errorCode.",
-                    mapOf("stage" to "stop", "recordingId" to idAtStop),
-                )
+                // J3-a (3.1.4, plan §1.3 paso 1): NO sobrescribir
+                // `lastError` con el genérico de antes: se conserva
+                // el disparador original tal cual llegó a
+                // `scheduleErrorStop`. Sin disparador (parada con
+                // error pedida desde fuera, sin `ErrorTrigger`), se
+                // conserva el genérico de siempre.
+                lastError = if (errorTrigger != null) {
+                    RecordingException(
+                        errorTrigger.code,
+                        errorTrigger.message
+                            ?: "La grabación se detuvo con error: " +
+                                "$errorCode.",
+                        errorTrigger.toMap(),
+                    )
+                } else {
+                    RecordingException(
+                        errorCode,
+                        "La grabación se detuvo con error: $errorCode.",
+                        mapOf("stage" to "stop", "recordingId" to idAtStop),
+                    )
+                }
             } else {
                 state = RecordingState.IDLE
             }
         }
         if (errorCode != null) {
+            // J3-a: mismo shape que `failStart` ({recordingId, code,
+            // message, details}) para que
+            // `RecordingDiagnostics.fromDetails` funcione siempre: el
+            // resultado completo sigue viajando en el resto de claves
+            // (segmentos, trigger, closeReason...).
+            val errorDetails: Map<String, Any?> =
+                errorTrigger?.toMap()?.let { triggerMap ->
+                    if (closeReasonAtStop != null) {
+                        triggerMap + ("closeReason" to closeReasonAtStop)
+                    } else {
+                        triggerMap
+                    }
+                } ?: mapOf(
+                    "stage" to "stop",
+                    "recordingId" to idAtStop,
+                )
             emitEvent(
                 StreamContract.EVENT_RECORDING_ERROR,
-                result.toMap() + mapOf("code" to errorCode),
+                result.toMap() + mapOf(
+                    "code" to errorCode,
+                    "message" to (errorTrigger?.message
+                        ?: "La grabación se detuvo con error: " +
+                            "$errorCode."),
+                    "details" to errorDetails,
+                ),
             )
         } else {
             emitEvent(StreamContract.EVENT_RECORDING_STOPPED, result.toMap())
@@ -3777,6 +3956,12 @@ private data class ClosedSegment(
     val audioReason: String? = null,
     val audioStartOffsetMs: Long? = null,
     val audioGapSamples: Int = 0,
+    /**
+     * J3-a (3.1.4): por qué el segmento quedó sin renombrar
+     * (`muxer_stop_failed` | `rename_failed` | `interrupted`).
+     * `null` si el cierre y el renombre fueron limpios.
+     */
+    val closeReason: String? = null,
 )
 
 /** Archivo del inventario de reconciliación (subetapa 0, grupo 0-d1). */

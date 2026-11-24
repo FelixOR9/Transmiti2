@@ -745,6 +745,122 @@ void main() {
       expect(recording.errorMessage, 'Cámara desconectada.');
     });
 
+    // J3-a (3.1.4): el disparador completo viaja en `details`.
+
+    testWidgets(
+      'recording_error con details puebla el disparador y no llama a stopRecording',
+      (WidgetTester tester) async {
+        await pumpController(tester);
+        await recording.start();
+        await tester.pump();
+        expect(timers.any((FakeTimer t) => t.isActive), isTrue);
+
+        service.emitEvent(<String, Object?>{
+          'type': StreamContract.eventRecordingError,
+          'recordingId': 'rec_20261118_120000_ab12',
+          'code': StreamContract.encoderError,
+          'message': 'Error del codificador: codec roto.',
+          'details': <String, Object?>{
+            'code': StreamContract.encoderError,
+            'message': 'Error del codificador: codec roto.',
+            'stage': 'encoder',
+            'segmentIndex': 0,
+            'exceptionClass': 'IllegalStateException',
+            'triggerSite': 'onError',
+            'timestampMs': 1792000000000,
+            'freeBytes': null,
+            'closeReason': 'muxer_stop_failed',
+          },
+        });
+        await tester.pump();
+
+        expect(recording.state, RecordingState.error);
+        expect(recording.errorCode, StreamContract.encoderError);
+        expect(recording.errorMessage, 'Error del codificador: codec roto.');
+        expect(recording.diagnostics?.stage, 'encoder');
+        expect(recording.diagnostics?.segmentIndex, 0);
+        expect(
+          recording.diagnostics?.exceptionClass,
+          'IllegalStateException',
+        );
+        expect(recording.diagnostics?.lastErrorStage, 'encoder');
+        expect(recording.diagnostics?.trigger, 'onError');
+        expect(recording.diagnostics?.closeReason, 'muxer_stop_failed');
+        // El temporizador se detiene y el handler NO invoca
+        // `stopRecording()` (el motor ya paró; re-entrar sería un
+        // error y dejaría el FGS vivo igualmente: eso es J3-b).
+        expect(timers.every((FakeTimer t) => !t.isActive), isTrue);
+        expect(service.stopRecordingCalls, 0);
+        expect(recording.diagnosticText, contains('Disparador: onError'));
+        expect(
+          recording.diagnosticText,
+          contains('Cierre del segmento: muxer_stop_failed'),
+        );
+      },
+    );
+
+    testWidgets(
+      'el evento recording_error sin details (payload viejo) no rompe',
+      (WidgetTester tester) async {
+        await pumpController(tester);
+        await recording.start();
+        await tester.pump();
+
+        service.emitEvent(<String, Object?>{
+          'type': StreamContract.eventRecordingError,
+          'recordingId': 'rec_20261118_120000_ab12',
+          'code': StreamContract.cameraDisconnected,
+        });
+        await tester.pump();
+
+        expect(recording.state, RecordingState.error);
+        expect(recording.errorCode, StreamContract.cameraDisconnected);
+        expect(recording.errorMessage, isNull);
+        expect(recording.diagnostics?.stage, isNull);
+        expect(recording.diagnostics?.segmentIndex, isNull);
+        expect(recording.diagnostics?.exceptionClass, isNull);
+        expect(recording.diagnostics?.trigger, isNull);
+        expect(recording.diagnostics?.closeReason, isNull);
+        expect(recording.diagnostics?.freeBytes, isNull);
+        expect(timers.every((FakeTimer t) => !t.isActive), isTrue);
+        expect(service.stopRecordingCalls, 0);
+      },
+    );
+
+    testWidgets(
+      'el evento recording_error con details parcial deja los campos nuevos en null',
+      (WidgetTester tester) async {
+        await pumpController(tester);
+        await recording.start();
+        await tester.pump();
+
+        service.emitEvent(<String, Object?>{
+          'type': StreamContract.eventRecordingError,
+          'recordingId': 'rec_20261118_120000_ab12',
+          'code': StreamContract.storageFull,
+          'message': 'Sin espacio durante la grabación: parada limpia.',
+          'details': <String, Object?>{
+            'stage': 'rotate',
+            'segmentIndex': 0,
+            'freeBytes': 100,
+          },
+        });
+        await tester.pump();
+
+        expect(recording.state, RecordingState.error);
+        expect(recording.errorCode, StreamContract.storageFull);
+        expect(recording.diagnostics?.stage, 'rotate');
+        expect(recording.diagnostics?.segmentIndex, 0);
+        expect(recording.diagnostics?.freeBytes, 100);
+        expect(recording.diagnostics?.trigger, isNull);
+        expect(recording.diagnostics?.closeReason, isNull);
+        expect(recording.diagnostics?.exceptionClass, isNull);
+        expect(service.stopRecordingCalls, 0);
+        expect(recording.diagnosticText, contains('Espacio libre: 100 bytes'));
+        expect(recording.diagnosticText, isNot(contains('Disparador:')));
+      },
+    );
+
     // Audio AAC (3.1.3, plan §10.2).
 
     testWidgets(
