@@ -11,6 +11,7 @@ import androidx.core.content.ContextCompat
 import com.transmiti2.transmiti2.streaming.recording.RecordingException
 import com.transmiti2.transmiti2.streaming.recording.RecordingsDirReplySink
 import com.transmiti2.transmiti2.streaming.recording.launchGetRecordingsDir
+import com.transmiti2.transmiti2.streaming.test.TestHooks
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.view.TextureRegistry
@@ -198,10 +199,26 @@ class StreamChannelHandler(
     private val mainDispatcher: CoroutineDispatcher = Dispatchers.Main,
 ) : MethodChannel.MethodCallHandler {
 
+    /**
+     * Ganchos de la infraestructura de pruebas físicas (FASE 2, grupo
+     * 2-c): los instala MainActivity desde el canal de pruebas. Por
+     * defecto [TestHooks.NO_OP]. El motor es perezoso y se construye
+     * después del cableado, así que el valor vigente al
+     * materializarse es el que recibe; cambiarlo después no afecta a
+     * un motor ya creado (el cableado ocurre una sola vez al
+     * arrancar, antes de cualquier llamada al canal).
+     */
+    var testHooks: TestHooks = TestHooks.NO_OP
+
     private var store: SecureCredentialStore? = null
 
     /**
      * Motor de vista previa real (3.1.1), creado perezosamente.
+     *
+     * El `Lazy` se guarda aparte (2-c) para que los accesores de
+     * pruebas puedan saber si el motor ya existe sin
+     * materializarlo: una consulta de diagnóstico no debe disparar
+     * el ancla A (la reconciliación).
      *
      * Ancla A (subetapa 0, grupo 0-d2; plan §2.6): al materializarse
      * el motor por primera vez se dispara la reconciliación, una
@@ -213,7 +230,7 @@ class StreamChannelHandler(
      * puerta queda en `FAILED` con motivo y la reconciliación se
      * reintenta al llamarla (guard_new_execution_path).
      */
-    private val previewEngine: StreamEngineImpl? by lazy {
+    private val previewEngineLazy = lazy {
         val registry = textureRegistry ?: return@lazy null
         val manager = cameraManager ?: return@lazy null
         StreamEngineImpl(
@@ -243,6 +260,9 @@ class StreamChannelHandler(
             context = context,
             cameraManager = manager,
             foregroundService = RealForegroundServiceControl(context),
+            // 2-c: los ganchos de pruebas llegan al motor (y de ahí a
+            // la sesión de grabación).
+            testHooks = testHooks,
         ).also { engine ->
             try {
                 engine.triggerReconciliation()
@@ -253,6 +273,35 @@ class StreamChannelHandler(
                 )
             }
         }
+    }
+    private val previewEngine: StreamEngineImpl?
+        get() = previewEngineLazy.value
+
+    // --- Accesores solo de pruebas (FASE 2, grupo 2-c) ------------
+
+    /**
+     * Snapshot del registro de coordinación para el canal de pruebas.
+     * NO materializa el motor: si aún no existe, responde no
+     * disponible (una consulta de diagnóstico no debe disparar el
+     * ancla A). Público porque lo llama MainActivity, que compila en
+     * un módulo aparte en el harness local.
+     */
+    fun testRegistrySnapshot(): Map<String, Any?> {
+        if (!previewEngineLazy.isInitialized()) {
+            return mapOf("available" to false, "reason" to "engine_not_started")
+        }
+        return previewEngine?.testRegistrySnapshot()
+            ?: mapOf("available" to false, "reason" to "engine_not_started")
+    }
+
+    /**
+     * Tamaño del `.tmp` activo para el muestreador de pruebas
+     * (diseño base §8). NO materializa el motor; `null` sin motor o
+     * sin grabación activa.
+     */
+    fun testActiveStagingSize(): Long? {
+        if (!previewEngineLazy.isInitialized()) return null
+        return previewEngine?.testActiveStagingSize()
     }
 
     /** Resultado pendiente de una solicitud de permisos en curso. */

@@ -99,6 +99,15 @@ class TestChannelHandler(
     private val instrumentation: TestInstrumentation
     private val syncPoints: TestSyncPoints
 
+    /**
+     * Ganchos que el flujo de producción llama (FASE 2, grupo 2-c):
+     * los instala MainActivity en el manejador de streaming (y de ahí
+     * en el motor y en `RecordingSession`). Con `testMode == false`
+     * la instrumentación no registra nada, así que los ganchos son
+     * inertes aunque se instalen.
+     */
+    val hooks: TestHooks
+
     init {
         val resolvedStore = store ?: TestDiagnosticsStore(diagnosticsRoot, clock = clock)
         val resolvedInstrumentation = instrumentation ?: TestInstrumentation(
@@ -118,11 +127,58 @@ class TestChannelHandler(
         this.store = resolvedStore
         this.instrumentation = resolvedInstrumentation
         this.syncPoints = resolvedSyncPoints
+        this.hooks = DefaultTestHooks(resolvedInstrumentation, resolvedSyncPoints)
     }
 
     /** Cancela el scope propio del sink (lo llama `MainActivity.onDestroy`). */
     fun close() {
         diagnosticsScope.cancel()
+    }
+
+    /**
+     * Adopción de campaña al arrancar (FASE 2, grupo 2-c; Revisión 1
+     * §2.6): si hay una intención válida sin consumir, crea una
+     * sesión adoptando su `testRunId` (misma campaña, nuevo
+     * `sessionId`) para auto-activar la campaña en memoria. Retorna
+     * la sesión creada, o `null` (sin intención, caducada, versión
+     * desconocida, sin flag, sesión ya activa o almacenamiento
+     * lleno). Solo con `testMode`; en producción no hace nada.
+     *
+     * Mismo flujo que `startTestSession` (create → begin → start)
+     * pero en Kotlin directo, sin `MethodChannel.Result`: la
+     * duplicación es deliberada (el flujo del canal habla en
+     * respuestas de método; este habla en valores). Lo llama
+     * `MainActivity` al arrancar, ANTES de que el motor se
+     * materialice: la sesión debe estar activa cuando la primera
+     * reconciliación llegue a P0/P1, o la intención no se puede
+     * consumir (sin sesión, `tryConsumeIntent` retorna `null`).
+     */
+    fun adoptCampaignIfArmed(): TestSession? {
+        if (!testMode) return null
+        if (instrumentation.sessionActive) return null
+        val intent = syncPoints.peekIntent() ?: return null
+        if (intent.version != TestSyncPoints.INTENT_VERSION) return null
+        if (syncPoints.isExpired(intent)) return null
+        val session = runBlocking {
+            instrumentation.createSession(
+                adoptTestRunId = intent.testRunId,
+                isTestRunIdTaken = store::hasTestRunId,
+            )
+        }
+        return when (val begun = runBlocking { store.beginSession(session) }) {
+            is BeginSessionResult.Blocked -> null
+            is BeginSessionResult.Started -> {
+                try {
+                    instrumentation.startSession(session)
+                } catch (_: IllegalStateException) {
+                    // Otra sesión se activó entre medias: el archivo
+                    // ya creado queda como sesión interrumpida (lo
+                    // detecta el próximo `beginSession`); no se
+                    // arranca una segunda sesión en memoria.
+                    null
+                }
+            }
+        }
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {

@@ -127,15 +127,39 @@ class MainActivity : FlutterFragmentActivity() {
         // métodos salvo `getTestMode` responden `test_mode_unavailable`.
         // El manejador construye su instrumentación con el `filesDir` de
         // la app; los seams del motor (`getRegistrySnapshot`,
-        // `sampleActiveStagingSize`) se cablean en el grupo 2-c.
+        // `sampleActiveStagingSize`) se cablean aquí (grupo 2-c) con
+        // lambdas que leen el motor a través del manejador de
+        // streaming: MainActivity nunca toca archivos de grabación
+        // directamente. Los proveedores NO materializan el motor (el
+        // manejador responde «no disponible» si aún no existe).
         val testingChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             TestChannelHandler.METHOD_CHANNEL,
         )
-        testingChannel.setMethodCallHandler(
-            TestChannelHandler(applicationContext.filesDir).also { testHandler = it },
-        )
+        val testHandlerInstance = TestChannelHandler(
+            applicationContext.filesDir,
+            appVersion = BuildConfig.VERSION_NAME,
+            registrySnapshotProvider = {
+                streamHandler?.testRegistrySnapshot()
+                    ?: mapOf("available" to false, "reason" to "engine_not_started")
+            },
+            stagingSizeProvider = { streamHandler?.testActiveStagingSize() },
+        ).also { testHandler = it }
+        testingChannel.setMethodCallHandler(testHandlerInstance)
         this.testingChannel = testingChannel
+
+        // Cableado 2-c: los ganchos del canal de pruebas llegan al
+        // manejador de streaming (y de ahí al motor y a
+        // RecordingSession). Sin el flag de compilación los ganchos
+        // son inertes (el handler con testMode=false no registra
+        // nada y los puntos de pausa retornan de inmediato).
+        streamHandler?.testHooks = testHandlerInstance.hooks
+        // Adopción de campaña al arrancar (2-c; Revisión 1 §2.6): si
+        // hay una intención válida sin consumir, auto-activa la
+        // campaña en memoria antes de que la primera reconciliación
+        // llegue a P0/P1. Síncrono a propósito: la adopción debe
+        // completarse antes de que el motor se materialice.
+        testHandlerInstance.adoptCampaignIfArmed()
     }
 
     override fun onDestroy() {

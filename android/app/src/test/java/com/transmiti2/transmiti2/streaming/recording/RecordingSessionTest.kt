@@ -709,6 +709,16 @@ class RecordingSessionTest {
                 muxers[1].writtenPts,
             )
             // El segmento 0 se verificó como cerrado correctamente.
+            // La verificación corre asíncrona tras la rotación:
+            // esperar a que se ejecute antes de afirmar sobre su
+            // resultado. Sin esta espera el test fallaba de forma
+            // intermitente con `lastClosedCleanly == null` (la
+            // rotación ya había ocurrido pero la verificación aún
+            // no había corrido). Patrón ya usado en este mismo
+            // archivo para esperar verificaciones asíncronas.
+            withTimeout(5_000L) {
+                while (fakeVerifier.verifyCalls == 0) delay(10)
+            }
             assertEquals(true, fakeVerifier.lastClosedCleanly)
             val result = session.stop()
             assertEquals(2, result.segments.size)

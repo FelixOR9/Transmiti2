@@ -14,7 +14,11 @@ import com.transmiti2.transmiti2.streaming.recording.RecordingSession
 import com.transmiti2.transmiti2.streaming.recording.RecordingStatusSnapshot
 import com.transmiti2.transmiti2.streaming.recording.ReconciledSegmentOutcome
 import com.transmiti2.transmiti2.streaming.recording.ReconciliationSummary
+import com.transmiti2.transmiti2.streaming.recording.RegistryEntrySnapshot
 import com.transmiti2.transmiti2.streaming.recording.SegmentStatus
+import com.transmiti2.transmiti2.streaming.test.TestEventResult
+import com.transmiti2.transmiti2.streaming.test.TestEventType
+import com.transmiti2.transmiti2.streaming.test.TestHooks
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -25,6 +29,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -167,6 +172,15 @@ class StreamEngineImpl(
     ) -> RecordingSession? = { null },
     /** Control del FGS (`null` en pruebas: sin servicio). */
     private val foregroundService: ForegroundServiceControl? = null,
+    /**
+     * Ganchos de la infraestructura de pruebas físicas (FASE 2, grupo
+     * 2-c; diseño base §4.A). Por defecto [TestHooks.NO_OP]: con él,
+     * las transiciones de la puerta no se registran y la sesión se
+     * construye sin ganchos. El cableado (MainActivity → manejador)
+     * instala los ganchos reales solo en builds de pruebas. Último
+     * parámetro con defecto: las construcciones existentes no cambian.
+     */
+    private val testHooks: TestHooks = TestHooks.NO_OP,
 ) : StreamEngine {
 
     private enum class State {
@@ -203,8 +217,12 @@ class StreamEngineImpl(
      * Sesión de grabación (perezosa: se construye al primer uso, no al
      * crear el motor). Los eventos de la sesión salen por el envoltorio
      * no suspendido: el motor los emite en el hilo principal.
+     *
+     * El `Lazy` se guarda aparte (2-c) para que los accesores de
+     * pruebas puedan saber si la sesión ya existe sin construirla:
+     * una consulta de diagnóstico no debe materializar la sesión.
      */
-    private val recordingSession: RecordingSession? by lazy {
+    private val recordingSessionLazy = lazy {
         val emit: (String, Map<String, Any?>) -> Unit = { type, payload ->
             scope.launch { emitEvent(type, payload) }
         }
@@ -217,9 +235,12 @@ class StreamEngineImpl(
                     ),
                     verifier = DefaultSegmentVerifier(ctx, mainDispatcher),
                     emitEvent = emit,
+                    testHooks = testHooks,
                 )
             }
     }
+    private val recordingSession: RecordingSession?
+        get() = recordingSessionLazy.value
 
     /**
      * Puerta única de reconciliación por proceso (subetapa 0, grupo
@@ -290,6 +311,18 @@ class StreamEngineImpl(
         return when (_reconciliationState.value) {
             ReconciliationGateState.NOT_STARTED -> {
                 _reconciliationState.value = ReconciliationGateState.RUNNING
+                // 2-c: transición de la puerta al log de pruebas
+                // (no-op con los ganchos desactivados). `record()` es
+                // síncrono y no suspende: seguro bajo el mutex.
+                testHooks.record(
+                    TestEventType.RECONCILIATION_STARTED,
+                    operation = "reconcile",
+                    detail = mapOf(
+                        "from" to "NOT_STARTED",
+                        "to" to "RUNNING",
+                        "source" to "gate",
+                    ),
+                )
                 true
             }
             ReconciliationGateState.FAILED -> {
@@ -297,6 +330,17 @@ class StreamEngineImpl(
                 reconciliationFailure = null
                 lastReconciliationSummary = null
                 _reconciliationState.value = ReconciliationGateState.RUNNING
+                // 2-c: reintento desde FAILED (misma transición, otro
+                // origen).
+                testHooks.record(
+                    TestEventType.RECONCILIATION_STARTED,
+                    operation = "reconcile",
+                    detail = mapOf(
+                        "from" to "FAILED",
+                        "to" to "RUNNING",
+                        "source" to "gate",
+                    ),
+                )
                 true
             }
             ReconciliationGateState.RUNNING,
@@ -370,6 +414,19 @@ class StreamEngineImpl(
             val summary = session.reconcileRecordings()
             lastReconciliationSummary = summary
             _reconciliationState.value = ReconciliationGateState.DONE
+            // 2-c: la puerta llegó a DONE (la sesión ya registró su
+            // propio RECONCILIATION_FINISHED con el resumen; este es
+            // la transición de la puerta, con el mismo runId).
+            testHooks.record(
+                TestEventType.RECONCILIATION_FINISHED,
+                operation = "reconcile",
+                detail = mapOf(
+                    "runId" to summary.runId,
+                    "durationMs" to (summary.finishedAtMs - summary.startedAtMs),
+                    "source" to "gate",
+                    "gateState" to "DONE",
+                ),
+            )
             deferred.complete(summary)
         } catch (e: CancellationException) {
             failGate(
@@ -401,6 +458,19 @@ class StreamEngineImpl(
     ) {
         reconciliationFailure = failure
         _reconciliationState.value = ReconciliationGateState.FAILED
+        // 2-c: la puerta llegó a FAILED con su código y motivo (la
+        // cancelación también pasa por aquí: Revisión 3 §2.2).
+        testHooks.record(
+            TestEventType.RECONCILIATION_FINISHED,
+            operation = "reconcile",
+            result = TestEventResult.FAILED,
+            errorCode = failure.code,
+            detail = mapOf(
+                "source" to "gate",
+                "gateState" to "FAILED",
+                "errorMessage" to failure.message,
+            ),
+        )
         deferred.completeExceptionally(
             ReconciliationFailedException(failure.code, failure.message),
         )
@@ -437,6 +507,60 @@ class StreamEngineImpl(
             "errorCode" to failure?.code,
             "errorMessage" to failure?.message,
         )
+    }
+
+    // --- Accesores solo de pruebas (FASE 2, grupo 2-c) ------------
+
+    /**
+     * Snapshot del registro de coordinación para el canal de pruebas.
+     * Sin sesión no hay registro: responde no disponible (nunca
+     * construye la sesión: una consulta de diagnóstico no debe
+     * materializarla). Los valores de los tokens nunca salen del
+     * proceso: solo ids, dueños, edades y contadores.
+     *
+     * `snapshot()` es `suspend` y el proveedor del canal es
+     * síncrono: el `runBlocking` es seguro aquí porque el
+     * `coordinationMutex` es hoja (sin `suspend` interno, sin E/S,
+     * sin esperas): quien lo tiene lo suelta sin ceder, así que el
+     * bloqueo es breve y no puede deadlockearse con el hilo que
+     * llama.
+     */
+    internal fun testRegistrySnapshot(): Map<String, Any?> {
+        if (!recordingSessionLazy.isInitialized()) {
+            return mapOf("available" to false, "reason" to "no_recording_session")
+        }
+        val session = recordingSession
+            ?: return mapOf("available" to false, "reason" to "no_recording_session")
+        val snapshot = runBlocking { session.testRegistrySnapshot() }
+        return mapOf(
+            "available" to true,
+            "activeClaims" to snapshot.activeClaims.values.map { entryMap(it) },
+            "reservedGroups" to snapshot.reservedGroups.values.map { entryMap(it) },
+            "claimRejectedActive" to snapshot.claimRejectedActive,
+            "claimRejectedReserved" to snapshot.claimRejectedReserved,
+            "reserveRejectedReserved" to snapshot.reserveRejectedReserved,
+            "reserveRejectedActive" to snapshot.reserveRejectedActive,
+            "foreignReleaseRejected" to snapshot.foreignReleaseRejected,
+        )
+    }
+
+    private fun entryMap(entry: RegistryEntrySnapshot): Map<String, Any?> =
+        mapOf(
+            "id" to entry.id,
+            "owner" to entry.owner,
+            "acquiredAtMs" to entry.acquiredAtMs,
+            "ageMs" to entry.ageMs,
+        )
+
+    /**
+     * Tamaño del `.tmp` activo para el muestreador de pruebas
+     * (diseño base §8): `File.length()`, solo lectura. `null` sin
+     * sesión o sin grabación activa. Nunca construye la sesión.
+     */
+    internal fun testActiveStagingSize(): Long? {
+        if (!recordingSessionLazy.isInitialized()) return null
+        val file = recordingSession?.activeStagingFile() ?: return null
+        return if (file.isFile) file.length() else null
     }
 
     /**

@@ -13,6 +13,10 @@ import com.transmiti2.transmiti2.streaming.PreviewConfig
 import com.transmiti2.transmiti2.streaming.PreviewSession
 import com.transmiti2.transmiti2.streaming.StreamContract
 import com.transmiti2.transmiti2.streaming.Transmiti2Logger
+import com.transmiti2.transmiti2.streaming.test.PausePoint
+import com.transmiti2.transmiti2.streaming.test.TestEventResult
+import com.transmiti2.transmiti2.streaming.test.TestEventType
+import com.transmiti2.transmiti2.streaming.test.TestHooks
 import java.io.File
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicLong
@@ -609,6 +613,16 @@ open class RecordingSession(
      * registro es por instancia de sesión, nunca singleton.
      */
     private val registry: ActiveRecordingRegistry = ActiveRecordingRegistry(),
+    /**
+     * Ganchos de la infraestructura de pruebas físicas (FASE 2, grupo
+     * 2-c; diseño base §4.A/§5). Por defecto [TestHooks.NO_OP]: con
+     * él, los ganchos retornan de inmediato y `record()` es no-op, así
+     * que el flujo es idéntico al actual. El cableado (MainActivity →
+     * motor) instala los ganchos reales solo en builds de pruebas.
+     * Último parámetro con defecto: las construcciones existentes en
+     * producción y tests no cambian.
+     */
+    private val testHooks: TestHooks = TestHooks.NO_OP,
 ) : VideoEncoderListener {
 
     private val segmentVerifier: SegmentVerifier = verifier
@@ -826,6 +840,24 @@ open class RecordingSession(
         )
     }
 
+    // --- Accesores solo de pruebas (FASE 2, grupo 2-c) ------------
+
+    /**
+     * Snapshot del registro de coordinación (solo pruebas): lo lee el
+     * motor para el canal de pruebas. No toca el registro; el mapa
+     * que se expone por el canal excluye los valores de los tokens.
+     */
+    internal suspend fun testRegistrySnapshot(): RegistrySnapshot =
+        registry.snapshot()
+
+    /**
+     * Archivo `.tmp` del segmento en curso (solo pruebas): `null` si
+     * no hay grabación activa. Lo lee el motor para el muestreador
+     * del `.tmp` activo (diseño base §8): solo `File.length()`, nunca
+     * escritura.
+     */
+    internal fun activeStagingFile(): File? = segmentStagingFile
+
     /**
      * Inicia la grabación. Exige vista previa activa (el motor lo
      * comprueba antes de llamar). Devuelve la información del inicio
@@ -860,10 +892,24 @@ open class RecordingSession(
                 }
                 else -> null
             }
-        } ?: throw RecordingException.stateError(
-            "Ya hay una grabación $state.",
-            mapOf("stage" to "start", "state" to state.name.lowercase()),
-        )
+        }
+        if (currentState == null) {
+            // 2-c (diseño base §8.2): la solicitud rechazada queda en
+            // el log de pruebas (incluso sin claim): es la evidencia
+            // de una segunda grabación intentada con la sesión
+            // ocupada. No-op con los ganchos desactivados.
+            testHooks.record(
+                TestEventType.RECORDING_START_REQUESTED,
+                operation = "start",
+                result = TestEventResult.FAILED,
+                errorCode = StreamContract.RECORDING_STATE_ERROR,
+                detail = mapOf("state" to state.name.lowercase()),
+            )
+            throw RecordingException.stateError(
+                "Ya hay una grabación $state.",
+                mapOf("stage" to "start", "state" to state.name.lowercase()),
+            )
+        }
         Transmiti2Logger.d("recording: start desde $currentState")
         this.previewSession = previewSession
         this.previewConfig = previewConfig
@@ -1036,6 +1082,13 @@ open class RecordingSession(
             )
 
             val id = claimRecordingId()
+            // 2-c: claim concedido (solo el id y el resultado; nunca
+            // el valor del token). No-op con los ganchos desactivados.
+            testHooks.record(
+                TestEventType.CLAIM_GRANTED,
+                operation = "start",
+                recordingId = id,
+            )
             recordingId = id
             recordingStartWallMs = clockMs()
             fileStore.ensureDir()
@@ -1115,6 +1168,14 @@ open class RecordingSession(
             }
             outputFormat = format
             state = RecordingState.RECORDING
+            // 2-c (diseño base §8.2): la solicitud aceptada queda
+            // registrada con su id (el par de la rechazada de la
+            // guarda: una solicitud, un evento).
+            testHooks.record(
+                TestEventType.RECORDING_START_REQUESTED,
+                operation = "start",
+                recordingId = id,
+            )
             // Audio efectivo del inicio: el segmento 0 lleva pista AAC
             // solo si el formato llegó y el muxer la añadió.
             val effectiveAudio = audioExpected && audioFormat != null
@@ -1154,6 +1215,18 @@ open class RecordingSession(
             Transmiti2Logger.d("recording: iniciada $id")
             return info
         } catch (e: RecordingException) {
+            // 2-c: el claim rechazado (id agotado tras 10 intentos)
+            // queda en el log; el resto de fallos de inicio no son
+            // rechazos de claim. No-op con los ganchos desactivados.
+            if (e.details["stage"] == "id_reservation") {
+                testHooks.record(
+                    TestEventType.CLAIM_REJECTED,
+                    operation = "start",
+                    result = TestEventResult.FAILED,
+                    errorCode = e.code,
+                    detail = mapOf("stage" to "id_reservation"),
+                )
+            }
             failStart(e)
         } catch (e: Exception) {
             failStart(
@@ -1234,9 +1307,11 @@ open class RecordingSession(
      * Libera el claim de `id` con `token`. Nunca lanza por el estado
      * del registro: `NOT_FOUND` en `finally` se ignora, `NOT_OWNER`
      * se registra como aviso (alguien intentó soltar lo ajeno).
+     * Devuelve el resultado para que el llamador lo registre (2-c).
      */
-    private suspend fun releaseClaim(id: String, token: OwnershipToken) {
-        when (registry.releaseRecording(id, token)) {
+    private suspend fun releaseClaim(id: String, token: OwnershipToken): ReleaseResult {
+        val result = registry.releaseRecording(id, token)
+        when (result) {
             ReleaseResult.RELEASED ->
                 Transmiti2Logger.d(
                     "recording: claim liberado id=$id token=$token",
@@ -1251,6 +1326,7 @@ open class RecordingSession(
                         "id=$id token=$token",
                 )
         }
+        return result
     }
 
     /**
@@ -1259,24 +1335,58 @@ open class RecordingSession(
      * Sin claim vivo no hace nada. El id debe ser el reclamado (ver
      * invariante de [activeClaimToken]); si no coincide, el registro
      * devuelve `NOT_FOUND`/`NOT_OWNER` sin tocar la entrada viva.
+     * La vía (`failStart` | `stop`) queda en el log de pruebas (2-c,
+     * diseño base §8.2): es el destino del claim de la sesión.
      */
-    private suspend fun releaseClaimIfHeld(id: String) {
+    private suspend fun releaseClaimIfHeld(id: String, via: String = "stop") {
         withContext(NonCancellable) {
             val token = takeClaimToken() ?: return@withContext
-            releaseClaim(id, token)
+            val result = releaseClaim(id, token)
+            // 2-c: solo cuando había un claim vivo que liberar (solo
+            // id y resultado; nunca el valor del token).
+            testHooks.record(
+                TestEventType.CLAIM_RELEASED,
+                operation = "recording",
+                recordingId = id,
+                result = if (result == ReleaseResult.RELEASED) {
+                    TestEventResult.OK
+                } else {
+                    TestEventResult.FAILED
+                },
+                detail = mapOf("via" to via, "releaseResult" to result.name),
+            )
         }
     }
 
     /** Fracaso del inicio: estado `ERROR`, evento y limpieza. */
     private suspend fun failStart(e: RecordingException): Nothing {
+        // 2-c: el id reclamado (si lo hubo) se captura ANTES de
+        // liberar: `recordingId` no se resetea entre grabaciones y
+        // podría ser obsoleto si el fallo llegó antes del claim. El
+        // invariante de `activeClaimToken` (token no-nulo ⟹
+        // `recordingId` es el id reclamado) hace exacta la captura.
+        val claimedId = if (activeClaimToken != null) recordingId else null
         // 0-c: liberar el claim ANTES de publicar ERROR (la transición
         // que admite un nuevo inicio). Con el orden contrario, un nuevo
         // inicio podría reclamar el mismo id antes de la liberación;
         // con tokens no robaría el claim, pero dejaría ruido
         // (NOT_OWNER) y un aviso espurio.
-        recordingId?.let { releaseClaimIfHeld(it) }
+        recordingId?.let { releaseClaimIfHeld(it, via = "failStart") }
         state = RecordingState.ERROR
         lastError = e
+        // 2-c (diseño base §8.2): la solicitud que llegó hasta aquí
+        // fue aceptada por la guarda pero falló en el inicio; queda
+        // registrada como fallida con su código. El claim, si lo hubo,
+        // ya se liberó arriba, antes de publicar ERROR (el evento
+        // CLAIM_RELEASED precede a este en el log).
+        testHooks.record(
+            TestEventType.RECORDING_START_REQUESTED,
+            operation = "start",
+            recordingId = claimedId,
+            result = TestEventResult.FAILED,
+            errorCode = e.code,
+            detail = mapOf("stage" to "failStart"),
+        )
         Transmiti2Logger.e(
             "recording: fallo al iniciar: ${e.code} ${e.message}",
         )
@@ -2881,6 +2991,11 @@ open class RecordingSession(
     open suspend fun reconcileRecordings(): ReconciliationSummary {
         val runId = "run-${reconcileRunCounter.incrementAndGet()}"
         val startedAtMs = clockMs()
+        // P0 (2-c; diseño §5.1, Revisión 1 §4.2): justo antes del
+        // inventario. Sin mutex tomado, sin reserva y sin archivos
+        // abiertos: la pausa es una suspensión de corrutina inocua.
+        // Con los ganchos desactivados retorna de inmediato.
+        testHooks.awaitPauseIfArmed(PausePoint.P0, runId)
         // Inventario (sin lock): `.tmp.mp4` + `.mp4` + `.json`. La
         // reconciliación ignora `.write-test-*` por prefijo (nunca lo
         // verifica ni lo renombra).
@@ -2923,6 +3038,10 @@ open class RecordingSession(
         val missingFiles = mutableListOf<String>()
         var segmentsQuarantined = 0
         var conflicts = 0
+        // P1 (2-c; diseño §5.1): entre el inventario y el bucle de
+        // grupos. El inventario ya es una foto fija en memoria y aún
+        // no hay ninguna reserva tomada.
+        testHooks.awaitPauseIfArmed(PausePoint.P1, runId)
         for ((groupId, entries) in groups.toSortedMap()) {
             val token = registry.tryReserveGroup(
                 groupId,
@@ -2930,6 +3049,14 @@ open class RecordingSession(
             )
             if (token == null) {
                 skippedActive += groupId
+                // 2-c: grupo saltado por reserva activa (el motivo es
+                // el rechazo del registro; nunca se inventa otro).
+                testHooks.record(
+                    TestEventType.GROUP_SKIPPED_ACTIVE,
+                    operation = "reconcile",
+                    result = TestEventResult.SKIPPED,
+                    detail = mapOf("groupId" to groupId, "runId" to runId),
+                )
                 Transmiti2Logger.d(
                     "reconciliation: grupo $groupId saltado " +
                         "(grabación activa o reservada)",
@@ -2937,6 +3064,13 @@ open class RecordingSession(
                 continue
             }
             tokens[groupId] = token
+            // 2-c: reserva concedida (solo el id del grupo; nunca el
+            // valor del token).
+            testHooks.record(
+                TestEventType.GROUP_RESERVED,
+                operation = "reconcile",
+                detail = mapOf("groupId" to groupId, "runId" to runId),
+            )
             try {
                 val group = reconcileGroup(groupId, entries)
                 outcomes += group.outcomes
@@ -2949,6 +3083,18 @@ open class RecordingSession(
                 // Un grupo que falla no tumba la pasada: queda
                 // registrado y se reintenta en la siguiente.
                 failedGroups += groupId
+                // 2-c: el grupo falló (con su clase de excepción).
+                testHooks.record(
+                    TestEventType.GROUP_FAILED,
+                    operation = "reconcile",
+                    result = TestEventResult.FAILED,
+                    errorCode = "reconciliation_group_failed",
+                    detail = mapOf(
+                        "groupId" to groupId,
+                        "runId" to runId,
+                        "exceptionClass" to e.javaClass.simpleName,
+                    ),
+                )
                 Transmiti2Logger.e(
                     "reconciliation: grupo $groupId falló: " +
                         "${e.javaClass.simpleName}",
@@ -2960,6 +3106,22 @@ open class RecordingSession(
                 // daría `skipped_active`).
                 withContext(NonCancellable) {
                     val released = registry.releaseGroup(groupId, token)
+                    // 2-c: liberación de la reserva (siempre, incluso
+                    // con cancelación).
+                    testHooks.record(
+                        TestEventType.GROUP_RELEASED,
+                        operation = "reconcile",
+                        result = if (released == ReleaseResult.RELEASED) {
+                            TestEventResult.OK
+                        } else {
+                            TestEventResult.FAILED
+                        },
+                        detail = mapOf(
+                            "groupId" to groupId,
+                            "runId" to runId,
+                            "releaseResult" to released.name,
+                        ),
+                    )
                     if (released != ReleaseResult.RELEASED) {
                         Transmiti2Logger.e(
                             "reconciliation: liberación de $groupId " +
@@ -2968,9 +3130,15 @@ open class RecordingSession(
                     }
                 }
             }
+            // P2 (2-c; diseño §5.1): entre grupos, tras liberar la
+            // reserva del grupo procesado y antes de reservar el
+            // siguiente. Sin mutex tomado ni reserva viva. Tras el
+            // último grupo también se alcanza (sin grupo siguiente):
+            // la pausa ahí solo retrasa el resumen, sin retener nada.
+            testHooks.awaitPauseIfArmed(PausePoint.P2, runId)
         }
         val finishedAtMs = clockMs()
-        return ReconciliationSummary(
+        val summary = ReconciliationSummary(
             runId = runId,
             startedAtMs = startedAtMs,
             finishedAtMs = finishedAtMs,
@@ -3001,6 +3169,31 @@ open class RecordingSession(
                 .foreignReleaseRejected,
             conflicts = conflicts,
         )
+        // 2-c: resumen de la pasada en el log (runId, duración,
+        // contadores). Lo consume el constructor del informe: C1/C2
+        // exigen RECONCILIATION_FINISHED con este runId (Revisión 2
+        // §2.8). No-op con los ganchos desactivados.
+        testHooks.record(
+            TestEventType.RECONCILIATION_FINISHED,
+            operation = "reconcile",
+            detail = mapOf(
+                "runId" to summary.runId,
+                "durationMs" to (summary.finishedAtMs - summary.startedAtMs),
+                "groupsTotal" to summary.groupsTotal,
+                "groupsReconciled" to summary.groupsReconciled,
+                "groupsSkippedActive" to summary.groupsSkippedActive.size,
+                "groupsFailed" to summary.groupsFailed.size,
+                "segmentsTrusted" to summary.segmentsTrusted,
+                "segmentsVerified" to summary.segmentsVerified,
+                "segmentsRenamed" to summary.segmentsRenamed,
+                "segmentsPending" to summary.segmentsPending.size,
+                "segmentsQuarantined" to summary.segmentsQuarantined,
+                "conflicts" to summary.conflicts,
+                "foreignReleaseRejected" to summary.foreignReleaseRejected,
+                "source" to "session",
+            ),
+        )
+        return summary
     }
 
     /**

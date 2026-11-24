@@ -67,6 +67,8 @@ enum class TestEventType {
     GROUP_FAILED,
     CLAIM_GRANTED,
     CLAIM_REJECTED,
+    /** Liberación del claim (diseño base §8.2; grupo 2-c): la vía va en `detail["via"]` (`failStart` | `stop`). */
+    CLAIM_RELEASED,
     RECORDING_STARTED,
     RECORDING_STOPPED,
     RECORDING_START_REQUESTED,

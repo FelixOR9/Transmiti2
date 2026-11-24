@@ -630,12 +630,19 @@ class StreamChannelHandlerGetRecordingsDirTest {
      * devolviera `null`): si la rama lo tocara, estaría
      * inicializado. Es la única forma de observar el `lazy`
      * privado sin cambiar la producción.
+     *
+     * El campo se llama `previewEngineLazy` desde el grupo 2-c, que
+     * guarda el `Lazy` aparte (antes era el delegado sintético
+     * `previewEngine$delegate` de `by lazy`): los accesores de
+     * diagnóstico lo consultan con `isInitialized()` sin
+     * materializar el motor. La intención del test no cambia: el
+     * motor no debe materializarse en esta rama.
      */
     private fun previewEngineInitialized(
         handler: StreamChannelHandler,
     ): Boolean {
         val field = StreamChannelHandler::class.java.getDeclaredField(
-            "previewEngine\$delegate",
+            "previewEngineLazy",
         )
         field.isAccessible = true
         return (field.get(handler) as Lazy<*>).isInitialized()
