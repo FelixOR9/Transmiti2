@@ -51,7 +51,7 @@ class TestModeGateTest {
             calls++
         }
 
-        override fun error(errorCode: String?, errorMessage: String?, errorDetails: Any?) {
+        override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
             this.errorCode = errorCode
             this.errorMessage = errorMessage
             this.errorDetails = errorDetails
