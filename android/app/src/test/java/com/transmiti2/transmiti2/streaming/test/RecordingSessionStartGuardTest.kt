@@ -38,7 +38,6 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
-import sun.misc.Unsafe
 
 /**
  * Guardas de inicio duplicado y ciclo del claim (diseño base §8, caso
@@ -53,16 +52,34 @@ import sun.misc.Unsafe
  * estos objetos (solo los pasa: la superficie va a la sesión de
  * cámara falsa y el formato al muxer falso), así que una instancia
  * sin inicializar es suficiente en ambos entornos.
+ *
+ * NOTA DE FIDELIDAD (fix CI #109): `sun.misc.Unsafe` NO se importa
+ * directamente. Gradle en CI compila los tests con el bootclasspath
+ * de Android (android.jar), donde esa clase JDK interna no existe,
+ * y el import directo rompía la compilación del paso 13 sin ejecutar
+ * ninguna prueba (run #109). Por eso se obtiene por reflexión en
+ * tiempo de ejecución (`Class.forName` + campo `theUnsafe` + método
+ * `allocateInstance`): en tiempo de compilación solo aparece la
+ * cadena literal, y en tiempo de ejecución (JVM del host, tanto en
+ * el harness local como en los unit tests de Gradle) la clase sí
+ * existe.
  */
 class RecordingSessionStartGuardTest {
 
-    /** Instancia sin llamar al constructor (ver cabecera). */
+    /** Instancia sin llamar al constructor (ver cabecera: reflexión
+     * en tiempo de ejecución porque el import directo de
+     * `sun.misc.Unsafe` no compila en CI — run #109). */
     private fun <T> allocateInstance(clazz: Class<T>): T {
-        val field = Unsafe::class.java.getDeclaredField("theUnsafe")
+        val unsafeClass = Class.forName("sun.misc.Unsafe")
+        val field = unsafeClass.getDeclaredField("theUnsafe")
             .apply { isAccessible = true }
-        val unsafe = field.get(null) as Unsafe
+        val unsafe = field.get(null)
+        val allocate = unsafeClass.getMethod(
+            "allocateInstance",
+            Class::class.java,
+        )
         @Suppress("UNCHECKED_CAST")
-        return unsafe.allocateInstance(clazz) as T
+        return allocate.invoke(unsafe, clazz) as T
     }
 
     /** Reloj falso (mismo patrón que `PauseConsumptionTest`). */
