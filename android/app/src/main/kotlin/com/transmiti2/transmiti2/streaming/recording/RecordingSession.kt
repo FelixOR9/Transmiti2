@@ -3349,6 +3349,88 @@ open class RecordingSession(
     }
 
     /**
+     * Reserva del grupo para la fusión (3.1.4, J1-b; plan §2.4.1):
+     * la orquestación (motor) reserva el grupo ANTES de fusionar,
+     * con el mismo mecanismo que la reconciliación. `null` = grupo
+     * activo o reservado (grabación en curso o reconciliación en
+     * marcha): no fusionar, reintentar después (la reanudación es
+     * J1-c). El dueño es `"merge"`; la identidad es el token, nunca
+     * el dueño. `open` (costura de pruebas, como `stop()`).
+     */
+    open suspend fun tryReserveGroupForMerge(
+        recordingId: String,
+    ): OwnershipToken? =
+        registry.tryReserveGroup(recordingId, owner = "merge")
+
+    /**
+     * Libera la reserva del grupo tomada con
+     * [tryReserveGroupForMerge]. Se llama en `finally` siempre (la
+     * fusión complete, aborte o se cancele). Un token ajeno o un id
+     * no reservado no liberan nada y solo se registran.
+     */
+    open suspend fun releaseGroupForMerge(
+        recordingId: String,
+        token: OwnershipToken,
+    ) {
+        val released = registry.releaseGroup(recordingId, token)
+        if (released != ReleaseResult.RELEASED) {
+            Transmiti2Logger.e(
+                "merge: no se pudo liberar la reserva de $recordingId " +
+                    "($released)",
+            )
+        }
+    }
+
+    /**
+     * Registra el resultado de un intento de fusión en el sidecar
+     * (3.1.4, J1-b; plan §2.4.10): lee el sidecar, copia los campos
+     * de fusión desde [MergeResult] y lo reescribe. Sin sidecar no
+     * hay nada que actualizar (la fusión ya abortó sin él y el
+     * resultado viaja en el evento `recording_merged`). Nunca lanza:
+     * un fallo de E/S solo se registra; la fila SQLite la actualiza
+     * Dart con el evento. `attemptedSegmentIndices` son los índices
+     * que la orquestación intentó fusionar (del resultado del stop):
+     * se usan como `mergedSegments` cuando el fusionador no los
+     * trae (final ya existente verificado, `alreadyMerged`).
+     */
+    open fun recordMergeResult(
+        result: MergeResult,
+        attemptedSegmentIndices: List<Int> = emptyList(),
+    ) {
+        try {
+            val current = fileStore.readSidecar(result.recordingId)
+                ?: return
+            val updated = current.copy(
+                mergedAtMs = clockMs(),
+                mergedDurationMs = result.mergedDurationMs,
+                mergedSizeBytes = result.mergedSizeBytes,
+                mergedStatus = if (result.success) {
+                    result.status?.name?.lowercase()
+                } else {
+                    "failed"
+                },
+                mergedReason = result.reason,
+                mergedSegments = if (result.success) {
+                    result.segmentIndices.ifEmpty {
+                        attemptedSegmentIndices
+                    }
+                } else {
+                    emptyList()
+                },
+                skippedSegments = result.affectedIndices,
+                audioGapSegments = result.audioGapSegments,
+            )
+            fileStore.writeSidecar(updated)
+        } catch (e: Exception) {
+            Transmiti2Logger.e(
+                "merge: no se pudo registrar el resultado en el " +
+                    "sidecar de ${result.recordingId}: " +
+                    e.javaClass.simpleName,
+            )
+        }
+    }
+
+    /**
      * Reconciliación de grabaciones interrumpidas (subetapa 0, grupo
      * 0-d1; plan §2.5–§2.6): inventario (sin lock) → agrupar por
      * `recordingId` → por grupo, `tryReserveGroup(G)` del registro

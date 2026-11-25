@@ -178,6 +178,37 @@ fun mergedDurationWithinTolerance(
     return abs(mergedMs - sumMs) <= tolerance
 }
 
+/** Motivos de aborto de fusión REINTENTABLES (J1-b): la fila queda
+ * `finalizing` y los segmentos intactos; la reanudación (J1-c) puede
+ * reintentar. Cualquier otro motivo es definitivo: la fila pasa a
+ * `corrupt` (segmentos intactos, sin borrar). */
+val MERGE_RETRYABLE_REASONS = setOf(
+    "storage_full",
+    "storage_check_unavailable",
+    "merge_skipped_gap",
+    "merge_skipped_corrupt",
+    "merge_skipped_pending",
+    "merge_rename_failed",
+)
+
+/** `true` si el aborto de fusión con este motivo es reintentable. */
+fun mergeFailureIsRetryable(reason: String?): Boolean =
+    reason in MERGE_RETRYABLE_REASONS
+
+/** Fase de la fusión para el progreso (J1-b, notificación del FGS). */
+enum class MergeStage {
+    VALIDATING,
+    COPYING,
+    VERIFYING,
+}
+
+/** Progreso de la fusión (J1-b): fase y segmentos copiados de N. */
+data class MergeProgress(
+    val stage: MergeStage,
+    val segmentsDone: Int,
+    val segmentCount: Int,
+)
+
 /** Resultado de una fusión (éxito o aborto con motivo exacto). */
 data class MergeResult(
     val success: Boolean,
@@ -327,11 +358,19 @@ class SegmentMerger(
      *
      * En éxito, `reason` es `null`. Si el `_final.mp4` ya existía
      * verificado, `alreadyMerged` es `true` y no se re-fusiona.
+     *
+     * @param onProgress progreso por fases (J1-b, notificación del
+     *   FGS): se invoca al validar, por cada segmento copiado y al
+     *   verificar. Nunca aborta la fusión: si el callback lanza, se
+     *   traga y se sigue (guard_new_execution_path).
      */
-    suspend fun merge(recordingId: String): MergeResult =
+    suspend fun merge(
+        recordingId: String,
+        onProgress: ((MergeProgress) -> Unit)? = null,
+    ): MergeResult =
         withContext(ioDispatcher) {
             try {
-                mergeInternal(recordingId)
+                mergeInternal(recordingId, onProgress)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: MergeAbortException) {
@@ -379,10 +418,21 @@ class SegmentMerger(
         duplicateResolution = null,
     )
 
-    private suspend fun mergeInternal(recordingId: String): MergeResult {
+    private suspend fun mergeInternal(
+        recordingId: String,
+        onProgress: ((MergeProgress) -> Unit)? = null,
+    ): MergeResult {
         val sidecar = fileStore.readSidecar(recordingId)
         val rotationDegrees = sidecar?.rotationDegrees ?: 0
         val finalFile = fileStore.finalFile(recordingId)
+        // J1-b: el progreso nunca aborta la fusión.
+        val reportProgress: (MergeProgress) -> Unit = { progress ->
+            try {
+                onProgress?.invoke(progress)
+            } catch (_: Exception) {
+            }
+        }
+        reportProgress(MergeProgress(MergeStage.VALIDATING, 0, 0))
 
         // Paso 9 (reanudación idempotente): si el final ya existe y
         // verifica, no se re-fusiona. Solo la clasificación del
@@ -428,6 +478,7 @@ class SegmentMerger(
         val partialSegments = inputs
             .filter { it.status == SegmentStatus.PARTIAL }
             .map { it.index }
+        reportProgress(MergeProgress(MergeStage.COPYING, 0, segmentCount))
 
         // Paso 3: espacio libre (suma + 200 MB, reutiliza
         // MIN_FREE_BYTES_START de la sesión). Sin tocar nada si no hay.
@@ -507,6 +558,11 @@ class SegmentMerger(
                 muxer = muxer,
                 videoTrack = videoTrack,
                 audioTrack = audioTrack,
+                onSegmentCopied = { done ->
+                    reportProgress(
+                        MergeProgress(MergeStage.COPYING, done, segmentCount),
+                    )
+                },
             )
             try {
                 muxer.stop()
@@ -531,6 +587,7 @@ class SegmentMerger(
 
         // Paso 7 (verificación del tmp, §2.5): clasificación READY o
         // PARTIAL solo por audio, duración-suma y muestras-suma.
+        reportProgress(MergeProgress(MergeStage.VERIFYING, segmentCount, segmentCount))
         val verification = verifyFinalFile(
             tmpFile,
             sidecar,
@@ -957,6 +1014,7 @@ class SegmentMerger(
         muxer: RecordingMuxer,
         videoTrack: Int,
         audioTrack: Int,
+        onSegmentCopied: ((Int) -> Unit)? = null,
     ): MergeCopyResult {
         val audioGapSegments = mutableListOf<Int>()
         val driftMsBySegment = mutableMapOf<Int, Long>()
@@ -1146,6 +1204,12 @@ class SegmentMerger(
                     extractor.close()
                 } catch (_: Exception) {
                 }
+            }
+            // J1-b: progreso por segmento copiado. Nunca aborta la
+            // fusión: un callback que lance se traga aquí.
+            try {
+                onSegmentCopied?.invoke(position + 1)
+            } catch (_: Exception) {
             }
         }
 

@@ -5,10 +5,14 @@ import 'package:sqflite/sqflite.dart';
 ///
 /// Una fila por GRABACIÓN (no por segmento): se crea al iniciar
 /// (`status = 'recording'`, `file_path` = ruta prevista del final
-/// fusionado `<recordingId>_final.mp4`) y se actualiza al detener
-/// (`status = 'ready'` o `'corrupt'`, con `duration_ms` y `size_bytes`
-/// medidos). Los segmentos se identifican por convención de nombres
-/// (§5.1 del plan) y sus metadatos se derivan de los archivos (§5.3);
+/// fusionado `<recordingId>_final.mp4`), pasa a `finalizing` al
+/// detener si hay segmentos utilizables (3.1.4, J1-b: la fusión corre
+/// asíncrona tras el stop) y se actualiza al completarse la fusión
+/// (`status = 'ready'` con duración/tamaño medidos del fusionado, o
+/// `'corrupt'` si fracasó de forma definitiva). Sin segmentos
+/// utilizables la parada marca `corrupt` directamente. Los segmentos
+/// se identifican por convención de nombres (§5.1 del plan) y sus
+/// metadatos se derivan de los archivos (§5.3);
 /// la fila `ready` exige al menos un segmento utilizable (§7.3).
 class RecordingRow {
   const RecordingRow({
@@ -88,6 +92,23 @@ abstract class RecordingRepository {
   /// con duración y tamaño medidos). `status` debe ser uno de los
   /// admitidos por el `CHECK` de la tabla.
   Future<void> updateOnStop({
+    required String recordingId,
+    required String status,
+    int? durationMs,
+    int? sizeBytes,
+    required int nowMs,
+  });
+
+  /// Actualiza la fila al completarse la fusión (`recording_merged`,
+  /// 3.1.4, J1-b): `ready` con duración y tamaño MEDIDOS del
+  /// fusionado, o `corrupt` si la fusión fracasó de forma definitiva.
+  /// Misma escritura que [updateOnStop] (sin migración: la tabla v2
+  /// ya tiene `duration_ms`, `size_bytes`, `status` y `file_path`);
+  /// el método propio existe para que el evento de fusión no se
+  /// confunda con la parada. Un fracaso reintentable (`finalizing`)
+  /// NO llama aquí: la fila queda en `finalizing` hasta la
+  /// reanudación (J1-c).
+  Future<void> updateOnMerged({
     required String recordingId,
     required String status,
     int? durationMs,
@@ -251,6 +272,25 @@ class SqliteRecordingRepository implements RecordingRepository {
       },
       where: 'file_name = ?',
       whereArgs: <Object?>['${recordingId}_final.mp4'],
+    );
+  }
+
+  @override
+  Future<void> updateOnMerged({
+    required String recordingId,
+    required String status,
+    int? durationMs,
+    int? sizeBytes,
+    required int nowMs,
+  }) async {
+    // J1-b: misma escritura que updateOnStop; el método propio
+    // marca el origen (fusión, no parada) en el llamador.
+    return updateOnStop(
+      recordingId: recordingId,
+      status: status,
+      durationMs: durationMs,
+      sizeBytes: sizeBytes,
+      nowMs: nowMs,
     );
   }
 

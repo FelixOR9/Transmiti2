@@ -61,6 +61,11 @@ class FakeStreamingService implements StreamingService {
   String? stopRecordingError;
   int startRecordingCalls = 0;
   int stopRecordingCalls = 0;
+  /// Resultado enlatado de `stopRecording` (J1-b): si es no-nulo se
+  /// devuelve en vez del resultado por defecto (un segmento `ready`
+  /// de 12 s). Sirve para simular paradas sin segmentos utilizables
+  /// (`status: 'corrupt'`, lista vacía).
+  RecordingInfo? stopRecordingResult;
   // Instrumentación de audio 3.1.3: buffers de entrada AAC
   // descartados que devuelve el método `stopRecording` (0 por defecto).
   int stopDroppedInputBuffers = 0;
@@ -227,6 +232,10 @@ class FakeStreamingService implements StreamingService {
     final String? error = stopRecordingError;
     if (error != null) {
       throw StreamingException(error);
+    }
+    final RecordingInfo? canned = stopRecordingResult;
+    if (canned != null) {
+      return canned;
     }
     // El método devuelve la lista completa de segmentos (paso 5):
     // un segmento `ready` de 12 s, coherente con `durationMs`.
@@ -518,6 +527,24 @@ class InMemoryRecordingRepository implements RecordingRepository {
         updatedAtMs: nowMs,
       );
     }
+  }
+
+  @override
+  Future<void> updateOnMerged({
+    required String recordingId,
+    required String status,
+    int? durationMs,
+    int? sizeBytes,
+    required int nowMs,
+  }) async {
+    // J1-b: misma escritura que updateOnStop.
+    return updateOnStop(
+      recordingId: recordingId,
+      status: status,
+      durationMs: durationMs,
+      sizeBytes: sizeBytes,
+      nowMs: nowMs,
+    );
   }
 
   @override

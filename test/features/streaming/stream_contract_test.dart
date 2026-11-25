@@ -226,6 +226,49 @@ void main() {
       expect(stopped.filePath, '/docs/rec-1_seg000.mp4');
     });
 
+    test('RecordingMergedInfo se construye desde el mapa', () {
+      final RecordingMergedInfo merged =
+          RecordingMergedInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'filePath': '/docs/rec-1_final.mp4',
+            'status': 'ready',
+            'totalDurationMs': 11987,
+            'totalSizeBytes': 3740000,
+            'segmentCount': 2,
+            'skippedSegments': <int>[],
+            'audioGapSegments': <int>[1],
+            'reason': null,
+            'alreadyMerged': false,
+          });
+      expect(merged.recordingId, 'rec-1');
+      expect(merged.filePath, '/docs/rec-1_final.mp4');
+      expect(merged.status, 'ready');
+      expect(merged.totalDurationMs, 11987);
+      expect(merged.totalSizeBytes, 3740000);
+      expect(merged.segmentCount, 2);
+      expect(merged.skippedSegments, isEmpty);
+      expect(merged.audioGapSegments, <int>[1]);
+      expect(merged.reason, isNull);
+      expect(merged.alreadyMerged, isFalse);
+    });
+
+    test('RecordingMergedInfo fallido lee el motivo sin medidas', () {
+      final RecordingMergedInfo merged =
+          RecordingMergedInfo.fromMap(<Object?, Object?>{
+            'recordingId': 'rec-1',
+            'status': 'finalizing',
+            'segmentCount': 2,
+            'skippedSegments': <int>[1],
+            'reason': 'storage_full',
+          });
+      expect(merged.status, 'finalizing');
+      expect(merged.filePath, isNull);
+      expect(merged.totalDurationMs, isNull);
+      expect(merged.totalSizeBytes, isNull);
+      expect(merged.skippedSegments, <int>[1]);
+      expect(merged.reason, 'storage_full');
+    });
+
     test('RecordingStatusSnapshot se construye desde el mapa', () {
       final RecordingStatusSnapshot snapshot =
           RecordingStatusSnapshot.fromMap(<Object?, Object?>{

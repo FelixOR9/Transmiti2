@@ -135,6 +135,17 @@ abstract final class StreamContract {
   static const String eventRecordingStopped = 'recording_stopped';
   static const String eventRecordingError = 'recording_error';
 
+  /// Fusión completada o abortada (3.1.4, J1-b): se emite al terminar
+  /// la fusión asíncrona tras el stop. Lleva `recordingId`, `filePath`
+  /// (final, solo en éxito), `status` (`ready` en éxito, `corrupt` si
+  /// la fusión fracasó de forma definitiva, `finalizing` si el fracaso
+  /// es reintentable y la fila queda pendiente de reanudación — J1-c),
+  /// `totalDurationMs` y `totalSizeBytes` MEDIDOS del fusionado (solo
+  /// en éxito), `segmentCount`, `skippedSegments` (índices afectados
+  /// por el aborto), `audioGapSegments` y `reason` (motivo del aborto,
+  /// `null` en éxito). Espejo en Kotlin (`StreamContract.kt`).
+  static const String eventRecordingMerged = 'recording_merged';
+
   /// Pérdida de audio en caliente (3.1.3, plan §8.1):
   /// `{recordingId, reason, segmentIndex, message}`. `reason` es uno
   /// de `audio_dead_object`, `audio_invalid_operation`,
@@ -800,6 +811,79 @@ class RecordingStoppedInfo {
       quietestSecondNonZero:
           (map['quietestSecondNonZero'] as num?)?.toInt(),
       silencePeak: (map['silencePeak'] as num?)?.toInt(),
+    );
+  }
+}
+
+/// Resultado de la fusión de segmentos (evento `recording_merged`,
+/// 3.1.4, J1-b): el fusionado `<id>_final.mp4` o el motivo del aborto.
+class RecordingMergedInfo {
+  const RecordingMergedInfo({
+    required this.recordingId,
+    this.filePath,
+    required this.status,
+    this.totalDurationMs,
+    this.totalSizeBytes,
+    this.segmentCount = 0,
+    this.skippedSegments = const <int>[],
+    this.audioGapSegments = const <int>[],
+    this.reason,
+    this.alreadyMerged = false,
+  });
+
+  final String recordingId;
+
+  /// Ruta del final fusionado; `null` si la fusión abortó (no hay
+  /// final que señalar: la fila conserva su `file_path` previsto).
+  final String? filePath;
+
+  /// `ready` (éxito, con medidas del fusionado), `corrupt` (fracaso
+  /// definitivo) o `finalizing` (fracaso reintentable: la fila queda
+  /// pendiente de reanudación, J1-c).
+  final String status;
+
+  /// Duración y tamaño MEDIDOS del fusionado; `null` si abortó.
+  final int? totalDurationMs;
+  final int? totalSizeBytes;
+
+  /// Segmentos fusionados (o considerados, si abortó).
+  final int segmentCount;
+
+  /// Índices afectados por el aborto (hueco, corrupto, pendiente);
+  /// vacío en éxito.
+  final List<int> skippedSegments;
+
+  /// Segmentos sin pista de audio (hueco registrado, plan §2.4.8).
+  final List<int> audioGapSegments;
+
+  /// Motivo del aborto (`merge_skipped_gap`, `storage_full`, ...);
+  /// `null` en éxito.
+  final String? reason;
+
+  /// `true` si el `_final.mp4` ya existía verificado (no re-fusión).
+  final bool alreadyMerged;
+
+  factory RecordingMergedInfo.fromMap(Map<Object?, Object?> map) {
+    List<int> readIndices(Object? value) {
+      final List<Object?> raw =
+          (value as List?)?.cast<Object?>() ?? <Object?>[];
+      return raw
+          .whereType<num>()
+          .map((n) => n.toInt())
+          .toList();
+    }
+
+    return RecordingMergedInfo(
+      recordingId: map['recordingId'] as String? ?? '',
+      filePath: map['filePath'] as String?,
+      status: map['status'] as String? ?? '',
+      totalDurationMs: (map['totalDurationMs'] as num?)?.toInt(),
+      totalSizeBytes: (map['totalSizeBytes'] as num?)?.toInt(),
+      segmentCount: (map['segmentCount'] as num?)?.toInt() ?? 0,
+      skippedSegments: readIndices(map['skippedSegments']),
+      audioGapSegments: readIndices(map['audioGapSegments']),
+      reason: map['reason'] as String?,
+      alreadyMerged: map['alreadyMerged'] as bool? ?? false,
     );
   }
 }

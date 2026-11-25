@@ -558,6 +558,47 @@ class SegmentMergerTest {
     }
 
     @Test
+    fun `merge emite progreso por fases para la notificacion del FGS`() {
+        // J1-b: VALIDATING → COPYING 0/2 → 1/2 → 2/2 → VERIFYING 2/2.
+        val seg0File = createSegmentFile(0)
+        val seg1File = createSegmentFile(1)
+        writeSidecar(
+            listOf(
+                trustedEntry(seg0File, 0, "ready", 60_000L, 59_920L),
+                trustedEntry(seg1File, 1, "ready", 60_000L, 59_950L),
+            ),
+        )
+        val data = mapOf(
+            0 to segmentData(60_000L, 59_920L, avOffsetMs = 120L),
+            1 to segmentData(60_000L, 59_950L, avOffsetMs = 90L),
+        )
+        val videoPerSegment = videoSamples(60_000L).size
+        val audioSeg0 = audioSamples(59_920L, 120_000L).size
+        val audioSeg1 = audioSamples(59_950L, 90_000L).size
+        val verifier = FakeSegmentVerifier()
+        verifier.finalResult = tmpReady2x60(
+            videoPerSegment, audioSeg0, audioSeg1,
+        )
+        val (merger, _) = buildMerger(data, verifier)
+        val seen = mutableListOf<MergeProgress>()
+        val result = runBlocking {
+            merger.merge(RECORDING_ID) { progress -> seen += progress }
+        }
+
+        assertTrue(result.success)
+        assertEquals(
+            listOf(
+                MergeProgress(MergeStage.VALIDATING, 0, 0),
+                MergeProgress(MergeStage.COPYING, 0, 2),
+                MergeProgress(MergeStage.COPYING, 1, 2),
+                MergeProgress(MergeStage.COPYING, 2, 2),
+                MergeProgress(MergeStage.VERIFYING, 2, 2),
+            ),
+            seen,
+        )
+    }
+
+    @Test
     fun `entrada con sidecar desordenado se fusiona en orden canonico`() {
         val seg0File = createSegmentFile(0)
         val seg1File = createSegmentFile(1)

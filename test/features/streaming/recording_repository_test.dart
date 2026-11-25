@@ -92,6 +92,66 @@ void main() {
     expect(row.updatedAtMs, 2000);
   });
 
+  test('updateOnMerged marca ready con las medidas del fusionado', () async {
+    final SqliteRecordingRepository repo = await open();
+    await repo.insertRecording(
+      recordingId: 'rec_20261118_120000_ab12',
+      resolution: '720p',
+      fps: 30,
+      videoBitrateBps: 2500000,
+      nowMs: 1000,
+    );
+    await repo.updateOnStop(
+      recordingId: 'rec_20261118_120000_ab12',
+      status: 'finalizing',
+      durationMs: 12000,
+      sizeBytes: 3750000,
+      nowMs: 2000,
+    );
+
+    await repo.updateOnMerged(
+      recordingId: 'rec_20261118_120000_ab12',
+      status: 'ready',
+      durationMs: 11987,
+      sizeBytes: 3740000,
+      nowMs: 3000,
+    );
+
+    final RecordingRow? row = await repo.byRecordingId(
+      'rec_20261118_120000_ab12',
+    );
+    expect(row!.status, 'ready');
+    expect(row.durationMs, 11987);
+    expect(row.sizeBytes, 3740000);
+    expect(row.updatedAtMs, 3000);
+    expect(
+      row.filePath,
+      '/docs/recordings/rec_20261118_120000_ab12_final.mp4',
+    );
+  });
+
+  test('updateOnMerged marca corrupt si la fusión fracasó', () async {
+    final SqliteRecordingRepository repo = await open();
+    await repo.insertRecording(
+      recordingId: 'rec_20261118_120000_ab12',
+      resolution: '720p',
+      fps: 30,
+      videoBitrateBps: 2500000,
+      nowMs: 1000,
+    );
+
+    await repo.updateOnMerged(
+      recordingId: 'rec_20261118_120000_ab12',
+      status: 'corrupt',
+      nowMs: 2000,
+    );
+
+    final RecordingRow? row = await repo.byRecordingId(
+      'rec_20261118_120000_ab12',
+    );
+    expect(row!.status, 'corrupt');
+  });
+
   test('updateOnStop marca corrupt cuando no hay segmento utilizable', () async {
     final SqliteRecordingRepository repo = await open();
     await repo.insertRecording(
@@ -164,6 +224,31 @@ void main() {
 
     expect(interrupted.length, 1);
     expect(interrupted.first.recordingId, 'rec_20261118_110000_aa11');
+  });
+
+  test('interrupted incluye una fila en finalizing (fusión pendiente)',
+      () async {
+    final SqliteRecordingRepository repo = await open();
+    await repo.insertRecording(
+      recordingId: 'rec_20261118_120000_ab12',
+      resolution: '720p',
+      fps: 30,
+      videoBitrateBps: 2500000,
+      nowMs: 1000,
+    );
+    await repo.updateOnStop(
+      recordingId: 'rec_20261118_120000_ab12',
+      status: 'finalizing',
+      durationMs: 12000,
+      sizeBytes: 3750000,
+      nowMs: 2000,
+    );
+
+    final List<RecordingRow> interrupted = await repo.interrupted();
+
+    expect(interrupted.length, 1);
+    expect(interrupted.first.recordingId, 'rec_20261118_120000_ab12');
+    expect(interrupted.first.status, 'finalizing');
   });
 
   test('byFileName encuentra la fila por el nombre del archivo', () async {

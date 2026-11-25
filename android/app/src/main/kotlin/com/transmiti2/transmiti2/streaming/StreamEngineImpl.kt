@@ -9,6 +9,10 @@ import android.view.WindowManager
 import com.transmiti2.transmiti2.BuildConfig
 import com.transmiti2.transmiti2.streaming.recording.DefaultSegmentVerifier
 import com.transmiti2.transmiti2.streaming.recording.ErrorTrigger
+import com.transmiti2.transmiti2.streaming.recording.MergeProgress
+import com.transmiti2.transmiti2.streaming.recording.MergeResult
+import com.transmiti2.transmiti2.streaming.recording.MergeStage
+import com.transmiti2.transmiti2.streaming.recording.OwnershipToken
 import com.transmiti2.transmiti2.streaming.recording.RecordingException
 import com.transmiti2.transmiti2.streaming.recording.RecordingFileStore
 import com.transmiti2.transmiti2.streaming.recording.RecordingResult
@@ -17,12 +21,16 @@ import com.transmiti2.transmiti2.streaming.recording.RecordingStatusSnapshot
 import com.transmiti2.transmiti2.streaming.recording.ReconciledSegmentOutcome
 import com.transmiti2.transmiti2.streaming.recording.ReconciliationSummary
 import com.transmiti2.transmiti2.streaming.recording.RegistryEntrySnapshot
+import com.transmiti2.transmiti2.streaming.recording.SegmentMerger
 import com.transmiti2.transmiti2.streaming.recording.SegmentStatus
+import com.transmiti2.transmiti2.streaming.recording.mergeFailureIsRetryable
 import com.transmiti2.transmiti2.streaming.test.TestEventResult
 import com.transmiti2.transmiti2.streaming.test.TestEventType
 import com.transmiti2.transmiti2.streaming.test.TestHooks
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -30,6 +38,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -185,6 +194,22 @@ class StreamEngineImpl(
      * parámetro con defecto: las construcciones existentes no cambian.
      */
     private val testHooks: TestHooks = TestHooks.NO_OP,
+    /**
+     * Ejecutor de la fusión (3.1.4, J1-b; costura de pruebas): recibe
+     * el id y el callback de progreso y devuelve el [MergeResult].
+     * Por defecto `null`: el motor construye el [SegmentMerger] real
+     * con el `context` (misma carpeta y verificador que la sesión).
+     * Sin `context` ni ejecutor no hay fusión (las unitarias del
+     * motor sin Android no fusionan: el stop se comporta como antes).
+     * Las pruebas del motor pasan aquí un ejecutor enlatado (con
+     * puerta controlable) sin extractor/muxer reales.
+     */
+    private val mergeRunner: (
+        suspend (
+            recordingId: String,
+            onProgress: ((MergeProgress) -> Unit)?,
+        ) -> MergeResult
+    )? = null,
 ) : StreamEngine {
 
     private enum class State {
@@ -226,6 +251,47 @@ class StreamEngineImpl(
      * grabación terminó y su parada ya limpió el id).
      */
     private val activeRecordingId = AtomicReference<String?>(null)
+
+    /**
+     * Fusiones en curso (3.1.4, J1-b; J0.2): número de fusiones
+     * asíncronas vivas. Mientras es > 0 el FGS NO se detiene: la
+     * última fusión que termina lo detiene vía el helper único
+     * (con el `reason`/`origin` de su parada). Sin fusiones en
+     * curso, la parada detiene el FGS como antes. El contador (y
+     * no un booleano) permite dos fusiones de ids distintos a la
+     * vez; la de un mismo id nunca se duplica (`mergeTriggeredIds`
+     * + reserva del grupo).
+     */
+    private val mergeInFlightCount = AtomicInteger(0)
+
+    /**
+     * Ids para los que ya se disparó una fusión en este proceso
+     * (3.1.4, J1-b): `stop()` devuelve el MISMO resultado en
+     * llamadas repetidas (el ganador lo cachea), así que sin esta
+     * marca un segundo `stop()` tras el primero —o un
+     * `stopRecordingIfActive()` tras una parada normal— volvería a
+     * fusionar el mismo id. La reanudación (J1-c) limpia la marca
+     * con [clearMergeTriggered] antes de reintentar un id.
+     */
+    private val mergeTriggeredIds = ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * Fusionador real (3.1.4, J1-b): perezoso, con el mismo
+     * `context` que la sesión (misma carpeta `<filesDir>/recordings/`
+     * y mismo verificador). `null` sin `context` (pruebas sin
+     * Android): sin fusionador no hay fusión. Solo se usa cuando no
+     * hay [mergeRunner] inyectado.
+     */
+    private val segmentMergerLazy = lazy {
+        context?.let { ctx ->
+            SegmentMerger(
+                fileStore = RecordingFileStore(
+                    File(ctx.filesDir, "recordings"),
+                ),
+                verifier = DefaultSegmentVerifier(ctx, mainDispatcher),
+            )
+        }
+    }
 
     private var state = State.IDLE
     private var handle: SurfaceProducerHandle? = null
@@ -1141,8 +1207,13 @@ class StreamEngineImpl(
      * `service_stopped` cuando hubo grabación (J3-b: con
      * `reason=normal_stop`; si ganó la parada por error, el evento
      * ya salió con `reason=error_stop` y no se duplica).
-     * `filePath` es el primer segmento (la ruta final fusionada llega
-     * en 3.1.4; los segmentos se identifican por nombre, plan §8.1).
+     * `filePath` es el primer segmento; la ruta final fusionada
+     * llega en el evento `recording_merged` (J1-b, 3.1.4) y la fila
+     * queda en `finalizing` hasta entonces.
+     * J1-b: tras un stop con ≥1 segmento utilizable se lanza la
+     * fusión asíncrona (el stop sigue siendo rápido) y el FGS
+     * permanece vivo durante ella (J0.2), con notificación de
+     * progreso; lo detiene la terminación de la fusión.
      */
     override suspend fun stopRecording(): RecordingInfo =
         stopRecordingInternal(fgsStopOrigin = null)
@@ -1185,12 +1256,32 @@ class StreamEngineImpl(
                 // anterior). J3-c: el origen de `FGS_STOPPED` es el
                 // de esta llamada (`notification` desde la
                 // notificación, `normal_stop` en el resto).
-                stopForegroundServiceOnce(
-                    reason = "normal_stop",
-                    recordingId = stopped?.takeIf { it.status != "idle" }
-                        ?.recordingId,
-                    fgsStopOrigin = fgsStopOrigin,
-                )
+                // J1-b: si arranca una fusión, el FGS sigue vivo
+                // durante ella (J0.2) y lo detiene su terminación;
+                // si no hay fusión en curso, se para como antes.
+                // `maybeStartMergeAfterStop` nunca lanza salvo
+                // cancelación (degrada a no fusionar).
+                val mergeStarted = try {
+                    stopped?.let {
+                        maybeStartMergeAfterStop(
+                            result = it,
+                            stopReason = "normal_stop",
+                            fgsStopOrigin = fgsStopOrigin,
+                        )
+                    } ?: false
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    false
+                }
+                if (!mergeStarted && mergeInFlightCount.get() == 0) {
+                    stopForegroundServiceOnce(
+                        reason = "normal_stop",
+                        recordingId = stopped?.takeIf { it.status != "idle" }
+                            ?.recordingId,
+                        fgsStopOrigin = fgsStopOrigin,
+                    )
+                }
                 stopped?.let {
                     activeRecordingId.compareAndSet(it.recordingId, null)
                 }
@@ -1221,6 +1312,266 @@ class StreamEngineImpl(
             quietestSecondPeak = result.quietestSecondPeak,
             quietestSecondNonZero = result.quietestSecondNonZero,
             silencePeak = result.silencePeak,
+        )
+    }
+
+    /**
+     * Limpia la marca de fusión disparada para un id (3.1.4, J1-b):
+     * la reanudación (J1-c) lo llama antes de reintentar la fusión
+     * de un id cuyo intento anterior quedó en `finalizing`.
+     */
+    internal fun clearMergeTriggered(recordingId: String) {
+        mergeTriggeredIds.remove(recordingId)
+    }
+
+    /**
+     * Orquestación de la fusión tras el stop (3.1.4, J1-b; J0.1/J0.2;
+     * plan §2.4.1 y §2.4.10). Tras un `stop()` exitoso con ≥1 segmento
+     * utilizable, reserva el grupo y lanza la fusión ASÍNCRONA: el
+     * stop sigue siendo rápido (no bloquea `recording_stopped` con
+     * una fusión que puede tardar minutos) y el FGS permanece vivo
+     * durante ella, con notificación de progreso; al terminar, la
+     * fusión emite `recording_merged` y detiene el FGS vía el helper
+     * único (con el `stopReason`/`fgsStopOrigin` de esta parada).
+     *
+     * Devuelve `true` si se lanzó una fusión (el llamador NO debe
+     * parar el FGS). Devuelve `false` sin fusionar —y el llamador
+     * para el FGS como antes— si: el resultado es `idle`/vacío, no
+     * hay segmentos utilizables, el id ya fusionó en este proceso,
+     * no hay fusionador (sin `context` ni `mergeRunner`), el grupo
+     * está activo/reservado, o lanzar falló. Nunca lanza salvo
+     * cancelación: cualquier fallo interno degrada a no fusionar
+     * (guard_new_execution_path).
+     */
+    private suspend fun maybeStartMergeAfterStop(
+        result: RecordingResult,
+        stopReason: String?,
+        fgsStopOrigin: String?,
+    ): Boolean {
+        val recordingId = result.recordingId
+        if (result.status == "idle" || recordingId.isEmpty()) return false
+        val usable = result.segments.any {
+            it.status != SegmentStatus.CORRUPT
+        }
+        if (!usable) return false
+        val runner: suspend (
+            String,
+            ((MergeProgress) -> Unit)?,
+        ) -> MergeResult = mergeRunner ?: segmentMergerLazy.value?.let { merger ->
+            { id: String, onProgress: ((MergeProgress) -> Unit)? ->
+                merger.merge(id, onProgress)
+            }
+        } ?: return false
+        if (!mergeTriggeredIds.add(recordingId)) {
+            Transmiti2Logger.d(
+                "merge: $recordingId ya fusionó en este proceso; " +
+                    "no se re-dispara",
+            )
+            return false
+        }
+        val session = recordingSession
+        if (session == null) {
+            mergeTriggeredIds.remove(recordingId)
+            return false
+        }
+        val token: OwnershipToken = try {
+            session.tryReserveGroupForMerge(recordingId)
+                ?: run {
+                    Transmiti2Logger.d(
+                        "merge: grupo $recordingId activo o reservado; " +
+                            "no se fusiona",
+                    )
+                    mergeTriggeredIds.remove(recordingId)
+                    return false
+                }
+        } catch (e: CancellationException) {
+            mergeTriggeredIds.remove(recordingId)
+            throw e
+        } catch (_: Exception) {
+            mergeTriggeredIds.remove(recordingId)
+            return false
+        }
+        mergeInFlightCount.incrementAndGet()
+        try {
+            scope.launch {
+                runMergeAndFinish(
+                    recordingId = recordingId,
+                    stopSegmentIndices = result.segments.map { it.index },
+                    stopSegmentCount = result.segments.size,
+                    token = token,
+                    session = session,
+                    runner = runner,
+                    stopReason = stopReason,
+                    fgsStopOrigin = fgsStopOrigin,
+                )
+            }
+        } catch (e: CancellationException) {
+            // El scope se está destruyendo: la reserva queda
+            // retenida hasta la muerte del proceso (el registro es
+            // por proceso y el motor ya no vive).
+            mergeInFlightCount.decrementAndGet()
+            throw e
+        } catch (_: Exception) {
+            mergeInFlightCount.decrementAndGet()
+            try {
+                scope.launch {
+                    session.releaseGroupForMerge(recordingId, token)
+                }
+            } catch (_: Exception) {
+            }
+            return false
+        }
+        return true
+    }
+
+    /**
+     * Ejecuta una fusión lanzada por [maybeStartMergeAfterStop] y
+     * cierra su ciclo (J1-b): fusiona, registra el resultado en el
+     * sidecar, emite `recording_merged` y —solo cuando es la última
+     * fusión en curso— detiene el FGS vía el helper único. La reserva
+     * del grupo se libera siempre (también al cancelar). Nunca lanza
+     * fuera salvo cancelación: un fallo inesperado del ejecutor
+     * emite `recording_merged` con `status=corrupt` y motivo
+     * `muxer_error` para que Dart no espere eternamente; la
+     * emisión del evento tampoco tumba el cierre.
+     */
+    private suspend fun runMergeAndFinish(
+        recordingId: String,
+        stopSegmentIndices: List<Int>,
+        stopSegmentCount: Int,
+        token: OwnershipToken,
+        session: RecordingSession,
+        runner: suspend (
+            String,
+            ((MergeProgress) -> Unit)?,
+        ) -> MergeResult,
+        stopReason: String?,
+        fgsStopOrigin: String?,
+    ) {
+        try {
+            var runnerFailed = false
+            val result: MergeResult? = try {
+                runner(recordingId) { progress ->
+                    reportMergeProgress(progress)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Transmiti2Logger.e(
+                    "merge: $recordingId falló el ejecutor: " +
+                        e.javaClass.simpleName,
+                )
+                runnerFailed = true
+                null
+            }
+            val effective = result ?: MergeResult(
+                success = false,
+                reason = "muxer_error",
+                detailReason = "merge_runner_failed",
+                recordingId = recordingId,
+                finalFile = null,
+                status = null,
+                segmentCount = 0,
+                segmentIndices = emptyList(),
+                audioGapSegments = emptyList(),
+                partialSegments = emptyList(),
+                affectedIndices = stopSegmentIndices,
+                videoSampleCount = 0,
+                audioSampleCount = 0,
+                totalVideoDurationMs = null,
+                totalAudioDurationMs = null,
+                mergedDurationMs = null,
+                mergedSizeBytes = null,
+                mergedAvOffsetMs = null,
+                mergedAvDurationDiffMs = null,
+                avOffsetDriftMsBySegment = emptyMap(),
+                alreadyMerged = false,
+                duplicateResolution = null,
+            )
+            try {
+                if (!runnerFailed) {
+                    session.recordMergeResult(effective, stopSegmentIndices)
+                }
+                emitEvent(
+                    StreamContract.EVENT_RECORDING_MERGED,
+                    recordingMergedPayload(effective, stopSegmentCount),
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // La emisión del evento no tumba el cierre: el FGS
+                // se detiene en el `finally` de abajo igualmente.
+            }
+        } finally {
+            withContext(NonCancellable) {
+                try {
+                    session.releaseGroupForMerge(recordingId, token)
+                } catch (_: Exception) {
+                }
+                if (mergeInFlightCount.decrementAndGet() == 0) {
+                    stopForegroundServiceOnce(
+                        reason = stopReason,
+                        recordingId = recordingId,
+                        fgsStopOrigin = fgsStopOrigin,
+                    )
+                }
+            }
+        }
+    }
+
+    /** Progreso de la fusión a la notificación del FGS (J1-b, J0.2). */
+    private fun reportMergeProgress(progress: MergeProgress) {
+        val fgs = foregroundService ?: return
+        try {
+            fgs.updateMergeProgress(mergeProgressText(progress))
+        } catch (_: Exception) {
+        }
+    }
+
+    /** Texto de progreso de la fusión para la notificación. */
+    private fun mergeProgressText(progress: MergeProgress): String =
+        when (progress.stage) {
+            MergeStage.VALIDATING -> "validando segmentos"
+            MergeStage.COPYING ->
+                "segmento ${progress.segmentsDone} " +
+                    "de ${progress.segmentCount}"
+            MergeStage.VERIFYING -> "verificando fusionado"
+        }
+
+    /**
+     * Payload del evento `recording_merged` (J1-b; plan §2.4.10):
+     * `status` es `ready` en éxito (el fusionado PARTIAL colapsa a
+     * `ready`, como la fila v2), `finalizing` si el aborto es
+     * reintentable (la fila queda pendiente de reanudación, J1-c) y
+     * `corrupt` si el fracaso es definitivo. `segmentCount` son los
+     * segmentos fusionados (o los del stop si el fusionador no los
+     * trae, p. ej. final ya existente); `skippedSegments` son los
+     * índices afectados por el aborto.
+     */
+    private fun recordingMergedPayload(
+        result: MergeResult,
+        stopSegmentCount: Int,
+    ): Map<String, Any?> {
+        val status = when {
+            result.success -> "ready"
+            mergeFailureIsRetryable(result.reason) -> "finalizing"
+            else -> "corrupt"
+        }
+        return mapOf(
+            "recordingId" to result.recordingId,
+            "filePath" to result.finalFile?.absolutePath,
+            "status" to status,
+            "totalDurationMs" to result.mergedDurationMs,
+            "totalSizeBytes" to result.mergedSizeBytes,
+            "segmentCount" to if (result.segmentIndices.isNotEmpty()) {
+                result.segmentIndices.size
+            } else {
+                stopSegmentCount
+            },
+            "skippedSegments" to result.affectedIndices,
+            "audioGapSegments" to result.audioGapSegments,
+            "reason" to result.reason,
+            "alreadyMerged" to result.alreadyMerged,
         )
     }
 
@@ -1445,16 +1796,44 @@ class StreamEngineImpl(
             // `FGS_STOPPED`: no se puede atribuir el origen sin
             // inventarlo. Cuando la sesión ya avisó (`error_stop`),
             // la guarda bloquea el duplicado.
+            // J1-b: si arranca una fusión, el FGS sigue vivo durante
+            // ella (J0.2) y lo detiene su terminación, con el mismo
+            // `reason` (`null`, sin evento) y el mismo origen que la
+            // parada directa de este camino.
             val stopped = stoppedResult
-            stopForegroundServiceOnce(
-                reason = null,
-                recordingId = null,
-                fgsStopOrigin = if (stopped != null && stopped.status != "idle") {
-                    if (errorCode != null) "camera_error" else "normal_stop"
-                } else {
-                    null
-                },
-            )
+            val mergeStarted = try {
+                stopped?.let {
+                    maybeStartMergeAfterStop(
+                        result = it,
+                        stopReason = null,
+                        fgsStopOrigin =
+                            if (it.status != "idle") {
+                                if (errorCode != null) {
+                                    "camera_error"
+                                } else {
+                                    "normal_stop"
+                                }
+                            } else {
+                                null
+                            },
+                    )
+                } ?: false
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                false
+            }
+            if (!mergeStarted && mergeInFlightCount.get() == 0) {
+                stopForegroundServiceOnce(
+                    reason = null,
+                    recordingId = null,
+                    fgsStopOrigin = if (stopped != null && stopped.status != "idle") {
+                        if (errorCode != null) "camera_error" else "normal_stop"
+                    } else {
+                        null
+                    },
+                )
+            }
         }
     }
 

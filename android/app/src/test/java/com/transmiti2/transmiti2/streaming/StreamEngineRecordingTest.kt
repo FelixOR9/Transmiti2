@@ -4,6 +4,9 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.view.Surface
 import com.transmiti2.transmiti2.streaming.recording.ErrorTrigger
+import com.transmiti2.transmiti2.streaming.recording.MergeProgress
+import com.transmiti2.transmiti2.streaming.recording.MergeResult
+import com.transmiti2.transmiti2.streaming.recording.MergeStage
 import com.transmiti2.transmiti2.streaming.recording.RecordingException
 import com.transmiti2.transmiti2.streaming.recording.RecordingFileStore
 import com.transmiti2.transmiti2.streaming.recording.RecordingResult
@@ -25,6 +28,7 @@ import com.transmiti2.transmiti2.streaming.test.TestEventResult
 import com.transmiti2.transmiti2.streaming.test.TestEventType
 import com.transmiti2.transmiti2.streaming.test.TestHooks
 import java.io.File
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
@@ -331,6 +335,8 @@ class StreamEngineRecordingTest {
         var startResult = true
         /** Último escenario recibido (3.1.3). */
         var lastScenario: RecordingScenario? = null
+        /** Textos de progreso de fusión recibidos (J1-b). */
+        val mergeProgressTexts = mutableListOf<String>()
 
         override fun startRecordingService(scenario: RecordingScenario): Boolean {
             startCalls++
@@ -340,6 +346,10 @@ class StreamEngineRecordingTest {
 
         override fun stopRecordingService() {
             stopCalls++
+        }
+
+        override fun updateMergeProgress(progressText: String) {
+            mergeProgressTexts += progressText
         }
     }
 
@@ -398,6 +408,13 @@ class StreamEngineRecordingTest {
         val fgs = FakeForegroundService()
         /** Ganchos capturadores (J3-c): por defecto los del fixture. */
         val hooks = CapturingTestHooks()
+        /** Ejecutor de fusión enlatado (J1-b); `null` = sin fusión. */
+        var mergeRunner: (
+            suspend (
+                String,
+                ((MergeProgress) -> Unit)?,
+            ) -> MergeResult
+        )? = null
 
         fun engine(
             useRecording: Boolean = true,
@@ -418,6 +435,7 @@ class StreamEngineRecordingTest {
                 },
                 foregroundService = if (useFgs) fgs else null,
                 testHooks = testHooks,
+                mergeRunner = mergeRunner,
             )
         }
 
@@ -1273,4 +1291,272 @@ class StreamEngineRecordingTest {
         val resultMap = engine.reconciliationResultMap(summary)
         assertEquals("DONE", resultMap["state"])
     }
+
+    // --- J1-b (3.1.4): orquestación stop → fusión asíncrona --------
+
+    /** Eventos `recording_merged` recibidos, en orden. */
+    private fun Fixture.mergedEvents(): List<Map<String, Any?>> {
+        return events.filter {
+            it["type"] == StreamContract.EVENT_RECORDING_MERGED
+        }
+    }
+
+    private fun successfulMergeResult(): MergeResult = MergeResult(
+        success = true,
+        reason = null,
+        detailReason = null,
+        recordingId = "rec_20261118_120000_ab12",
+        finalFile = File(
+            "/docs/recordings/rec_20261118_120000_ab12_final.mp4",
+        ),
+        status = SegmentStatus.READY,
+        segmentCount = 1,
+        segmentIndices = listOf(0),
+        audioGapSegments = emptyList(),
+        partialSegments = emptyList(),
+        affectedIndices = emptyList(),
+        videoSampleCount = 360,
+        audioSampleCount = 2800,
+        totalVideoDurationMs = 12_000,
+        totalAudioDurationMs = 11_987,
+        mergedDurationMs = 11_987,
+        mergedSizeBytes = 3_740_000,
+        mergedAvOffsetMs = 103,
+        mergedAvDurationDiffMs = 13,
+        avOffsetDriftMsBySegment = mapOf(0 to 0L),
+        alreadyMerged = false,
+        duplicateResolution = null,
+    )
+
+    private fun failedMergeResult(reason: String): MergeResult = MergeResult(
+        success = false,
+        reason = reason,
+        detailReason = null,
+        recordingId = "rec_20261118_120000_ab12",
+        finalFile = null,
+        status = null,
+        segmentCount = 0,
+        segmentIndices = emptyList(),
+        audioGapSegments = emptyList(),
+        partialSegments = emptyList(),
+        affectedIndices = listOf(0),
+        videoSampleCount = 0,
+        audioSampleCount = 0,
+        totalVideoDurationMs = null,
+        totalAudioDurationMs = null,
+        mergedDurationMs = null,
+        mergedSizeBytes = null,
+        mergedAvOffsetMs = null,
+        mergedAvDurationDiffMs = null,
+        avOffsetDriftMsBySegment = emptyMap(),
+        alreadyMerged = false,
+        duplicateResolution = null,
+    )
+
+    @Test
+    fun `stopRecording con fusion asincrona mantiene el FGS vivo con progreso y lo detiene al terminar`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.recording.stopResult = fixture.readyStopResult()
+            val gate = CompletableDeferred<MergeResult>()
+            var runnerCalls = 0
+            fixture.mergeRunner = { _, onProgress ->
+                runnerCalls++
+                onProgress?.invoke(
+                    MergeProgress(MergeStage.VALIDATING, 0, 0),
+                )
+                onProgress?.invoke(
+                    MergeProgress(MergeStage.COPYING, 0, 1),
+                )
+                gate.await()
+            }
+            val engine = fixture.engine()
+            engine.startPreview()
+            engine.startRecording(RecordingOptions())
+
+            // El stop es rápido: vuelve sin esperar a la fusión.
+            val info = engine.stopRecording()
+            assertEquals("ready", info.status)
+            assertEquals(1, runnerCalls)
+            // FGS vivo durante la fusión: sin parada ni
+            // `service_stopped`, con progreso en la notificación.
+            assertEquals(0, fixture.fgs.stopCalls)
+            assertEquals(0, fixture.serviceStoppedEvents().size)
+            assertEquals(0, fixture.mergedEvents().size)
+            assertTrue(fixture.fgs.mergeProgressTexts.isNotEmpty())
+            assertTrue(
+                fixture.fgs.mergeProgressTexts.any {
+                    it.contains("segmento 0 de 1")
+                },
+            )
+
+            // La fusión termina: evento con las medidas y parada del
+            // FGS (una sola vez, con motivo normal_stop).
+            gate.complete(successfulMergeResult())
+            val merged = fixture.mergedEvents()
+            assertEquals(1, merged.size)
+            assertEquals(
+                "rec_20261118_120000_ab12",
+                merged[0]["recordingId"],
+            )
+            assertEquals(
+                "/docs/recordings/rec_20261118_120000_ab12_final.mp4",
+                merged[0]["filePath"],
+            )
+            assertEquals("ready", merged[0]["status"])
+            assertEquals(11_987, merged[0]["totalDurationMs"])
+            assertEquals(3_740_000, merged[0]["totalSizeBytes"])
+            assertEquals(1, merged[0]["segmentCount"])
+            assertEquals(1, fixture.fgs.stopCalls)
+            val stopped = fixture.serviceStoppedEvents()
+            assertEquals(1, stopped.size)
+            assertEquals("normal_stop", stopped[0]["reason"])
+        }
+
+    @Test
+    fun `stopRecording sin segmentos utilizables no fusiona y detiene el FGS como hoy`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.recording.stopResult = RecordingResult.fromSegments(
+                recordingId = "rec_20261118_120000_ab12",
+                segments = listOf(
+                    RecordingSegmentResult(
+                        recordingId = "rec_20261118_120000_ab12",
+                        index = 0,
+                        fileName = "rec_20261118_120000_ab12_seg000.mp4",
+                        filePath = "/docs/recordings/" +
+                            "rec_20261118_120000_ab12_seg000.mp4",
+                        status = SegmentStatus.CORRUPT,
+                        durationMs = null,
+                        sizeBytes = 0,
+                        sampleCount = 0,
+                        keyframeCount = 0,
+                        firstSampleKeyframe = false,
+                        ptsMonotonic = false,
+                        profileIdc = null,
+                        closedCleanly = false,
+                        reason = "sin_muestras",
+                    ),
+                ),
+                errorCode = null,
+                previewRestoreError = null,
+            )
+            var runnerCalls = 0
+            fixture.mergeRunner = { _, _ ->
+                runnerCalls++
+                successfulMergeResult()
+            }
+            val engine = fixture.engine()
+            engine.startPreview()
+            engine.startRecording(RecordingOptions())
+
+            val info = engine.stopRecording()
+
+            assertEquals("corrupt", info.status)
+            assertEquals(0, runnerCalls)
+            assertEquals(0, fixture.mergedEvents().size)
+            assertEquals(1, fixture.fgs.stopCalls)
+        }
+
+    @Test
+    fun `stopRecording con fusion fallida definitiva emite recording_merged corrupt y detiene el FGS`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.recording.stopResult = fixture.readyStopResult()
+            fixture.mergeRunner = { _, _ ->
+                failedMergeResult("merge_verify_failed")
+            }
+            val engine = fixture.engine()
+            engine.startPreview()
+            engine.startRecording(RecordingOptions())
+
+            engine.stopRecording()
+
+            val merged = fixture.mergedEvents()
+            assertEquals(1, merged.size)
+            assertEquals("corrupt", merged[0]["status"])
+            assertEquals("merge_verify_failed", merged[0]["reason"])
+            assertNull(merged[0]["filePath"])
+            assertEquals(listOf(0), merged[0]["skippedSegments"])
+            assertEquals(1, fixture.fgs.stopCalls)
+            assertEquals(1, fixture.serviceStoppedEvents().size)
+        }
+
+    @Test
+    fun `stopRecording con fusion reintentable emite recording_merged finalizing y detiene el FGS`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.recording.stopResult = fixture.readyStopResult()
+            fixture.mergeRunner = { _, _ ->
+                failedMergeResult("storage_full")
+            }
+            val engine = fixture.engine()
+            engine.startPreview()
+            engine.startRecording(RecordingOptions())
+
+            engine.stopRecording()
+
+            val merged = fixture.mergedEvents()
+            assertEquals(1, merged.size)
+            assertEquals("finalizing", merged[0]["status"])
+            assertEquals("storage_full", merged[0]["reason"])
+            assertEquals(1, fixture.fgs.stopCalls)
+        }
+
+    @Test
+    fun `stopRecording dos veces no dispara la fusion dos veces`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.recording.stopResult = fixture.readyStopResult()
+            val gate = CompletableDeferred<MergeResult>()
+            var runnerCalls = 0
+            fixture.mergeRunner = { _, _ ->
+                runnerCalls++
+                gate.await()
+            }
+            val engine = fixture.engine()
+            engine.startPreview()
+            engine.startRecording(RecordingOptions())
+
+            engine.stopRecording()
+            // Segundo stop: la sesión devuelve el mismo resultado
+            // (cacheado) pero la fusión no se re-dispara.
+            engine.stopRecording()
+
+            assertEquals(1, runnerCalls)
+            assertEquals(0, fixture.fgs.stopCalls)
+            assertEquals(0, fixture.mergedEvents().size)
+
+            gate.complete(successfulMergeResult())
+            assertEquals(1, fixture.mergedEvents().size)
+            assertEquals(1, fixture.fgs.stopCalls)
+            assertEquals(1, fixture.serviceStoppedEvents().size)
+        }
+
+    @Test
+    fun `stopPreview con fusion pendiente mantiene el FGS vivo hasta recording_merged`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.recording.stopResult = fixture.readyStopResult()
+            val gate = CompletableDeferred<MergeResult>()
+            fixture.mergeRunner = { _, _ -> gate.await() }
+            val engine = fixture.engine()
+            engine.startPreview()
+            engine.startRecording(RecordingOptions())
+
+            engine.stopPreview()
+
+            // Parada externa: la fusión arrancó y el FGS sigue vivo.
+            assertEquals(0, fixture.fgs.stopCalls)
+            assertEquals(0, fixture.mergedEvents().size)
+
+            gate.complete(successfulMergeResult())
+            assertEquals(1, fixture.mergedEvents().size)
+            assertEquals("ready", fixture.mergedEvents()[0]["status"])
+            assertEquals(1, fixture.fgs.stopCalls)
+            // Este camino no emite `service_stopped` (como la parada
+            // directa de `stopRecordingIfActive`): solo se detiene
+            // el servicio.
+            assertEquals(0, fixture.serviceStoppedEvents().size)
+        }
 }

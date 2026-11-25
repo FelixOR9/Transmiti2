@@ -248,6 +248,8 @@ class ReconciliationGateTest {
         }
 
         override fun stopRecordingService() {}
+
+        override fun updateMergeProgress(progressText: String) {}
     }
 
     private inner class Fixture(

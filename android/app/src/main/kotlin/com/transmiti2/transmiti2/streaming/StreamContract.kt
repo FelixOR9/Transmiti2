@@ -89,6 +89,21 @@ object StreamContract {
     const val EVENT_RECORDING_ERROR = "recording_error"
 
     /**
+     * Evento de 3.1.4 (J1-b): se emite al completarse la fusión
+     * asíncrona tras el stop (o al abortarse). Lleva `recordingId`,
+     * `filePath` (final, solo en éxito), `status` (`ready` en éxito,
+     * `corrupt` si la fusión fracasó de forma definitiva,
+     * `finalizing` si el fracaso es reintentable y la fila queda
+     * pendiente de reanudación — J1-c), `totalDurationMs` y
+     * `totalSizeBytes` MEDIDOS del fusionado (solo en éxito),
+     * `segmentCount`, `skippedSegments` (índices afectados por el
+     * aborto), `audioGapSegments` y `reason` (motivo del aborto,
+     * `null` en éxito). Espejo en
+     * `lib/features/streaming/domain/stream_contract.dart`.
+     */
+    const val EVENT_RECORDING_MERGED = "recording_merged"
+
+    /**
      * Evento de 3.1.3: se emite cuando el audio se pierde en caliente
      * con el video en marcha (plan §2 D7); lleva `recordingId`,
      * `reason`, `segmentIndex` y `message`. No es un error de

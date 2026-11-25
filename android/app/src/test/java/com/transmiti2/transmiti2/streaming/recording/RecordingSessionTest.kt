@@ -3050,4 +3050,179 @@ class RecordingSessionTest {
             assertEquals("ready", result.status)
         }
 
+    // --- J1-b (3.1.4): reserva del grupo y sidecar de fusión ------
+
+    @Test
+    fun `tryReserveGroupForMerge reserva y bloquea la segunda reserva del mismo grupo`() =
+        runBlocking {
+            val session = buildSession()
+            val id = "rec_20261123_120000_ab12"
+
+            val token = session.tryReserveGroupForMerge(id)
+            assertNotNull(token)
+            assertNull(session.tryReserveGroupForMerge(id))
+
+            session.releaseGroupForMerge(id, token!!)
+            assertNotNull(session.tryReserveGroupForMerge(id))
+        }
+
+    @Test
+    fun `tryReserveGroupForMerge rechaza el grupo con grabacion activa`() =
+        runBlocking {
+            val registry = ActiveRecordingRegistry()
+            val session = buildSession(registry = registry)
+            val id = "rec_20261123_120000_ab12"
+
+            val claim = registry.tryClaimRecording(id)
+            assertNotNull(claim)
+            assertNull(session.tryReserveGroupForMerge(id))
+
+            registry.releaseRecording(id, claim!!)
+            assertNotNull(session.tryReserveGroupForMerge(id))
+        }
+
+    @Test
+    fun `recordMergeResult escribe los campos de fusion en el sidecar`() {
+        val session = buildSession()
+        val id = "rec_20261123_120000_ab12"
+        fileStore.writeSidecar(
+            RecordingMetadata(
+                recordingId = id,
+                matchId = null,
+                width = 1280,
+                height = 720,
+                fps = 30,
+                bitrateBps = 2_500_000,
+                rotationDegrees = 90,
+                encoderName = "c2.qti.avc.encoder",
+                profile = 1,
+                bitrateMode = 2,
+                segments = emptyList(),
+            ),
+        )
+        val result = MergeResult(
+            success = true,
+            reason = null,
+            detailReason = null,
+            recordingId = id,
+            finalFile = File(dir, "${id}_final.mp4"),
+            status = SegmentStatus.READY,
+            segmentCount = 2,
+            segmentIndices = listOf(0, 1),
+            audioGapSegments = listOf(1),
+            partialSegments = emptyList(),
+            affectedIndices = emptyList(),
+            videoSampleCount = 360,
+            audioSampleCount = 2800,
+            totalVideoDurationMs = 120_000,
+            totalAudioDurationMs = 119_870,
+            mergedDurationMs = 119_987,
+            mergedSizeBytes = 3_740_000,
+            mergedAvOffsetMs = 103,
+            mergedAvDurationDiffMs = 130,
+            avOffsetDriftMsBySegment = mapOf(0 to 0L, 1 to -80L),
+            alreadyMerged = false,
+            duplicateResolution = null,
+        )
+
+        session.recordMergeResult(result)
+
+        val read = fileStore.readSidecar(id)
+        assertNotNull(read)
+        assertEquals(1_792_000_000_000L, read!!.mergedAtMs)
+        assertEquals(119_987L, read.mergedDurationMs)
+        assertEquals(3_740_000L, read.mergedSizeBytes)
+        assertEquals("ready", read.mergedStatus)
+        assertNull(read.mergedReason)
+        assertEquals(listOf(0, 1), read.mergedSegments)
+        assertEquals(emptyList<Int>(), read.skippedSegments)
+        assertEquals(listOf(1), read.audioGapSegments)
+    }
+
+    @Test
+    fun `recordMergeResult fallido registra failed y los indices afectados`() {
+        val session = buildSession()
+        val id = "rec_20261123_120000_ab12"
+        fileStore.writeSidecar(
+            RecordingMetadata(
+                recordingId = id,
+                matchId = null,
+                width = 1280,
+                height = 720,
+                fps = 30,
+                bitrateBps = 2_500_000,
+                rotationDegrees = 90,
+                encoderName = "c2.qti.avc.encoder",
+                profile = 1,
+                bitrateMode = 2,
+                segments = emptyList(),
+            ),
+        )
+        val result = MergeResult(
+            success = false,
+            reason = "merge_skipped_gap",
+            detailReason = null,
+            recordingId = id,
+            finalFile = null,
+            status = null,
+            segmentCount = 0,
+            segmentIndices = emptyList(),
+            audioGapSegments = emptyList(),
+            partialSegments = emptyList(),
+            affectedIndices = listOf(1),
+            videoSampleCount = 0,
+            audioSampleCount = 0,
+            totalVideoDurationMs = null,
+            totalAudioDurationMs = null,
+            mergedDurationMs = null,
+            mergedSizeBytes = null,
+            mergedAvOffsetMs = null,
+            mergedAvDurationDiffMs = null,
+            avOffsetDriftMsBySegment = emptyMap(),
+            alreadyMerged = false,
+            duplicateResolution = null,
+        )
+
+        session.recordMergeResult(result, listOf(0, 1))
+
+        val read = fileStore.readSidecar(id)
+        assertNotNull(read)
+        assertEquals("failed", read!!.mergedStatus)
+        assertEquals("merge_skipped_gap", read.mergedReason)
+        assertEquals(emptyList<Int>(), read.mergedSegments)
+        assertEquals(listOf(1), read.skippedSegments)
+    }
+
+    @Test
+    fun `recordMergeResult sin sidecar no lanza`() {
+        val session = buildSession()
+        val result = MergeResult(
+            success = true,
+            reason = null,
+            detailReason = null,
+            recordingId = "rec_inexistente",
+            finalFile = null,
+            status = SegmentStatus.READY,
+            segmentCount = 0,
+            segmentIndices = emptyList(),
+            audioGapSegments = emptyList(),
+            partialSegments = emptyList(),
+            affectedIndices = emptyList(),
+            videoSampleCount = 0,
+            audioSampleCount = 0,
+            totalVideoDurationMs = null,
+            totalAudioDurationMs = null,
+            mergedDurationMs = null,
+            mergedSizeBytes = null,
+            mergedAvOffsetMs = null,
+            mergedAvDurationDiffMs = null,
+            avOffsetDriftMsBySegment = emptyMap(),
+            alreadyMerged = false,
+            duplicateResolution = null,
+        )
+
+        session.recordMergeResult(result)
+    }
+
 }
+

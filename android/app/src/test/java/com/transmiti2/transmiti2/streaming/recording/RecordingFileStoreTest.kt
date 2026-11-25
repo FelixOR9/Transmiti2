@@ -432,6 +432,54 @@ class RecordingFileStoreTest {
     }
 
     @Test
+    fun `lector del sidecar round-trip con los campos de fusion`() {
+        // J1-b: el escritor serializa los campos de fusión y el
+        // lector los lee de vuelta (sin lector, una reescritura del
+        // sidecar los perdería).
+        val id = "rec_20261119_134500_cd34"
+        File(dir, "${id}_seg000.mp4").writeText("01234567890")
+        store.writeSidecar(
+            metadataWithVerifiedSegment(id).copy(
+                mergedAtMs = 1_792_000_002_000L,
+                mergedDurationMs = 11_987L,
+                mergedSizeBytes = 3_740_000L,
+                mergedStatus = "ready",
+                mergedReason = null,
+                mergedSegments = listOf(0, 1),
+                skippedSegments = emptyList(),
+                audioGapSegments = listOf(1),
+            ),
+        )
+        val read = store.readSidecar(id)
+        assertTrue(read != null)
+        assertEquals(1_792_000_002_000L, read!!.mergedAtMs)
+        assertEquals(11_987L, read.mergedDurationMs)
+        assertEquals(3_740_000L, read.mergedSizeBytes)
+        assertEquals("ready", read.mergedStatus)
+        assertNull(read.mergedReason)
+        assertEquals(listOf(0, 1), read.mergedSegments)
+        assertEquals(emptyList<Int>(), read.skippedSegments)
+        assertEquals(listOf(1), read.audioGapSegments)
+    }
+
+    @Test
+    fun `lector del sidecar sin campos de fusion los deja en null o vacios`() {
+        val id = "rec_20261119_134500_cd34"
+        File(dir, "${id}_seg000.mp4").writeText("01234567890")
+        store.writeSidecar(metadataWithVerifiedSegment(id))
+        val read = store.readSidecar(id)
+        assertTrue(read != null)
+        assertNull(read!!.mergedAtMs)
+        assertNull(read.mergedDurationMs)
+        assertNull(read.mergedSizeBytes)
+        assertNull(read.mergedStatus)
+        assertNull(read.mergedReason)
+        assertEquals(emptyList<Int>(), read.mergedSegments)
+        assertEquals(emptyList<Int>(), read.skippedSegments)
+        assertEquals(emptyList<Int>(), read.audioGapSegments)
+    }
+
+    @Test
     fun `lector del sidecar JSON corrupto se trata como sin sidecar`() {
         val id = "rec_20261119_134500_cd34"
         store.sidecarFile(id).writeText("{esto no es json")

@@ -72,13 +72,34 @@ data class RecordingMetadata(
     val audioSampleRate: Int? = null,
     val audioChannels: Int? = null,
     val audioEncoderName: String? = null,
+    /**
+     * Campos de fusión (3.1.4, J1-b; plan §2.4.10): resultado del
+     * último intento de fusión a `<id>_final.mp4`. `mergedStatus` es
+     * `ready`/`partial` en éxito (clasificación del fusionado) o
+     * `failed` en aborto; `mergedReason` es el motivo del aborto
+     * (`null` en éxito); `mergedSegments` son los índices
+     * fusionados; `skippedSegments` los afectados por el aborto;
+     * `audioGapSegments` los segmentos sin audio. `null`/vacío =
+     * nunca se ha intentado fusionar. Los escribe
+     * `RecordingSession.recordMergeResult` tras cada intento; el
+     * lector tolerante los lee de vuelta (sin lector, un reescritura
+     * del sidecar los perdería).
+     */
+    val mergedAtMs: Long? = null,
+    val mergedDurationMs: Long? = null,
+    val mergedSizeBytes: Long? = null,
+    val mergedStatus: String? = null,
+    val mergedReason: String? = null,
+    val mergedSegments: List<Int> = emptyList(),
+    val skippedSegments: List<Int> = emptyList(),
+    val audioGapSegments: List<Int> = emptyList(),
 ) {
     /** JSON manual (sin dependencias): solo los campos de texto se escapan. */
     fun toJson(): String {
         val segmentsJson = segments.joinToString(",") { s ->
             """{"index":${s.index},"fileName":"${escapeJson(s.fileName)}","firstEncoderPtsUs":${s.firstEncoderPtsUs ?: "null"},"startWallMs":${s.startWallMs},"status":${s.status?.let { "\"$it\"" } ?: "null"},"durationMs":${s.durationMs ?: "null"},"sizeBytes":${s.sizeBytes ?: "null"},"audioExpected":${s.audioExpected},"hasAudio":${s.hasAudio},"audioDurationMs":${s.audioDurationMs ?: "null"},"audioSampleCount":${s.audioSampleCount ?: "null"},"audioStartOffsetMs":${s.audioStartOffsetMs ?: "null"},"audioReason":${s.audioReason?.let { "\"${escapeJson(it)}\"" } ?: "null"},"verifiedAtMs":${s.verifiedAtMs ?: "null"},"verifierVersion":${s.verifierVersion ?: "null"},"verificationReason":${s.verificationReason?.let { "\"${escapeJson(it)}\"" } ?: "null"},"fpsMeasured":${s.fpsMeasured ?: "null"}}"""
         }
-        return """{"recordingId":"${escapeJson(recordingId)}","matchId":${matchId?.let { "\"${escapeJson(it)}\"" } ?: "null"},"width":$width,"height":$height,"fps":$fps,"bitrateBps":$bitrateBps,"rotationDegrees":$rotationDegrees,"encoderName":"${escapeJson(encoderName)}","profile":$profile,"bitrateMode":$bitrateMode,"audioEnabled":$audioEnabled,"audioSampleRate":${audioSampleRate ?: "null"},"audioChannels":${audioChannels ?: "null"},"audioEncoderName":${audioEncoderName?.let { "\"${escapeJson(it)}\"" } ?: "null"},"segments":[$segmentsJson]}"""
+        return """{"recordingId":"${escapeJson(recordingId)}","matchId":${matchId?.let { "\"${escapeJson(it)}\"" } ?: "null"},"width":$width,"height":$height,"fps":$fps,"bitrateBps":$bitrateBps,"rotationDegrees":$rotationDegrees,"encoderName":"${escapeJson(encoderName)}","profile":$profile,"bitrateMode":$bitrateMode,"audioEnabled":$audioEnabled,"audioSampleRate":${audioSampleRate ?: "null"},"audioChannels":${audioChannels ?: "null"},"audioEncoderName":${audioEncoderName?.let { "\"${escapeJson(it)}\"" } ?: "null"},"mergedAtMs":${mergedAtMs ?: "null"},"mergedDurationMs":${mergedDurationMs ?: "null"},"mergedSizeBytes":${mergedSizeBytes ?: "null"},"mergedStatus":${mergedStatus?.let { "\"${escapeJson(it)}\"" } ?: "null"},"mergedReason":${mergedReason?.let { "\"${escapeJson(it)}\"" } ?: "null"},"mergedSegments":[${mergedSegments.joinToString(",")}],"skippedSegments":[${skippedSegments.joinToString(",")}],"audioGapSegments":[${audioGapSegments.joinToString(",")}],"segments":[$segmentsJson]}"""
     }
 }
 
@@ -294,6 +315,12 @@ private fun JsonValue.Obj.double(key: String): Double? =
 private fun JsonValue.Obj.bool(key: String): Boolean? =
     (map[key] as? JsonValue.Bool)?.value
 
+/** Lista de enteros tolerante (ausente o de otro tipo → vacía). */
+private fun JsonValue.Obj.intList(key: String): List<Int> =
+    (map[key] as? JsonValue.Arr)?.items?.mapNotNull {
+        (it as? JsonValue.Num)?.raw?.toIntOrNull()
+    } ?: emptyList()
+
 private fun JsonValue.Obj.toSegmentMetadata(): SegmentMetadata? {
     val index = int("index") ?: return null
     return SegmentMetadata(
@@ -338,6 +365,17 @@ private fun JsonValue.Obj.toRecordingMetadata(recordingId: String): RecordingMet
         audioSampleRate = int("audioSampleRate"),
         audioChannels = int("audioChannels"),
         audioEncoderName = str("audioEncoderName"),
+        // Campos de fusión (J1-b): ausentes en sidecars viejos →
+        // `null`/vacío (nunca se ha intentado fusionar); las claves
+        // desconocidas de otros escritores se ignoran como siempre.
+        mergedAtMs = long("mergedAtMs"),
+        mergedDurationMs = long("mergedDurationMs"),
+        mergedSizeBytes = long("mergedSizeBytes"),
+        mergedStatus = str("mergedStatus"),
+        mergedReason = str("mergedReason"),
+        mergedSegments = intList("mergedSegments"),
+        skippedSegments = intList("skippedSegments"),
+        audioGapSegments = intList("audioGapSegments"),
     )
 }
 

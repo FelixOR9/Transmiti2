@@ -32,10 +32,16 @@ import com.transmiti2.transmiti2.MainActivity
  *   graba nada).
  * - `stopRecordingService()`: detiene el servicio (inofensivo si no
  *   está corriendo).
+ * - `updateMergeProgress(progressText)`: actualiza la notificación
+ *   con el progreso de la fusión (J1-b, J0.2): el FGS sigue vivo
+ *   durante la fusión asíncrona tras el stop y la notificación
+ *   muestra en qué va. Mejor esfuerzo: si el servicio no corre, no
+ *   hace nada (nunca lo arranca).
  */
 interface ForegroundServiceControl {
     fun startRecordingService(scenario: RecordingScenario): Boolean
     fun stopRecordingService()
+    fun updateMergeProgress(progressText: String)
 }
 
 /** Control real del servicio (producción): delega en el compañero. */
@@ -48,6 +54,10 @@ class RealForegroundServiceControl(
 
     override fun stopRecordingService() {
         StreamForegroundService.stop(context)
+    }
+
+    override fun updateMergeProgress(progressText: String) {
+        StreamForegroundService.updateMergeProgress(context, progressText)
     }
 }
 
@@ -179,6 +189,16 @@ class StreamForegroundService : Service() {
     /** Autodestrucción diferida tras la acción "Detener" (ver arriba). */
     private val delayedStop = Runnable { stopSelf() }
 
+    /**
+     * Texto de progreso de la fusión en curso (J1-b, J0.2): mientras
+     * es no-nulo la notificación muestra «Fusionando grabación» con
+     * este texto en vez del tiempo transcurrido. Lo fija la acción
+     * `ACTION_MERGE_PROGRESS`; se limpia en `onDestroy()`. El ticker
+     * de 1 s sigue refrescando la notificación y por tanto el
+     * progreso (sin él, la notificación quedaría fija).
+     */
+    private var mergingProgressText: String? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -205,6 +225,20 @@ class StreamForegroundService : Service() {
             tickerHandler.postDelayed(delayedStop, DELAYED_STOP_MS)
             return START_NOT_STICKY
         }
+        if (intent?.action == ACTION_MERGE_PROGRESS) {
+            // J1-b (J0.2): progreso de la fusión asíncrona tras el
+            // stop. El servicio ya corre en primer plano (el motor lo
+            // mantiene vivo durante la fusión); solo se actualiza el
+            // texto y se refresca la notificación. La acción
+            // "Detener" sigue disponible: si se toca durante la
+            // fusión, el motor ignora la parada (la grabación ya
+            // terminó y la fusión debe completarse) y el servicio se
+            // detiene al terminar la fusión.
+            mergingProgressText =
+                intent.getStringExtra(EXTRA_MERGE_PROGRESS)
+            updateNotification()
+            return START_NOT_STICKY
+        }
         // Arranque real de una grabación (3.1.2): el servicio vive
         // hasta que la grabación para; wake lock y ticker en marcha.
         // Se guarda el escenario con el que arrancó (3.1.3): la
@@ -228,6 +262,7 @@ class StreamForegroundService : Service() {
         tickerHandler.removeCallbacks(ticker)
         tickerHandler.removeCallbacks(delayedStop)
         recordingStartElapsedMs = 0
+        mergingProgressText = null
         currentScenario = RecordingScenario.WITHOUT_AUDIO
         releaseWakeLock()
         super.onDestroy()
@@ -255,13 +290,24 @@ class StreamForegroundService : Service() {
                 .setAction(ACTION_STOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val title = when (scenario) {
-            RecordingScenario.WITH_AUDIO -> "Grabando partido (con audio)"
-            RecordingScenario.WITHOUT_AUDIO -> "Grabando partido (sin audio)"
+        val title = if (mergingProgressText != null) {
+            // J1-b (J0.2): durante la fusión el título dice lo que
+            // hace el servicio; el tiempo de grabación ya no corre
+            // (la captura terminó) y el texto es el progreso.
+            "Fusionando grabación"
+        } else {
+            when (scenario) {
+                RecordingScenario.WITH_AUDIO -> "Grabando partido (con audio)"
+                RecordingScenario.WITHOUT_AUDIO -> "Grabando partido (sin audio)"
+            }
         }
         // Tiempo transcurrido (plan §9.3): mientras hay grabación en
         // curso se muestra `mm:ss`; antes de arrancar, el texto fijo.
-        val contentText = if (recordingStartElapsedMs == 0L) {
+        // Durante la fusión (J1-b), el progreso de la fusión.
+        val mergingText = mergingProgressText
+        val contentText = if (mergingText != null) {
+            "TRANSMITI2 · $mergingText"
+        } else if (recordingStartElapsedMs == 0L) {
             "TRANSMITI2"
         } else {
             val elapsedMs =
@@ -325,6 +371,16 @@ class StreamForegroundService : Service() {
         const val ACTION_STOP = "com.transmiti2.transmiti2.streaming.STOP"
 
         /**
+         * Acción de progreso de fusión (J1-b, J0.2): el motor envía
+         * el progreso de la fusión asíncrona tras el stop para que la
+         * notificación lo muestre mientras el FGS sigue vivo.
+         * Lleva el texto en [EXTRA_MERGE_PROGRESS].
+         */
+        const val ACTION_MERGE_PROGRESS =
+            "com.transmiti2.transmiti2.streaming.MERGE_PROGRESS"
+        const val EXTRA_MERGE_PROGRESS = "merge_progress"
+
+        /**
          * Broadcast que el servicio envía al tocar "Detener" en la
          * notificación (plan §9.4): el servicio no posee el motor, así
          * que `MainActivity` lo escucha y lo traduce en
@@ -380,6 +436,25 @@ class StreamForegroundService : Service() {
             context.stopService(
                 Intent(context, StreamForegroundService::class.java),
             )
+        }
+
+        /**
+         * Actualiza la notificación con el progreso de la fusión
+         * (J1-b, J0.2). Mejor esfuerzo: si el servicio no corre, no
+         * lo arranca (un `startService` a un servicio parado desde
+         * segundo plano lanzaría `IllegalStateException` en API 26+);
+         * si el envío falla por eso, se traga en silencio: la fusión
+         * sigue y su resultado viaja en `recording_merged`.
+         */
+        fun updateMergeProgress(context: Context, progressText: String) {
+            try {
+                context.startService(
+                    Intent(context, StreamForegroundService::class.java)
+                        .setAction(ACTION_MERGE_PROGRESS)
+                        .putExtra(EXTRA_MERGE_PROGRESS, progressText),
+                )
+            } catch (_: Exception) {
+            }
         }
     }
 }

@@ -243,6 +243,26 @@ class RecordingController extends ChangeNotifier {
   RecordingStoppedInfo? _lastStopped;
   RecordingStoppedInfo? get lastStopped => _lastStopped;
 
+  /// Fusión pendiente (3.1.4, J1-b): id de la grabación cuya fila
+  /// está en `finalizing` esperando `recording_merged`. `null` sin
+  /// fusión pendiente. Se fija al parar con segmentos utilizables y
+  /// se limpia al llegar el evento (éxito o fracaso definitivo) o al
+  /// iniciar una grabación nueva.
+  String? _mergePendingRecordingId;
+  String? get mergePendingRecordingId => _mergePendingRecordingId;
+
+  /// Último resultado de fusión recibido (`recording_merged`, J1-b):
+  /// el fusionado con sus medidas o el motivo del aborto.
+  RecordingMergedInfo? _lastMerged;
+  RecordingMergedInfo? get lastMerged => _lastMerged;
+
+  /// Motivo del último intento de fusión que dejó la fila en
+  /// `finalizing` (fracaso reintentable, J1-b); `null` sin fracaso
+  /// pendiente o tras un `recording_merged` definitivo. Se muestra
+  /// en la tarjeta de diagnóstico.
+  String? _lastMergeReason;
+  String? get lastMergeReason => _lastMergeReason;
+
   String? _errorCode;
   String? get errorCode => _errorCode;
 
@@ -509,6 +529,27 @@ class RecordingController extends ChangeNotifier {
       text.writeln(
         'ANOMALÍA: sin service_stopped 5 s tras el error '
         '(el servicio puede seguir vivo)',
+      );
+    }
+    // J1-b (3.1.4): fusión. La línea de «pendiente» solo aparece
+    // mientras la fila está en `finalizing`; la de motivo solo con
+    // un fracaso reintentable; la de resultado solo con el evento
+    // `recording_merged` (medidas del fusionado o motivo).
+    if (_mergePendingRecordingId != null) {
+      text.writeln(
+        'Fusión pendiente: $_mergePendingRecordingId',
+      );
+    }
+    if (_lastMergeReason != null) {
+      text.writeln('Fusión pendiente por: $_lastMergeReason');
+    }
+    if (_lastMerged != null) {
+      text.writeln(
+        'Fusión: ${_lastMerged!.status} '
+        'duración=${_lastMerged!.totalDurationMs?.toString() ?? '—'}ms '
+        'tamaño=${_lastMerged!.totalSizeBytes?.toString() ?? '—'} '
+        'segmentos=${_lastMerged!.segmentCount} '
+        'motivo=${_lastMerged!.reason ?? '—'}',
       );
     }
     if (_lastRecovery.isNotEmpty) {
@@ -990,6 +1031,10 @@ class RecordingController extends ChangeNotifier {
     _errorMessage = null;
     _diagnostics = null;
     _lastStopped = null;
+    // J1-b: una grabación nueva no hereda la fusión de la anterior.
+    _mergePendingRecordingId = null;
+    _lastMerged = null;
+    _lastMergeReason = null;
     _segments.clear();
     // Estado de audio a cero: una segunda grabación no hereda el de
     // la anterior (igual que los relojes, fix duraciones 3.1.2,
@@ -1095,9 +1140,13 @@ class RecordingController extends ChangeNotifier {
     }
   }
 
-  /// Detiene la grabación y actualiza su fila (`ready` si hay al menos
-  /// un segmento utilizable, `corrupt` si no, plan §7.3). Idempotente
-  /// desde `idle`.
+  /// Detiene la grabación y actualiza su fila (3.1.4, J1-b): con al
+  /// menos un segmento utilizable la fila pasa a `finalizing` (la
+  /// fusión corre asíncrona tras el stop y el evento
+  /// `recording_merged` la completa a `ready` con las medidas del
+  /// fusionado, o a `corrupt` si fracasa de forma definitiva); sin
+  /// segmentos utilizables la fila pasa a `corrupt` directamente.
+  /// Idempotente desde `idle`.
   Future<void> stop() async {
     if (_state == RecordingState.idle ||
         _state == RecordingState.stopping) {
@@ -1108,7 +1157,7 @@ class RecordingController extends ChangeNotifier {
     notifyListeners();
     try {
       final RecordingInfo info = await _service.stopRecording();
-      await _updateRowFromInfo(info);
+      await _updateRowAfterStop(info);
       // La lista completa viene del método (paso 5): la confirmación
       // y la tarjeta usan estos segmentos, no la lista parcial de
       // Dart (que puede haber perdido eventos).
@@ -1158,14 +1207,35 @@ class RecordingController extends ChangeNotifier {
     }
   }
 
-  /// Actualiza la fila de la grabación con el resultado de la parada.
-  /// `partial` es utilizable y la fila queda `ready` (el `CHECK` de la
-  /// tabla no admite `partial`).
-  Future<void> _updateRowFromInfo(RecordingInfo info) async {
+  /// Actualiza la fila de la grabación con el resultado de la parada
+  /// (3.1.4, J1-b; plan §2.4.10). Con al menos un segmento utilizable
+  /// (`ready`/`partial`, nunca `corrupt`) la fila queda en
+  /// `finalizing` —declarar `ready` aquí mentiría: el `file_path`
+  /// apunta a un `_final.mp4` que aún no existe— y la fusión
+  /// pendiente se marca para que `recording_merged` la complete. Sin
+  /// segmentos utilizables la fila pasa a `corrupt` directamente (no
+  /// hay fusión que esperar). La duración y el tamaño son las sumas
+  /// de los segmentos; el evento de fusión los sobrescribe con los
+  /// medidos del fusionado.
+  Future<void> _updateRowAfterStop(RecordingInfo info) async {
     if (info.status == 'idle' || info.recordingId.isEmpty) {
       return;
     }
-    final String status = info.status == 'corrupt' ? 'corrupt' : 'ready';
+    final bool usable =
+        info.segments.any((s) => s.status != 'corrupt');
+    final String status = usable ? 'finalizing' : 'corrupt';
+    // La marca de fusión pendiente se fija ANTES de escribir la
+    // fila: depende solo de `usable` (ya conocido) y debe ser
+    // visible en cuanto se procesa la parada —esta llamada llega
+    // por evento sin `await` (`unawaited`), así que asignarla tras
+    // el `await` la dejaría un microtask tarde para quien la lea
+    // justo después de la parada (p. ej. la tarjeta de diagnóstico
+    // y el propio `recording_merged`).
+    if (usable) {
+      _mergePendingRecordingId = info.recordingId;
+    } else {
+      _mergePendingRecordingId = null;
+    }
     try {
       await _recordings.updateOnStop(
         recordingId: info.recordingId,
@@ -1178,6 +1248,51 @@ class RecordingController extends ChangeNotifier {
       // Mejor esfuerzo: los archivos ya están verificados y la fila se
       // puede corregir al reabrir (la recuperación la clasifica).
     }
+  }
+
+  /// Actualiza la fila con el resultado de la fusión (evento
+  /// `recording_merged`, 3.1.4, J1-b). Éxito → fila `ready` con
+  /// duración y tamaño MEDIDOS del fusionado; fracaso definitivo →
+  /// fila `corrupt` sin borrar segmentos (los archivos quedan
+  /// intactos para reintento o diagnóstico); fracaso reintentable
+  /// (`status == 'finalizing'`) → la fila queda en `finalizing` y
+  /// se guarda el motivo (la reanudación es J1-c). Un evento de otra
+  /// grabación actualiza igualmente su fila (por id): la fusión
+  /// pertenece a esa grabación aunque esta UI no la parara.
+  Future<void> _updateRowOnMerged(RecordingMergedInfo merged) async {
+    _lastMerged = merged;
+    if (merged.status == 'finalizing') {
+      _lastMergeReason = merged.reason;
+      _mergePendingRecordingId ??= merged.recordingId;
+      notifyListeners();
+      return;
+    }
+    if (_mergePendingRecordingId == merged.recordingId) {
+      _mergePendingRecordingId = null;
+    }
+    _lastMergeReason = null;
+    final String status = merged.status == 'ready' ? 'ready' : 'corrupt';
+    int? durationMs = merged.totalDurationMs;
+    int? sizeBytes = merged.totalSizeBytes;
+    if (status == 'corrupt' &&
+        _lastStopped?.recordingId == merged.recordingId) {
+      // Sin fusionado medido, la fila corrupta conserva las sumas de
+      // los segmentos (las mejores medidas conocidas).
+      durationMs ??= _lastStopped!.totalDurationMs;
+      sizeBytes ??= _lastStopped!.totalSizeBytes;
+    }
+    try {
+      await _recordings.updateOnMerged(
+        recordingId: merged.recordingId,
+        status: status,
+        durationMs: durationMs,
+        sizeBytes: sizeBytes,
+        nowMs: _nowMs(),
+      );
+    } on Object {
+      // Mejor esfuerzo: la fila se puede corregir al reabrir.
+    }
+    notifyListeners();
   }
 
   void _startTimer() {
@@ -1344,15 +1459,18 @@ class RecordingController extends ChangeNotifier {
         _applyStoppedSegments(stopped);
         if (!_stopInitiated) {
           // Parada externa (notificación, cámara): la fila la
-          // actualiza el evento, no `stop()`.
+          // actualiza el evento, no `stop()`. Con segmentos
+          // utilizables queda en `finalizing` (J1-b): la fusión
+          // pendiente la completa `recording_merged`.
           unawaited(
-            _updateRowFromInfo(
+            _updateRowAfterStop(
               RecordingInfo(
                 recordingId: stopped.recordingId,
                 filePath: stopped.filePath,
                 durationMs: stopped.totalDurationMs,
                 sizeBytes: stopped.totalSizeBytes,
                 status: stopped.status,
+                segments: stopped.segments,
               ),
             ),
           );
@@ -1373,6 +1491,16 @@ class RecordingController extends ChangeNotifier {
         // igualmente el que hubiera).
         _cancelServiceStoppedWatchdog();
         notifyListeners();
+      case StreamContract.eventRecordingMerged:
+        // J1-b (3.1.4): la fusión asíncrona tras el stop terminó
+        // (o abortó). La fila pasa a `ready` con las medidas del
+        // fusionado, a `corrupt` si el fracaso es definitivo, o
+        // queda en `finalizing` si es reintentable (J1-c). Solo
+        // observa: no cambia el estado de grabación (la captura ya
+        // terminó) ni llama a `stopRecording()`.
+        final RecordingMergedInfo merged =
+            RecordingMergedInfo.fromMap(event);
+        unawaited(_updateRowOnMerged(merged));
       case StreamContract.eventRecordingAudioLost:
         // Pérdida de audio en caliente (3.1.3, D7): el video
         // continúa y el estado de grabación NO cambia a error. Solo
@@ -1414,13 +1542,14 @@ class RecordingController extends ChangeNotifier {
           _applyStoppedSegments(stopped);
           if (!_stopInitiated) {
             unawaited(
-              _updateRowFromInfo(
+              _updateRowAfterStop(
                 RecordingInfo(
                   recordingId: stopped.recordingId,
                   filePath: stopped.filePath,
                   durationMs: stopped.totalDurationMs,
                   sizeBytes: stopped.totalSizeBytes,
                   status: stopped.status,
+                  segments: stopped.segments,
                 ),
               ),
             );

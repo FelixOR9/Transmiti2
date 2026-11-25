@@ -144,6 +144,29 @@ void main() {
       };
     }
 
+    /// Evento `recording_merged` (J1-b): fusión completada o
+    /// abortada, con las medidas del fusionado (o el motivo).
+    Map<String, Object?> mergedEvent({
+      String status = 'ready',
+      String? reason,
+      int? totalDurationMs = 11987,
+      int? totalSizeBytes = 3740000,
+    }) {
+      return <String, Object?>{
+        'type': StreamContract.eventRecordingMerged,
+        'recordingId': 'rec_20261118_120000_ab12',
+        'filePath':
+            '/docs/recordings/rec_20261118_120000_ab12_final.mp4',
+        'status': status,
+        'totalDurationMs': totalDurationMs,
+        'totalSizeBytes': totalSizeBytes,
+        'segmentCount': 1,
+        'skippedSegments': <int>[],
+        'audioGapSegments': <int>[],
+        'reason': reason,
+      };
+    }
+
     /// Evento `recording_started` con audio AAC (3.1.3): el motor
     /// confirma 48 kHz mono y el origen de timestamps.
     Map<String, Object?> startedEventWithAudio() {
@@ -272,7 +295,7 @@ void main() {
       expect(service.stopRecordingCalls, 0);
     });
 
-    testWidgets('stop detiene y actualiza la fila a ready', (
+    testWidgets('stop detiene y deja la fila en finalizing hasta la fusión', (
       WidgetTester tester,
     ) async {
       await pumpController(tester);
@@ -287,13 +310,137 @@ void main() {
       expect(recording.lastStopped, isNotNull);
       expect(recording.lastStopped!.status, 'ready');
       expect(recording.lastStopped!.totalDurationMs, 12000);
+      // J1-b: con segmentos utilizables la fila NO es `ready` al
+      // parar (el `_final.mp4` aún no existe): queda `finalizing`
+      // con las sumas de los segmentos hasta `recording_merged`.
+      final row = await recordings.byRecordingId(
+        'rec_20261118_120000_ab12',
+      );
+      expect(row!.status, 'finalizing');
+      expect(row.durationMs, 12000);
+      expect(row.sizeBytes, 3750000);
+      expect(
+        recording.mergePendingRecordingId,
+        'rec_20261118_120000_ab12',
+      );
+      expect(timers.first.isActive, isFalse);
+    });
+
+    testWidgets('recording_merged completa la fila a ready con medidas', (
+      WidgetTester tester,
+    ) async {
+      await pumpController(tester);
+      await recording.start();
+      await tester.pump();
+      await recording.stop();
+      await tester.pump();
+
+      service.emitEvent(mergedEvent());
+      await tester.pump();
+
       final row = await recordings.byRecordingId(
         'rec_20261118_120000_ab12',
       );
       expect(row!.status, 'ready');
+      expect(row.durationMs, 11987);
+      expect(row.sizeBytes, 3740000);
+      expect(recording.mergePendingRecordingId, isNull);
+      expect(recording.lastMerged, isNotNull);
+      expect(recording.lastMerged!.status, 'ready');
+      expect(recording.lastMerged!.totalDurationMs, 11987);
+      expect(recording.lastMerged!.filePath,
+          '/docs/recordings/rec_20261118_120000_ab12_final.mp4');
+      expect(recording.diagnosticText, contains('Fusión: ready'));
+    });
+
+    testWidgets('stop sin segmentos utilizables marca corrupt directo', (
+      WidgetTester tester,
+    ) async {
+      await pumpController(tester);
+      await recording.start();
+      await tester.pump();
+      service.stopRecordingResult = const RecordingInfo(
+        recordingId: 'rec_20261118_120000_ab12',
+        filePath: '',
+        durationMs: 0,
+        sizeBytes: 0,
+        status: 'corrupt',
+        segments: <RecordingSegmentInfo>[],
+      );
+
+      await recording.stop();
+      await tester.pump();
+
+      final row = await recordings.byRecordingId(
+        'rec_20261118_120000_ab12',
+      );
+      expect(row!.status, 'corrupt');
+      expect(recording.mergePendingRecordingId, isNull);
+    });
+
+    testWidgets('recording_merged con fracaso definitivo marca corrupt '
+        'y conserva los segmentos', (WidgetTester tester) async {
+      await pumpController(tester);
+      await recording.start();
+      await tester.pump();
+      await recording.stop();
+      await tester.pump();
+      expect(recording.segments.length, 1);
+
+      service.emitEvent(
+        mergedEvent(
+          status: 'corrupt',
+          reason: 'merge_verify_failed',
+          totalDurationMs: null,
+          totalSizeBytes: null,
+        ),
+      );
+      await tester.pump();
+
+      final row = await recordings.byRecordingId(
+        'rec_20261118_120000_ab12',
+      );
+      expect(row!.status, 'corrupt');
+      // Sin fusionado medido, la fila corrupta conserva las sumas
+      // de los segmentos; los archivos no se tocan (nada se borra).
       expect(row.durationMs, 12000);
       expect(row.sizeBytes, 3750000);
-      expect(timers.first.isActive, isFalse);
+      expect(recording.segments.length, 1);
+      expect(recording.mergePendingRecordingId, isNull);
+      expect(recording.lastMerged!.reason, 'merge_verify_failed');
+    });
+
+    testWidgets('recording_merged reintentable deja la fila en finalizing',
+        (WidgetTester tester) async {
+      await pumpController(tester);
+      await recording.start();
+      await tester.pump();
+      await recording.stop();
+      await tester.pump();
+
+      service.emitEvent(
+        mergedEvent(
+          status: 'finalizing',
+          reason: 'storage_full',
+          totalDurationMs: null,
+          totalSizeBytes: null,
+        ),
+      );
+      await tester.pump();
+
+      final row = await recordings.byRecordingId(
+        'rec_20261118_120000_ab12',
+      );
+      expect(row!.status, 'finalizing');
+      expect(
+        recording.mergePendingRecordingId,
+        'rec_20261118_120000_ab12',
+      );
+      expect(recording.lastMergeReason, 'storage_full');
+      expect(
+        recording.diagnosticText,
+        contains('Fusión pendiente por: storage_full'),
+      );
     });
 
     testWidgets('el evento recording_started rellena la información', (
@@ -588,7 +735,7 @@ void main() {
     });
 
     testWidgets(
-      'la parada externa por evento actualiza la fila sin llamar a stop()',
+      'la parada externa por evento deja la fila en finalizing hasta la fusión',
       (WidgetTester tester) async {
         await pumpController(tester);
         await recording.start();
@@ -603,11 +750,27 @@ void main() {
         expect(service.stopRecordingCalls, 0);
         expect(recording.lastStopped, isNotNull);
         expect(recording.lastStopped!.segmentCount, 1);
+        // J1-b: mismo tratamiento que el stop por método (fusión
+        // pendiente): la fila queda en `finalizing`, no en `ready`.
         final row = await recordings.byRecordingId(
           'rec_20261118_120000_ab12',
         );
-        expect(row!.status, 'ready');
+        expect(row!.status, 'finalizing');
         expect(row.durationMs, 12000);
+        expect(
+          recording.mergePendingRecordingId,
+          'rec_20261118_120000_ab12',
+        );
+
+        service.emitEvent(mergedEvent());
+        await tester.pump();
+
+        final mergedRow = await recordings.byRecordingId(
+          'rec_20261118_120000_ab12',
+        );
+        expect(mergedRow!.status, 'ready');
+        expect(mergedRow.durationMs, 11987);
+        expect(recording.mergePendingRecordingId, isNull);
       },
     );
 
