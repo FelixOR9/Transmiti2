@@ -1404,8 +1404,11 @@ class StreamEngineRecordingTest {
                 merged[0]["filePath"],
             )
             assertEquals("ready", merged[0]["status"])
-            assertEquals(11_987, merged[0]["totalDurationMs"])
-            assertEquals(3_740_000, merged[0]["totalSizeBytes"])
+            // Las medidas del payload son Long (MergeResult):
+            // comparar con literales Long, no Int (JUnit compara
+            // con equals y Integer(11987) != Long(11987)).
+            assertEquals(11_987L, merged[0]["totalDurationMs"])
+            assertEquals(3_740_000L, merged[0]["totalSizeBytes"])
             assertEquals(1, merged[0]["segmentCount"])
             assertEquals(1, fixture.fgs.stopCalls)
             val stopped = fixture.serviceStoppedEvents()
