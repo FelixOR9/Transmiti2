@@ -890,13 +890,18 @@ class RecordingController extends ChangeNotifier {
   /// Reconcilia las filas con la única pasada del proceso (0-d2;
   /// sustituye a `_recoverInterrupted()`): llama a
   /// `reconcileRecordings`, recibe el resumen por grupo y por cada
-  /// grupo inserta la fila si falta (U10) o `updateOnStop` si está
-  /// en `recording`/`finalizing`; si ya está en `ready`/`corrupt`,
-  /// la deja. Después marca las filas de `interrupted()` sin grupo
-  /// en el resultado (fila sin archivo, U11). Mejor esfuerzo: nunca
-  /// lanza; un fallo del canal deja las filas para la siguiente
-  /// pasada. La grabación activa nunca se toca: su grupo viene
-  /// `skipped_active` (o no viene) y su fila la actualiza `stop()`.
+  /// grupo inserta la fila si falta (U10) o la clasifica si está en
+  /// `recording`/`finalizing`; si ya está en `ready`/`corrupt`, la
+  /// deja. Una fila en `recording`/`finalizing` con segmentos
+  /// utilizables NO se declara `ready` con las sumas (J1-c, plan
+  /// §2.4.9): queda en `finalizing` y se reanuda su fusión
+  /// (`resumeMerge`); `recording_merged` la completa con las medidas
+  /// del fusionado. Sin segmentos utilizables pasa a `corrupt`.
+  /// Después marca las filas de `interrupted()` sin grupo en el
+  /// resultado (fila sin archivo, U11). Mejor esfuerzo: nunca lanza;
+  /// un fallo del canal deja las filas para la siguiente pasada. La
+  /// grabación activa nunca se toca: su grupo viene `skipped_active`
+  /// (o no viene) y su fila la actualiza `stop()`.
   Future<void> _reconcile() async {
     // La puerta está en `RUNNING` mientras se espera al canal: la
     // biblioteca futura muestra «Preparando biblioteca…» y no
@@ -954,13 +959,35 @@ class RecordingController extends ChangeNotifier {
             orphans++;
           } else if (existing.status == 'recording' ||
               existing.status == 'finalizing') {
-            await _recordings.updateOnStop(
-              recordingId: entry.key,
-              status: status,
-              durationMs: duration,
-              sizeBytes: size,
-              nowMs: _nowMs(),
-            );
+            if (usable) {
+              // J1-c (3.1.4, plan §2.4.9): fila en
+              // `recording`/`finalizing` con segmentos utilizables y
+              // sin `_final.mp4` verificado —declarar `ready` aquí
+              // con las sumas mentiría: el `file_path` apunta a un
+              // final que aún no existe—. La fila queda en
+              // `finalizing` con las sumas como placeholder (el
+              // evento de fusión las sobrescribe con las medidas del
+              // fusionado) y se reanuda la fusión; si el final ya
+              // existe verificado, el motor completa sin re-fusionar
+              // (`alreadyMerged`).
+              await _recordings.updateOnStop(
+                recordingId: entry.key,
+                status: 'finalizing',
+                durationMs: duration,
+                sizeBytes: size,
+                nowMs: _nowMs(),
+              );
+              _mergePendingRecordingId = entry.key;
+              await _resumeMerge(entry.key);
+            } else {
+              await _recordings.updateOnStop(
+                recordingId: entry.key,
+                status: 'corrupt',
+                durationMs: duration,
+                sizeBytes: size,
+                nowMs: _nowMs(),
+              );
+            }
           }
           // `ready`/`corrupt`/`deleted`: se deja como está.
           _pendingReconciliationIds.remove(entry.key);
@@ -1001,6 +1028,22 @@ class RecordingController extends ChangeNotifier {
       // Mejor esfuerzo: sin filas no hay nada que marcar.
     }
     notifyListeners();
+  }
+
+  /// Reanuda la fusión de una grabación reconciliada (3.1.4, J1-c;
+  /// plan §2.4.9): pide al motor que re-fusione (o complete sin
+  /// re-fusionar si el `_final.mp4` ya existe verificado). Mejor
+  /// esfuerzo: si el canal falla o el motor no la lanza, la fila
+  /// queda en `finalizing` (con `_mergePendingRecordingId` puesto)
+  /// y la siguiente reapertura reintenta; nunca lanza fuera de
+  /// `_reconcile`. El resultado llega por el evento
+  /// `recording_merged`, que `_updateRowOnMerged` procesa.
+  Future<void> _resumeMerge(String recordingId) async {
+    try {
+      await _service.resumeMerge(recordingId: recordingId);
+    } on Object {
+      // Mejor esfuerzo: la fila queda en `finalizing`.
+    }
   }
 
   /// Inicia la grabación (con audio si el micrófono está concedido).

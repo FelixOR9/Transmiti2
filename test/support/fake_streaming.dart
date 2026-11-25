@@ -112,6 +112,16 @@ class FakeStreamingService implements StreamingService {
   Future<ReconciliationResult> Function()? reconcileRecordingsOverride;
   int reconcileRecordingsCalls = 0;
 
+  /// Reanudación de la fusión (3.1.4, J1-c): ids pedidos, en orden.
+  /// `resumeMergeError` fija una excepción a lanzar en su lugar
+  /// (fallo del canal); `resumeMergeResult` es lo que devuelve por
+  /// defecto (`true` = lanzada). El resultado real de la fusión no
+  /// viaja aquí: llega por el evento `recording_merged`, que la
+  /// prueba emite con [emitEvent].
+  List<String> resumeMergeCalls = <String>[];
+  Object? resumeMergeError;
+  bool resumeMergeResult = true;
+
   /// Estado de la puerta que devuelve `getReconciliationState()`.
   ReconciliationSummary reconciliationStateSummary =
       const ReconciliationSummary(state: ReconciliationState.notStarted);
@@ -297,6 +307,16 @@ class FakeStreamingService implements StreamingService {
       throw error;
     }
     return reconciliationResult;
+  }
+
+  @override
+  Future<bool> resumeMerge({required String recordingId}) async {
+    resumeMergeCalls.add(recordingId);
+    final Object? error = resumeMergeError;
+    if (error != null) {
+      throw error;
+    }
+    return resumeMergeResult;
   }
 
   @override

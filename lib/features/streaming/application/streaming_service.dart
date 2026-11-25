@@ -86,6 +86,18 @@ abstract class StreamingService {
   /// (`recordings_channel_contract_error`).
   Future<ReconciliationResult> reconcileRecordings();
 
+  /// Reanuda la fusión de una grabación reconciliada (3.1.4, J1-c;
+  /// plan §2.4.9). Se pide tras `reconcileRecordings` para un grupo
+  /// cuya fila está en `finalizing`/`recording` con segmentos
+  /// utilizables. Devuelve `true` si el motor lanzó la fusión
+  /// asíncrona; `false` si no se lanzó (grupo activo o reservado,
+  /// sin fusionador o grupo no reconciliado con segmentos
+  /// utilizables): la fila queda en `finalizing` y la siguiente
+  /// reapertura reintenta. El resultado llega por el evento
+  /// `recording_merged`, nunca por este método. Una respuesta nula
+  /// es un error de contrato (`recordings_channel_contract_error`).
+  Future<bool> resumeMerge({required String recordingId});
+
   /// Estado actual de la puerta única de reconciliación
   /// (`NOT_STARTED` → `RUNNING` → `DONE` | `FAILED`). Observar el
   /// estado materializa el motor y dispara la puerta si aún no
@@ -337,6 +349,25 @@ class MethodChannelStreamingService implements StreamingService {
         );
       }
       return ReconciliationResult.fromMap(result);
+    } on PlatformException catch (e) {
+      throw _fromPlatform(e);
+    }
+  }
+
+  @override
+  Future<bool> resumeMerge({required String recordingId}) async {
+    try {
+      final Map<Object?, Object?>? result = await _channel
+          .invokeMapMethod<String, Object?>(
+            StreamContract.resumeMerge,
+            <String, Object?>{'recordingId': recordingId},
+          );
+      if (result == null) {
+        throw const StreamingException(
+          StreamContract.recordingsChannelContractError,
+        );
+      }
+      return result['resumed'] as bool? ?? false;
     } on PlatformException catch (e) {
       throw _fromPlatform(e);
     }

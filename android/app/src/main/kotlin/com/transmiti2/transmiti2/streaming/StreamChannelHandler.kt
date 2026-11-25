@@ -393,6 +393,8 @@ class StreamChannelHandler(
             StreamContract.GET_RECORDING_STATUS -> getRecordingStatus(result)
             StreamContract.RECONCILE_RECORDINGS ->
                 reconcileRecordings(result)
+            StreamContract.RESUME_MERGE ->
+                resumeMerge(call, result)
             StreamContract.GET_RECONCILIATION_STATE ->
                 getReconciliationState(result)
             StreamContract.GET_RECORDINGS_DIR -> getRecordingsDir(call, result)
@@ -706,6 +708,71 @@ class StreamChannelHandler(
                             message = e.message
                                 ?: "La reconciliación falló.",
                         ),
+                    ),
+                )
+            }
+        }
+    }
+
+    /**
+     * Reanuda la fusión de una grabación reconciliada (3.1.4, J1-c;
+     * plan §2.4.9). Dart la pide tras `reconcileRecordings` para un
+     * grupo cuya fila está en `finalizing`/`recording` con segmentos
+     * utilizables. El motor decide (grupo en el último resumen,
+     * reserva libre, fusionador disponible) y lanza la fusión
+     * asíncrona; el resultado llega por el evento `recording_merged`.
+     *
+     * La respuesta es `{'resumed': bool, 'recordingId': ...,
+     * 'reason': ...}` y nunca un `PlatformException`: `resumed =
+     * false` no es un error (la fila queda en `finalizing` y la
+     * siguiente reapertura reintenta). Sin motor no hay sesión que
+     * fusionar: `resumed = false` con `reason = engine_not_started`.
+     * Sin `recordingId` en los argumentos: `resumed = false` con
+     * `reason = missing_recording_id`.
+     */
+    private fun resumeMerge(call: MethodCall, result: MethodChannel.Result) {
+        val engine = previewEngine
+        if (engine == null) {
+            result.success(
+                mapOf<String, Any?>(
+                    "resumed" to false,
+                    "recordingId" to null,
+                    "reason" to "engine_not_started",
+                ),
+            )
+            return
+        }
+        val recordingId = call.argument<String>("recordingId")
+        if (recordingId.isNullOrBlank()) {
+            result.success(
+                mapOf<String, Any?>(
+                    "resumed" to false,
+                    "recordingId" to null,
+                    "reason" to "missing_recording_id",
+                ),
+            )
+            return
+        }
+        scope.launch {
+            try {
+                val resumed = engine.resumeMergeAfterReconcile(recordingId)
+                result.success(
+                    mapOf<String, Any?>(
+                        "resumed" to resumed,
+                        "recordingId" to recordingId,
+                        "reason" to if (resumed) null else "not_resumed",
+                    ),
+                )
+            } catch (e: Exception) {
+                Transmiti2Logger.e(
+                    "merge: fallo inesperado al reanudar $recordingId: " +
+                        e.javaClass.simpleName,
+                )
+                result.success(
+                    mapOf<String, Any?>(
+                        "resumed" to false,
+                        "recordingId" to recordingId,
+                        "reason" to "resume_failed",
                     ),
                 )
             }

@@ -1562,4 +1562,274 @@ class StreamEngineRecordingTest {
             // el servicio.
             assertEquals(0, fixture.serviceStoppedEvents().size)
         }
+
+    // --- J1-c (3.1.4): reanudación idempotente tras kill/reapertura --
+
+    /** Resumen de reconciliación con los segmentos dados. */
+    private fun reconciledSummary(
+        vararg outcomes: ReconciledSegmentOutcome,
+    ): ReconciliationSummary = ReconciliationSummary(
+        runId = "run-1",
+        startedAtMs = 0L,
+        finishedAtMs = 1L,
+        groupsTotal = 1,
+        groupsReconciled = 1,
+        groupsSkippedActive = emptyList(),
+        groupsFailed = emptyList(),
+        segments = outcomes.toList(),
+        segmentsTrusted = 0,
+        segmentsVerified = outcomes.size,
+        segmentsRenamed = 0,
+        segmentsPending = emptyList(),
+        segmentsQuarantined = 0,
+        unknownFiles = emptyList(),
+        missingFiles = emptyList(),
+        orphanWriteTestFilesSwept = 0,
+        reservationTokens = emptyMap(),
+        foreignReleaseRejected = 0,
+        conflicts = 0,
+    )
+
+    /** Segmento reconciliado del grupo de la prueba. */
+    private fun reconciledOutcome(
+        index: Int,
+        status: SegmentStatus?,
+    ): ReconciledSegmentOutcome = ReconciledSegmentOutcome(
+        recordingId = "rec_20261118_120000_ab12",
+        index = index,
+        fileName = "rec_20261118_120000_ab12_seg" +
+            index.toString().padStart(3, '0') + ".mp4",
+        filePath = "/docs/recordings/rec_20261118_120000_ab12_seg" +
+            index.toString().padStart(3, '0') + ".mp4",
+        status = status,
+        case = ReconciliationCase.C4_NO_SIDECAR,
+        durationMs = 12_000,
+        sizeBytes = 3_750_000,
+        reason = null,
+        verified = true,
+        trusted = false,
+        renamed = false,
+        wasStaging = false,
+    )
+
+    @Test
+    fun `resumeMergeAfterReconcile tras reconciliar lanza la fusion y emite recording_merged sin service_stopped`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.recording.reconcileResult = reconciledSummary(
+                reconciledOutcome(0, SegmentStatus.READY),
+            )
+            var runnerCalls = 0
+            fixture.mergeRunner = { _, _ ->
+                runnerCalls++
+                successfulMergeResult()
+            }
+            val engine = fixture.engine()
+
+            engine.reconcileRecordings()
+            assertTrue(
+                engine.resumeMergeAfterReconcile(
+                    "rec_20261118_120000_ab12",
+                ),
+            )
+
+            assertEquals(1, runnerCalls)
+            val merged = fixture.mergedEvents()
+            assertEquals(1, merged.size)
+            assertEquals("ready", merged[0]["status"])
+            assertEquals(11_987L, merged[0]["totalDurationMs"])
+            assertEquals(3_740_000L, merged[0]["totalSizeBytes"])
+            assertEquals(false, merged[0]["alreadyMerged"])
+            // La reanudación no emite `service_stopped`: el servicio
+            // no corría en este proceso tras la reapertura. El cierre
+            // sí llama al `stopService` (no-op sin servicio en
+            // marcha): es el único efecto sobre el FGS y no emite
+            // evento.
+            assertEquals(0, fixture.serviceStoppedEvents().size)
+            assertEquals(1, fixture.fgs.stopCalls)
+        }
+
+    @Test
+    fun `resumeMergeAfterReconcile con final ya verificado completa sin re-fusionar`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.recording.reconcileResult = reconciledSummary(
+                reconciledOutcome(0, SegmentStatus.READY),
+            )
+            var runnerCalls = 0
+            fixture.mergeRunner = { _, _ ->
+                runnerCalls++
+                successfulMergeResult().copy(alreadyMerged = true)
+            }
+            val engine = fixture.engine()
+
+            engine.reconcileRecordings()
+            assertTrue(
+                engine.resumeMergeAfterReconcile(
+                    "rec_20261118_120000_ab12",
+                ),
+            )
+
+            // Una sola invocación al ejecutor: el completado
+            // idempotente (sin re-fusión) lo decide el fusionador
+            // (`SegmentMerger`, J1-a); aquí se comprueba que la
+            // reanudación lo propaga como `recording_merged` ready.
+            assertEquals(1, runnerCalls)
+            val merged = fixture.mergedEvents()
+            assertEquals(1, merged.size)
+            assertEquals("ready", merged[0]["status"])
+            assertEquals(true, merged[0]["alreadyMerged"])
+            assertEquals(0, fixture.serviceStoppedEvents().size)
+        }
+
+    @Test
+    fun `resumeMergeAfterReconcile sin resumen o sin utilizables no fusiona`() =
+        runBlocking {
+            val fixture = Fixture()
+            var runnerCalls = 0
+            fixture.mergeRunner = { _, _ ->
+                runnerCalls++
+                successfulMergeResult()
+            }
+            val engine = fixture.engine()
+
+            // Sin reconciliar: no hay resumen que certifique el
+            // grupo (fail-closed; no se fusiona a ciegas).
+            assertFalse(
+                engine.resumeMergeAfterReconcile(
+                    "rec_20261118_120000_ab12",
+                ),
+            )
+            assertFalse(engine.resumeMergeAfterReconcile(""))
+            assertEquals(0, runnerCalls)
+            assertEquals(0, fixture.mergedEvents().size)
+
+            // Grupo reconciliado sin segmentos utilizables (solo
+            // corrupto): tampoco se fusiona.
+            fixture.recording.reconcileResult = reconciledSummary(
+                reconciledOutcome(0, SegmentStatus.CORRUPT),
+            )
+            engine.reconcileRecordings()
+            assertFalse(
+                engine.resumeMergeAfterReconcile(
+                    "rec_20261118_120000_ab12",
+                ),
+            )
+            assertEquals(0, runnerCalls)
+            assertEquals(0, fixture.mergedEvents().size)
+        }
+
+    @Test
+    fun `resumeMergeAfterReconcile con grupo reservado no fusiona`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.recording.reconcileResult = reconciledSummary(
+                reconciledOutcome(0, SegmentStatus.READY),
+            )
+            var runnerCalls = 0
+            fixture.mergeRunner = { _, _ ->
+                runnerCalls++
+                successfulMergeResult()
+            }
+            val engine = fixture.engine()
+            engine.reconcileRecordings()
+
+            // El grupo está reservado (otra reconciliación o fusión
+            // lo tiene): no se fusiona, reintentar después.
+            val token = fixture.recording.tryReserveGroupForMerge(
+                "rec_20261118_120000_ab12",
+            )
+            assertTrue(token != null)
+            try {
+                assertFalse(
+                    engine.resumeMergeAfterReconcile(
+                        "rec_20261118_120000_ab12",
+                    ),
+                )
+                assertEquals(0, runnerCalls)
+                assertEquals(0, fixture.mergedEvents().size)
+            } finally {
+                fixture.recording.releaseGroupForMerge(
+                    "rec_20261118_120000_ab12",
+                    token!!,
+                )
+            }
+
+            // Reserva liberada: la reanudación ya arranca.
+            assertTrue(
+                engine.resumeMergeAfterReconcile(
+                    "rec_20261118_120000_ab12",
+                ),
+            )
+            assertEquals(1, runnerCalls)
+            assertEquals(1, fixture.mergedEvents().size)
+        }
+
+    @Test
+    fun `resumeMergeAfterReconcile en curso no se duplica y tras completar se puede reintentar`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.recording.reconcileResult = reconciledSummary(
+                reconciledOutcome(0, SegmentStatus.READY),
+            )
+            val gate = CompletableDeferred<MergeResult>()
+            var runnerCalls = 0
+            fixture.mergeRunner = { _, _ ->
+                runnerCalls++
+                gate.await()
+            }
+            val engine = fixture.engine()
+            engine.reconcileRecordings()
+
+            assertTrue(
+                engine.resumeMergeAfterReconcile(
+                    "rec_20261118_120000_ab12",
+                ),
+            )
+            assertEquals(1, runnerCalls)
+            // En curso: la reserva del grupo retiene el segundo
+            // intento (no hay duplicado).
+            assertFalse(
+                engine.resumeMergeAfterReconcile(
+                    "rec_20261118_120000_ab12",
+                ),
+            )
+            assertEquals(1, runnerCalls)
+            assertEquals(0, fixture.mergedEvents().size)
+
+            gate.complete(successfulMergeResult())
+            assertEquals(1, fixture.mergedEvents().size)
+
+            // Tras completar, la marca limpia permite reintentar el
+            // mismo id (fusión reintentable previa, J1-b).
+            assertTrue(
+                engine.resumeMergeAfterReconcile(
+                    "rec_20261118_120000_ab12",
+                ),
+            )
+            assertEquals(2, runnerCalls)
+            assertEquals(2, fixture.mergedEvents().size)
+            assertEquals(0, fixture.serviceStoppedEvents().size)
+        }
+
+    @Test
+    fun `resumeMergeAfterReconcile sin fusionador no fusiona`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.recording.reconcileResult = reconciledSummary(
+                reconciledOutcome(0, SegmentStatus.READY),
+            )
+            // Sin `mergeRunner` ni `context`: no hay fusionador.
+            fixture.mergeRunner = null
+            val engine = fixture.engine()
+            engine.reconcileRecordings()
+
+            assertFalse(
+                engine.resumeMergeAfterReconcile(
+                    "rec_20261118_120000_ab12",
+                ),
+            )
+            assertEquals(0, fixture.mergedEvents().size)
+            assertEquals(0, fixture.serviceStoppedEvents().size)
+        }
 }

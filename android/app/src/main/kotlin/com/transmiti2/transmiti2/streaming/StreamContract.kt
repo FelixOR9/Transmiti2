@@ -50,6 +50,20 @@ object StreamContract {
     const val RECONCILE_RECORDINGS = "reconcileRecordings"
 
     /**
+     * Reanuda la fusión de una grabación reconciliada (3.1.4, J1-c;
+     * plan §2.4.9): el motor re-fusiona desde cero si no hay
+     * `_final.mp4` verificado, o completa la fila sin re-fusionar si
+     * ya existe verificado. Devuelve `{'resumed': bool,
+     * 'recordingId': ..., 'reason': ...}`; `false` = no se lanzó
+     * (grupo activo o reservado, sin fusionador o grupo no
+     * reconciliado con segmentos utilizables): la fila queda en
+     * `finalizing` y la siguiente reapertura reintenta. El resultado
+     * llega por el evento `recording_merged`, nunca por este método.
+     * Espejo en `lib/features/streaming/domain/stream_contract.dart`.
+     */
+    const val RESUME_MERGE = "resumeMerge"
+
+    /**
      * Ruta canónica de grabaciones y estado de la puerta de
      * reconciliación (subetapa 0, 3.1.4). `getRecordingsDir` devuelve
      * la ruta absoluta `<filesDir>/recordings/` o el error

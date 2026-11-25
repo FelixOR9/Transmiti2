@@ -1325,6 +1325,72 @@ class StreamEngineImpl(
     }
 
     /**
+     * Reanudación idempotente de la fusión tras kill/reapertura
+     * (3.1.4, J1-c; plan §2.4.9). La pide Dart (`resumeMerge`) tras
+     * reconciliar, solo para grupos cuya fila está en
+     * `finalizing`/`recording` con segmentos utilizables. El motor
+     * solo la lanza si la ÚLTIMA pasada de reconciliación certificó
+     * ese grupo con ≥1 segmento utilizable: sin ese resumen no se
+     * fusiona a ciegas (fail-closed; la fila queda en `finalizing`
+     * y la siguiente reapertura reintenta).
+     *
+     * Los tres estados del plan se resuelven dentro del fusionador
+     * (`SegmentMerger.merge`, J1-a/J1-b) y del evento que emite esta
+     * orquestación, sin ramificar aquí:
+     * - tmp huérfano (`<id>_final.tmp.mp4`): la reconciliación lo
+     *   lista como desconocido y no lo toca; la fusión de reanudación
+     *   lo sobrescribe (es propio y regenerable).
+     * - final existente + fila `finalizing`: el fusionador verifica
+     *   el final y completa sin re-fusionar (`alreadyMerged`).
+     * - sin final + segmentos utilizables: re-fusión desde cero.
+     *
+     * Antes de reintentar se limpia la marca de fusión disparada de
+     * este proceso (`clearMergeTriggered`, J1-b dejó la marca para
+     * esto): un intento anterior en este mismo proceso (stop → fusión
+     * reintentable) no bloquea el reintento. La guarda real contra
+     * duplicados es la reserva del grupo: si la fusión anterior
+     * sigue en curso, la reserva la retiene y este intento no
+     * arranca (devuelve `false`).
+     *
+     * Sin FGS durante la reanudación: al reabrir, la app está en
+     * primer plano y el servicio no corre (el proceso murió o la
+     * parada anterior lo detuvo); arrancar un FGS solo para
+     * reanudar sería un cambio mayor fuera de J1-c. La fusión corre
+     * asíncrona y emite `recording_merged` como tras el stop; si el
+     * proceso muere a mitad, la siguiente reapertura reintenta de
+     * forma idempotente. Por eso `stopReason`/`fgsStopOrigin` son
+     * `null`: el cierre NO emite `service_stopped` por un servicio
+     * que nunca corrió en este proceso (la guarda del helper único
+     * y la comprobación de grabación activa protegen igualmente el
+     * FGS de una grabación nueva en curso).
+     *
+     * Devuelve `true` si se lanzó la fusión. `false` sin fusionar
+     * si: el id está vacío, el grupo no está en el último resumen
+     * de reconciliación o no tiene segmentos utilizables, el id ya
+     * fusionó en este proceso (marca, sin reintento previo), no hay
+     * fusionador, el grupo está activo/reservado, o lanzar falló.
+     * Nunca lanza salvo cancelación.
+     */
+    internal suspend fun resumeMergeAfterReconcile(
+        recordingId: String,
+    ): Boolean {
+        if (recordingId.isEmpty()) return false
+        val reconciled = lastReconciliationSummary?.segments
+            ?.filter { it.recordingId == recordingId }
+            ?: return false
+        val usable = reconciled.filter { it.usable }
+        if (usable.isEmpty()) return false
+        clearMergeTriggered(recordingId)
+        return maybeStartMerge(
+            recordingId = recordingId,
+            segmentIndices = usable.map { it.index },
+            segmentCount = usable.size,
+            stopReason = null,
+            fgsStopOrigin = null,
+        )
+    }
+
+    /**
      * Orquestación de la fusión tras el stop (3.1.4, J1-b; J0.1/J0.2;
      * plan §2.4.1 y §2.4.10). Tras un `stop()` exitoso con ≥1 segmento
      * utilizable, reserva el grupo y lanza la fusión ASÍNCRONA: el
@@ -1354,6 +1420,34 @@ class StreamEngineImpl(
             it.status != SegmentStatus.CORRUPT
         }
         if (!usable) return false
+        return maybeStartMerge(
+            recordingId = recordingId,
+            segmentIndices = result.segments.map { it.index },
+            segmentCount = result.segments.size,
+            stopReason = stopReason,
+            fgsStopOrigin = fgsStopOrigin,
+        )
+    }
+
+    /**
+     * Lanzador común de la fusión asíncrona (J1-b tras el stop,
+     * J1-c en reanudación tras reconciliar): resuelve el ejecutor,
+     * marca el id, reserva el grupo vía `ActiveRecordingRegistry`
+     * (mismo mecanismo que la reconciliación) y lanza
+     * [runMergeAndFinish] en el scope del motor. `segmentIndices` /
+     * `segmentCount` son los índices que la orquestación intentó
+     * fusionar: solo se usan como reserva cuando el fusionador no
+     * los trae (final ya existente verificado, `alreadyMerged`) y
+     * para el `segmentCount` del evento. Nunca lanza salvo
+     * cancelación.
+     */
+    private suspend fun maybeStartMerge(
+        recordingId: String,
+        segmentIndices: List<Int>,
+        segmentCount: Int,
+        stopReason: String?,
+        fgsStopOrigin: String?,
+    ): Boolean {
         val runner: suspend (
             String,
             ((MergeProgress) -> Unit)?,
@@ -1396,8 +1490,8 @@ class StreamEngineImpl(
             scope.launch {
                 runMergeAndFinish(
                     recordingId = recordingId,
-                    stopSegmentIndices = result.segments.map { it.index },
-                    stopSegmentCount = result.segments.size,
+                    stopSegmentIndices = segmentIndices,
+                    stopSegmentCount = segmentCount,
                     token = token,
                     session = session,
                     runner = runner,
@@ -1425,12 +1519,15 @@ class StreamEngineImpl(
     }
 
     /**
-     * Ejecuta una fusión lanzada por [maybeStartMergeAfterStop] y
-     * cierra su ciclo (J1-b): fusiona, registra el resultado en el
-     * sidecar, emite `recording_merged` y —solo cuando es la última
-     * fusión en curso— detiene el FGS vía el helper único. La reserva
-     * del grupo se libera siempre (también al cancelar). Nunca lanza
-     * fuera salvo cancelación: un fallo inesperado del ejecutor
+     * Ejecuta una fusión lanzada por [maybeStartMergeAfterStop] o por
+     * [resumeMergeAfterReconcile] y cierra su ciclo (J1-b): fusiona,
+     * registra el resultado en el sidecar, emite `recording_merged`
+     * y —solo cuando es la última fusión en curso— detiene el FGS vía
+     * el helper único. En reanudación (`stopReason`/`fgsStopOrigin`
+     * `null`) ese cierre no emite `service_stopped`: el servicio no
+     * corría en este proceso tras la reapertura.
+     * La reserva del grupo se libera siempre (también al cancelar).
+     * Nunca lanza fuera salvo cancelación: un fallo inesperado del ejecutor
      * emite `recording_merged` con `status=corrupt` y motivo
      * `muxer_error` para que Dart no espere eternamente; la
      * emisión del evento tampoco tumba el cierre.

@@ -689,4 +689,44 @@ class RecordingReconciliationTest {
                 it.startsWith(".write-test-")
             })
         }
+
+    @Test
+    fun `J1-c tmp de fusion huerfano y final existente van a desconocidos sin tocarse`() =
+        runBlocking {
+            val session = buildSession()
+            // Segmentos utilizables del grupo: la reconciliación los
+            // certifica aunque exista un final (la fusión es un paso
+            // posterior invocado por el controller, J1-c; la
+            // reconciliación en sí no fusiona).
+            fileStore.segmentFile("rec_1", 0).writeText("01234567890")
+            val final = fileStore.finalFile("rec_1")
+            final.writeText("fusionado")
+            val mergeTmp = fileStore.finalStagingFile("rec_1")
+            mergeTmp.writeText("fusion-parcial")
+            fakeVerifier.result = readyVerification()
+            val summary = session.reconcileRecordings()
+            // Los dos archivos de fusión van al cubo desconocido,
+            // sin tocarse: ni se verifican, ni se renombran, ni se
+            // borran (el tmp huérfano lo sobrescribe la fusión de
+            // reanudación; el final lo verifica el fusionador).
+            assertEquals(
+                listOf("rec_1_final.mp4", "rec_1_final.tmp.mp4"),
+                summary.unknownFiles,
+            )
+            assertTrue(final.exists())
+            assertEquals("fusionado", final.readText())
+            assertTrue(mergeTmp.exists())
+            assertEquals("fusion-parcial", mergeTmp.readText())
+            assertFalse(fakeVerifier.verifiedFiles.any {
+                it.contains("_final")
+            })
+            // El segmento sí se certificó: la presencia del final no
+            // bloquea la reconciliación del grupo.
+            assertEquals(1, summary.segments.size)
+            assertEquals(SegmentStatus.READY, summary.segments[0].status)
+            assertEquals(
+                "rec_1_seg000.mp4",
+                summary.segments[0].fileName,
+            )
+        }
 }

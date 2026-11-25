@@ -882,12 +882,45 @@ void main() {
       await tester.pump();
 
       expect(recording.lastRecovery.length, 1);
+      // J1-c: la fila interrumpida con segmentos utilizables queda
+      // en `finalizing` y reanuda la fusión (no `ready` con las
+      // sumas: el `_final.mp4` aún no existe).
       final row = await recordings.byRecordingId(
         'rec_20261118_110000_zz99',
       );
-      expect(row!.status, 'ready');
+      expect(row!.status, 'finalizing');
       expect(row.durationMs, 4400);
       expect(row.sizeBytes, 1600000);
+      expect(
+        service.resumeMergeCalls,
+        <String>['rec_20261118_110000_zz99'],
+      );
+      expect(
+        recording.mergePendingRecordingId,
+        'rec_20261118_110000_zz99',
+      );
+
+      service.emitEvent(<String, Object?>{
+        'type': StreamContract.eventRecordingMerged,
+        'recordingId': 'rec_20261118_110000_zz99',
+        'filePath':
+            '/docs/recordings/rec_20261118_110000_zz99_final.mp4',
+        'status': 'ready',
+        'totalDurationMs': 4410,
+        'totalSizeBytes': 1600500,
+        'segmentCount': 1,
+        'skippedSegments': <int>[],
+        'audioGapSegments': <int>[],
+        'reason': null,
+        'alreadyMerged': false,
+      });
+      await tester.pump();
+      final rowMerged = await recordings.byRecordingId(
+        'rec_20261118_110000_zz99',
+      );
+      expect(rowMerged!.status, 'ready');
+      expect(rowMerged.durationMs, 4410);
+      expect(rowMerged.sizeBytes, 1600500);
     });
 
     testWidgets('el evento recording_error detiene con error', (

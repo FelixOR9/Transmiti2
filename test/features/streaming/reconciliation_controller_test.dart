@@ -133,6 +133,35 @@ void main() {
       );
     }
 
+    /// Evento `recording_merged` (J1-c): fusión reanudada
+    /// completada o abortada. `alreadyMerged = true` simula el
+    /// completado idempotente (el `_final.mp4` ya existía
+    /// verificado y el motor no re-fusionó); las medidas son las
+    /// MEDIDAS del fusionado, distintas a propósito de las sumas de
+    /// los segmentos para probar que la fila toma las medidas.
+    Map<String, Object?> mergedEvent({
+      required String recordingId,
+      String status = 'ready',
+      String? reason,
+      int? totalDurationMs,
+      int? totalSizeBytes,
+      bool alreadyMerged = false,
+    }) {
+      return <String, Object?>{
+        'type': StreamContract.eventRecordingMerged,
+        'recordingId': recordingId,
+        'filePath': '/docs/recordings/${recordingId}_final.mp4',
+        'status': status,
+        'totalDurationMs': totalDurationMs,
+        'totalSizeBytes': totalSizeBytes,
+        'segmentCount': 1,
+        'skippedSegments': <int>[],
+        'audioGapSegments': <int>[],
+        'reason': reason,
+        'alreadyMerged': alreadyMerged,
+      };
+    }
+
     testWidgets('U10 fila ausente se reconstruye desde sidecar + archivos',
         (WidgetTester tester) async {
       await pumpController(tester);
@@ -306,11 +335,42 @@ void main() {
       await tester.pump();
 
       expect(fresh.reconciliationState, ReconciliationState.done);
+      // J1-c: la fila en `recording` con segmentos utilizables NO
+      // se declara `ready` con las sumas: queda en `finalizing` y
+      // se reanuda la fusión.
       final rowAfter = await recordings.byRecordingId(
         'rec_20261118_110000_zz99',
       );
-      expect(rowAfter!.status, 'ready');
+      expect(rowAfter!.status, 'finalizing');
       expect(rowAfter.durationMs, 4400);
+      expect(rowAfter.sizeBytes, 1600000);
+      expect(
+        service.resumeMergeCalls,
+        <String>['rec_20261118_110000_zz99'],
+      );
+      expect(
+        fresh.mergePendingRecordingId,
+        'rec_20261118_110000_zz99',
+      );
+
+      // La fusión reanudada completa la fila con las MEDIDAS del
+      // fusionado (distintas de las sumas a propósito).
+      service.emitEvent(
+        mergedEvent(
+          recordingId: 'rec_20261118_110000_zz99',
+          totalDurationMs: 4410,
+          totalSizeBytes: 1600500,
+        ),
+      );
+      await tester.pump();
+      final rowMerged = await recordings.byRecordingId(
+        'rec_20261118_110000_zz99',
+      );
+      expect(rowMerged!.status, 'ready');
+      expect(rowMerged.durationMs, 4410);
+      expect(rowMerged.sizeBytes, 1600500);
+      expect(fresh.mergePendingRecordingId, isNull);
+      expect(service.resumeMergeCalls.length, 1);
       fresh.detach();
     });
 
@@ -366,11 +426,33 @@ void main() {
 
       expect(recording.reconciliationState, ReconciliationState.done);
       expect(recording.reconciliationError, isNull);
+      // J1-c: tras el reintento la fila queda en `finalizing` y se
+      // reanuda la fusión (no `ready` con las sumas).
       final rowAfter = await recordings.byRecordingId(
         'rec_20261118_110000_zz99',
       );
-      expect(rowAfter!.status, 'ready');
+      expect(rowAfter!.status, 'finalizing');
+      expect(rowAfter.durationMs, 4400);
+      expect(
+        service.resumeMergeCalls,
+        <String>['rec_20261118_110000_zz99'],
+      );
       expect(recording.pendingReconciliationIds, isEmpty);
+
+      service.emitEvent(
+        mergedEvent(
+          recordingId: 'rec_20261118_110000_zz99',
+          totalDurationMs: 4410,
+          totalSizeBytes: 1600500,
+        ),
+      );
+      await tester.pump();
+      final rowMerged = await recordings.byRecordingId(
+        'rec_20261118_110000_zz99',
+      );
+      expect(rowMerged!.status, 'ready');
+      expect(rowMerged.durationMs, 4410);
+      expect(rowMerged.sizeBytes, 1600500);
     });
 
     testWidgets('I6 biblioteca abierta antes de DONE: «Preparando '
@@ -476,8 +558,11 @@ void main() {
       recording.attach();
       await tester.pump();
 
+      // J1-c: `rec_a` (utilizable) queda en `finalizing` con las
+      // sumas como placeholder y reanuda la fusión; `rec_b` (solo
+      // corrupto) pasa a `corrupt` sin reanudar nada.
       final rowA = await recordings.byRecordingId('rec_a');
-      expect(rowA!.status, 'ready');
+      expect(rowA!.status, 'finalizing');
       expect(rowA.durationMs, 5000);
       expect(rowA.sizeBytes, 1500000);
       final rowB = await recordings.byRecordingId('rec_b');
@@ -485,6 +570,24 @@ void main() {
       // `corrupt` no suma duración/tamaño (ningún usable).
       expect(rowB.durationMs, 0);
       expect(rowB.sizeBytes, 0);
+      expect(service.resumeMergeCalls, <String>['rec_a']);
+      expect(recording.mergePendingRecordingId, 'rec_a');
+
+      // La fusión reanudada completa la fila con las MEDIDAS del
+      // fusionado (distintas de las sumas a propósito).
+      service.emitEvent(
+        mergedEvent(
+          recordingId: 'rec_a',
+          totalDurationMs: 5010,
+          totalSizeBytes: 1500200,
+        ),
+      );
+      await tester.pump();
+      final rowAMerged = await recordings.byRecordingId('rec_a');
+      expect(rowAMerged!.status, 'ready');
+      expect(rowAMerged.durationMs, 5010);
+      expect(rowAMerged.sizeBytes, 1500200);
+      expect(recording.mergePendingRecordingId, isNull);
     });
 
     testWidgets('I2/I5 reinicio a mitad de la reconciliación: la '
@@ -512,22 +615,42 @@ void main() {
       recording.detach();
       recording.attach();
       await tester.pump();
+      // J1-c: la primera pasada deja la fila en `finalizing` y
+      // reanuda la fusión (no `ready` con las sumas).
       final first = await recordings.byRecordingId('rec_a');
-      expect(first!.status, 'ready');
+      expect(first!.status, 'finalizing');
+      expect(first.durationMs, 3000);
+      expect(first.sizeBytes, 900000);
       expect(recordings.rows.length, 1);
       expect(recording.orphansReconstructed, 0);
+      expect(service.resumeMergeCalls, <String>['rec_a']);
+
+      service.emitEvent(
+        mergedEvent(
+          recordingId: 'rec_a',
+          totalDurationMs: 3010,
+          totalSizeBytes: 900100,
+        ),
+      );
+      await tester.pump();
+      final merged = await recordings.byRecordingId('rec_a');
+      expect(merged!.status, 'ready');
+      expect(merged.durationMs, 3010);
+      expect(merged.sizeBytes, 900100);
 
       // Segunda pasada con el mismo payload: mismo estado final,
-      // sin duplicar la fila ni re-insertar (huérfanos 0).
+      // sin duplicar la fila ni re-insertar (huérfanos 0) y sin
+      // reanudar la fusión (la fila ya está `ready`).
       recording.detach();
       recording.attach();
       await tester.pump();
       final second = await recordings.byRecordingId('rec_a');
       expect(second!.status, 'ready');
-      expect(second.durationMs, 3000);
-      expect(second.sizeBytes, 900000);
+      expect(second.durationMs, 3010);
+      expect(second.sizeBytes, 900100);
       expect(recordings.rows.length, 1);
       expect(recording.orphansReconstructed, 0);
+      expect(service.resumeMergeCalls, <String>['rec_a']);
     });
 
     testWidgets('I3 muerte entre segmentos: los .mp4 cerrados se '
@@ -563,10 +686,27 @@ void main() {
       recording.attach();
       await tester.pump();
 
+      // J1-c: la fila no queda en `recording`: pasa a `finalizing`
+      // con las sumas como placeholder y reanuda la fusión.
       final row = await recordings.byRecordingId('rec_a');
-      expect(row!.status, 'ready');
+      expect(row!.status, 'finalizing');
       expect(row.durationMs, 120000);
       expect(row.sizeBytes, 37500000);
+      expect(service.resumeMergeCalls, <String>['rec_a']);
+      expect(recording.mergePendingRecordingId, 'rec_a');
+
+      service.emitEvent(
+        mergedEvent(
+          recordingId: 'rec_a',
+          totalDurationMs: 120040,
+          totalSizeBytes: 37500100,
+        ),
+      );
+      await tester.pump();
+      final rowMerged = await recordings.byRecordingId('rec_a');
+      expect(rowMerged!.status, 'ready');
+      expect(rowMerged.durationMs, 120040);
+      expect(rowMerged.sizeBytes, 37500100);
     });
 
     testWidgets('I4 segunda grabación intacta: la fila ready no se '
@@ -607,6 +747,182 @@ void main() {
       expect(row.durationMs, 9999);
       expect(row.sizeBytes, 111);
       expect(recordings.rows.length, 1);
+      // J1-c: la fila ya `ready` no reanuda ninguna fusión.
+      expect(service.resumeMergeCalls, isEmpty);
+    });
+
+    testWidgets('J1-c fila finalizing con final ya verificado: solo '
+        'completa la fila, sin re-fusionar', (WidgetTester tester) async {
+      await pumpController(tester);
+      await recordings.insertRecording(
+        recordingId: 'rec_a',
+        resolution: '720p',
+        fps: 30,
+        videoBitrateBps: 2500000,
+        nowMs: now,
+      );
+      // Fila en `finalizing` (kill entre el renombre del `_final`
+      // y la actualización SQLite, o fusión reintentable previa).
+      await recordings.updateOnStop(
+        recordingId: 'rec_a',
+        status: 'finalizing',
+        durationMs: 5000,
+        sizeBytes: 1500000,
+        nowMs: now,
+      );
+      recording.detach();
+      service.reconciliationResult = doneResult(
+        segments: <RecoveredSegmentInfo>[
+          segment(
+            recordingId: 'rec_a',
+            index: 0,
+            status: 'ready',
+            durationMs: 3000,
+            sizeBytes: 900000,
+          ),
+          segment(
+            recordingId: 'rec_a',
+            index: 1,
+            status: 'partial',
+            durationMs: 2000,
+            sizeBytes: 600000,
+          ),
+        ],
+      );
+      recording.attach();
+      await tester.pump();
+
+      // La fila sigue en `finalizing` y se pide la reanudación UNA
+      // sola vez; el motor decide dentro si re-fusiona o completa.
+      final row = await recordings.byRecordingId('rec_a');
+      expect(row!.status, 'finalizing');
+      expect(service.resumeMergeCalls, <String>['rec_a']);
+      expect(recording.mergePendingRecordingId, 'rec_a');
+
+      // El motor encontró el `_final.mp4` ya verificado
+      // (`alreadyMerged`): completa sin re-fusionar, con las
+      // medidas del final existente.
+      service.emitEvent(
+        mergedEvent(
+          recordingId: 'rec_a',
+          totalDurationMs: 5010,
+          totalSizeBytes: 1500200,
+          alreadyMerged: true,
+        ),
+      );
+      await tester.pump();
+      final rowMerged = await recordings.byRecordingId('rec_a');
+      expect(rowMerged!.status, 'ready');
+      expect(rowMerged.durationMs, 5010);
+      expect(rowMerged.sizeBytes, 1500200);
+      expect(recording.mergePendingRecordingId, isNull);
+      expect(recording.lastMerged!.alreadyMerged, isTrue);
+      // Sin segunda petición de fusión: no se re-fusionó.
+      expect(service.resumeMergeCalls, <String>['rec_a']);
+    });
+
+    testWidgets('J1-c fila finalizing sin segmentos utilizables pasa '
+        'a corrupt sin reanudar', (WidgetTester tester) async {
+      await pumpController(tester);
+      await recordings.insertRecording(
+        recordingId: 'rec_a',
+        resolution: '720p',
+        fps: 30,
+        videoBitrateBps: 2500000,
+        nowMs: now,
+      );
+      await recordings.updateOnStop(
+        recordingId: 'rec_a',
+        status: 'finalizing',
+        durationMs: 1000,
+        sizeBytes: 400000,
+        nowMs: now,
+      );
+      recording.detach();
+      service.reconciliationResult = doneResult(
+        segments: <RecoveredSegmentInfo>[
+          segment(
+            recordingId: 'rec_a',
+            index: 0,
+            status: 'corrupt',
+            durationMs: 1000,
+            sizeBytes: 400000,
+          ),
+        ],
+      );
+      recording.attach();
+      await tester.pump();
+
+      final row = await recordings.byRecordingId('rec_a');
+      expect(row!.status, 'corrupt');
+      expect(row.durationMs, 0);
+      expect(row.sizeBytes, 0);
+      expect(service.resumeMergeCalls, isEmpty);
+      expect(recording.mergePendingRecordingId, isNull);
+    });
+
+    testWidgets('J1-c fallo del canal en resumeMerge: la fila queda '
+        'en finalizing y la siguiente reapertura reintenta',
+        (WidgetTester tester) async {
+      await pumpController(tester);
+      await recordings.insertRecording(
+        recordingId: 'rec_a',
+        resolution: '720p',
+        fps: 30,
+        videoBitrateBps: 2500000,
+        nowMs: now,
+      );
+      recording.detach();
+      service.reconciliationResult = doneResult(
+        segments: <RecoveredSegmentInfo>[
+          segment(
+            recordingId: 'rec_a',
+            index: 0,
+            status: 'ready',
+            durationMs: 3000,
+            sizeBytes: 900000,
+          ),
+        ],
+      );
+      service.resumeMergeError = const StreamingException(
+        StreamContract.recordingsChannelContractError,
+      );
+      recording.attach();
+      await tester.pump();
+
+      // El fallo del canal no tumba la reconciliación: la fila
+      // queda en `finalizing` (fusión pendiente) y el grupo no
+      // queda marcado como pendiente de reconciliación.
+      expect(recording.reconciliationState, ReconciliationState.done);
+      final row = await recordings.byRecordingId('rec_a');
+      expect(row!.status, 'finalizing');
+      expect(service.resumeMergeCalls, <String>['rec_a']);
+      expect(recording.mergePendingRecordingId, 'rec_a');
+      expect(recording.pendingReconciliationIds, isEmpty);
+
+      // Siguiente reapertura: se vuelve a pedir la reanudación.
+      service.resumeMergeError = null;
+      recording.detach();
+      recording.attach();
+      await tester.pump();
+      expect(
+        service.resumeMergeCalls,
+        <String>['rec_a', 'rec_a'],
+      );
+      final rowRetry = await recordings.byRecordingId('rec_a');
+      expect(rowRetry!.status, 'finalizing');
+
+      service.emitEvent(
+        mergedEvent(
+          recordingId: 'rec_a',
+          totalDurationMs: 3010,
+          totalSizeBytes: 900100,
+        ),
+      );
+      await tester.pump();
+      final rowMerged = await recordings.byRecordingId('rec_a');
+      expect(rowMerged!.status, 'ready');
+      expect(rowMerged.durationMs, 3010);
     });
   });
 }
